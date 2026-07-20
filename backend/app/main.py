@@ -43,12 +43,12 @@ def _validate_scene_request(scene: BenchmarkScene):
 
 @app.get("/api/health")
 def health():
-    cfg = settings.current_llm()
+    cfg = settings.public_llm()
     return {
         "status": "ok",
         "provider": cfg["provider"],
         "model": cfg["model"],
-        "llm_configured": bool(cfg.get("api_key")),
+        "llm_configured": cfg["configured"],
         "system": "MARS",
         "mars_version": mars_version,
     }
@@ -57,7 +57,7 @@ def health():
 @app.get("/api/providers")
 def providers():
     return {
-        "current": settings.current_llm(),
+        "current": settings.public_llm(),
         "available": ["openai", "doubao", "glm", "gemini", "custom"],
         "note": "Use backend/.env to switch provider. The app calls the selected endpoint through the OpenAI-compatible client.",
     }
@@ -68,7 +68,6 @@ def architecture():
     return {
         "system": "MARS",
         "core_version": mars_version,
-        "schema_version": "mars.v1",
         "workflow": "validated DAG with blocked/ready/running/terminal lifecycle",
         "runtime": "in_process_simulation",
         "transport_interfaces": ["in_memory"],

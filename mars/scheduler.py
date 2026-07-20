@@ -37,7 +37,7 @@ def allowed_nodes(task: TaskInstance, nodes: Iterable[NodeSnapshot]) -> list[Nod
     if source is None:
         return []
     if task.spec.task_class is TaskClass.LOCAL_SAFETY:
-        return [source] if source.safety_capable else []
+        return [source] if source.kind is NodeKind.ROBOT and source.safety_capable else []
     edges = [node for node in online if node.kind is NodeKind.EDGE]
     if task.spec.task_class is TaskClass.REALTIME_OFFLOADABLE:
         return [source, *edges]
@@ -58,8 +58,12 @@ def estimate_candidate(
 ) -> CandidateEstimate:
     if not node.online:
         return _infeasible(node, "node_offline")
-    if task.spec.task_class is TaskClass.LOCAL_SAFETY and node.node_id != task.source_node_id:
-        return _infeasible(node, "local_safety_must_run_on_source_orin")
+    if task.spec.task_class is TaskClass.LOCAL_SAFETY and (
+        node.node_id != task.source_node_id
+        or node.kind is not NodeKind.ROBOT
+        or not node.safety_capable
+    ):
+        return _infeasible(node, "local_safety_requires_safety_capable_source_robot")
 
     util_penalty = 1.0 + 2.2 * max(node.cpu_util, node.gpu_util, node.memory_util)
     profile = profiles.lookup(task.spec.task_type, node.kind) if profiles is not None else None

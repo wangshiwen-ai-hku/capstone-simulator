@@ -37,8 +37,8 @@ control plane.
 
 | Class | Typical work | Placement contract |
 |---|---|---|
-| `local_safety` | obstacle avoidance, emergency control | Must run on its source Orin |
-| `realtime_offloadable` | YOLO, segmentation, path planning, verification | May run on source Orin or edge |
+| `local_safety` | obstacle avoidance, emergency control | Must run on its safety-capable source robot |
+| `realtime_offloadable` | YOLO, segmentation, path planning, verification | May run on its source robot or edge |
 | `edge_heavy` | VLA/LLM, map fusion, compression and heavy planning | Prefer edge; local fallback only when `allow_local_fallback=true` |
 
 Task categories remain detailed benchmark labels. `task_class` is the stable
@@ -69,10 +69,11 @@ Open `http://localhost:5173`. Select `dag_deadline` for the new scheduler.
 
 ### Tests
 
-After installing the backend requirements, run the core, transport, and web
+Install the development requirements, then run the core, transport, and web
 adapter tests from the repository root:
 
 ```bash
+pip install -r backend/requirements-dev.txt
 python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 

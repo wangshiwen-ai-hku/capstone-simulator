@@ -3,3 +3,4 @@
 
 # Test runner for local development and CI.
 pytest==8.3.4
+httpx2>=2.7,<3

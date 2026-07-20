@@ -16,7 +16,7 @@ class TaskClass(str, enum.Enum):
 
     LOCAL_SAFETY
         Hard real-time control/safety work which must execute on the source
-        Orin (for example obstacle avoidance).
+        safety-capable robot (for example obstacle avoidance).
     REALTIME_OFFLOADABLE
         Latency-sensitive inference which may run locally or at the edge (for
         example YOLO object detection).

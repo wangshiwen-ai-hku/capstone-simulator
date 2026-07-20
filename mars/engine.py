@@ -92,15 +92,18 @@ def run_workflow_simulation(
     sequence = 0
     logs: list[str] = []
     total_bandwidth_mb = 0.0
+    profile_sources_used: set[str] = set()
+    current_time_ms = 0.0
+
+    def ready_at(task: TaskInstance) -> float:
+        parents = index.parents[task.task_id]
+        parent_time = max((completion_time.get(parent, 0.0) for parent in parents), default=0.0)
+        return max(task.arrival_time_ms, parent_time)
 
     while manager.unresolved():
         ready = manager.ready()
-        if ready:
-            def ready_at(task: TaskInstance) -> float:
-                parents = index.parents[task.task_id]
-                parent_time = max((completion_time.get(parent, 0.0) for parent in parents), default=0.0)
-                return max(task.arrival_time_ms, parent_time)
-
+        arrived = [task for task in ready if ready_at(task) <= current_time_ms]
+        if arrived:
             def ready_key(task: TaskInstance) -> tuple[float, float, int, str]:
                 at = ready_at(task)
                 slack = task.deadline_time_ms - at - critical_tail[task.task_id]
@@ -108,8 +111,9 @@ def run_workflow_simulation(
                     return (at, slack, -task.priority, task.task_id)
                 return (at, 0.0, -task.priority, task.task_id)
 
-            for task in sorted(ready, key=ready_key):
-                at = ready_at(task)
+            for task in sorted(arrived, key=ready_key):
+                released_at = ready_at(task)
+                dispatch_at = max(released_at, current_time_ms)
                 artifacts = [
                     artifact
                     for parent in index.parents[task.task_id]
@@ -118,7 +122,7 @@ def run_workflow_simulation(
                 assignment = choose_assignment(
                     task,
                     algorithm=algorithm,
-                    ready_time_ms=at,
+                    ready_time_ms=dispatch_at,
                     node_available=node_available,
                     nodes=node_by_id,
                     parent_artifacts=artifacts,
@@ -128,7 +132,7 @@ def run_workflow_simulation(
                 manager.mark_running(task.task_id)
                 if not assignment.target_node_id:
                     sequence += 1
-                    heapq.heappush(events, (at, sequence, task.task_id, False, assignment))
+                    heapq.heappush(events, (dispatch_at, sequence, task.task_id, False, assignment))
                     continue
 
                 jitter = max(0.75, rng.gauss(1.0, network_jitter * 0.35))
@@ -152,11 +156,15 @@ def run_workflow_simulation(
                 node_available[assignment.target_node_id] = finish_ms
                 busy_by_node[assignment.target_node_id] += compute_ms
                 node_by_id[assignment.target_node_id] = apply_load(node_by_id[assignment.target_node_id], task)
+                target = node_by_id[assignment.target_node_id]
+                selected_profile = profiles.lookup(task.spec.task_type, target.kind) if profiles else None
+                profile_sources_used.add(
+                    selected_profile.provenance if selected_profile else "demand_formula_fallback"
+                )
                 if assignment.target_node_id != task.source_node_id:
                     total_bandwidth_mb += sum(a.size_mb for a in artifacts) if artifacts else task.spec.input_size_mb
 
                 deadline_missed = finish_ms > task.deadline_time_ms
-                target = node_by_id[assignment.target_node_id]
                 thermal_penalty = 0.2 if target.temperature_c > 93.0 else 0.0
                 network_penalty = 0.04 if assignment.communication_ms > task.spec.latency_budget_ms * 0.5 else 0.0
                 probability = max(
@@ -179,7 +187,7 @@ def run_workflow_simulation(
                     priority=task.priority,
                     start_time_ms=round(start_ms, 2),
                     finish_time_ms=round(finish_ms, 2),
-                    queue_delay_ms=round(max(0.0, start_ms - at), 2),
+                    queue_delay_ms=round(max(0.0, start_ms - released_at), 2),
                     compute_time_ms=round(compute_ms, 2),
                     communication_time_ms=round(communication_ms, 2),
                     total_latency_ms=round(finish_ms - task.arrival_time_ms, 2),
@@ -193,10 +201,16 @@ def run_workflow_simulation(
                 )
             continue
 
+        next_arrival_ms = min((ready_at(task) for task in ready), default=float("inf"))
+        next_completion_ms = events[0][0] if events else float("inf")
+        if next_arrival_ms < next_completion_ms:
+            current_time_ms = max(current_time_ms, next_arrival_ms)
+            continue
         if not events:
-            raise RuntimeError("workflow is unresolved but has neither ready tasks nor completion events")
+            raise RuntimeError("workflow is unresolved but has neither arrivals nor completion events")
 
         finish_ms, _, task_id, ok, assignment = heapq.heappop(events)
+        current_time_ms = max(current_time_ms, finish_ms)
         if manager.state_of(task_id) is TaskState.SKIPPED:
             continue
         task = manager.get(task_id)
@@ -244,7 +258,7 @@ def run_workflow_simulation(
     energies = [record.energy_j for record in finished_records]
     makespan = max((record.finish_time_ms for record in finished_records), default=0.0)
     succeeded = sum(record.state == TaskState.SUCCEEDED.value for record in ordered_records)
-    missed = sum(record.deadline_missed or not record.success for record in ordered_records)
+    missed = sum(record.deadline_missed for record in ordered_records)
     offloaded = sum(record.mode == "edge" for record in ordered_records)
     safety_violations = sum(
         record.task_class == TaskClass.LOCAL_SAFETY.value
@@ -309,8 +323,15 @@ def run_workflow_simulation(
         },
         transport={
             "active": "in_process_simulation",
-            "schema_version": "mars.v1",
-            "profile_source": "synthetic_placeholder" if profiles is not None else "demand_formula_fallback",
+            "profile_source": (
+                next(iter(profile_sources_used))
+                if len(profile_sources_used) == 1
+                else "mixed"
+                if profile_sources_used
+                else "not_used"
+            ),
+            "profile_sources": sorted(profile_sources_used),
+            "profile_catalog_provenance": profiles.provenance if profiles is not None else "unavailable",
         },
     )
 
@@ -334,7 +355,7 @@ def _empty_record(task: TaskInstance, *, state: TaskState, reason: str) -> Simul
         communication_time_ms=0.0,
         total_latency_ms=0.0,
         energy_j=0.0,
-        deadline_missed=state in {TaskState.TIMEOUT, TaskState.FAILED, TaskState.SKIPPED, TaskState.DROPPED},
+        deadline_missed=state is TaskState.TIMEOUT,
         success=False,
         state=state.value,
         reason=reason,

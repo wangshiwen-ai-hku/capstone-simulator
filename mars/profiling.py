@@ -36,6 +36,8 @@ class ProfileCatalog:
     def __init__(self, profiles: list[ExecutionProfile]) -> None:
         self.profiles = tuple(profiles)
         self._items = {(item.task_type, item.node_kind): item for item in profiles}
+        sources = {item.provenance.strip() or "unknown" for item in profiles}
+        self.provenance = next(iter(sources)) if len(sources) == 1 else ("mixed" if sources else "empty")
 
     def lookup(self, task_type: str, node_kind: NodeKind) -> ExecutionProfile | None:
         return self._items.get((task_type, node_kind))

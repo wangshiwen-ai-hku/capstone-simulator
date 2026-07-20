@@ -50,11 +50,11 @@ The JSON schema must match the following high-level fields:
   "stressors": [string],
   "success_criteria": [string]
 }
-Make the benchmark useful for comparing rule-based, greedy-cost, ADMM or primal-dual scheduling.
+Make the benchmark useful for comparing DAG-deadline, rule-based, greedy-cost, local-first and edge-first scheduling.
 Include heavy test cases: similar-task conflicts, priority differences, long chains, network bottlenecks, local fallback.
 Dependencies must reference tasks in the same response and form a valid directed acyclic graph.
-Use exactly these workload semantics: local_safety must stay on its source Orin;
-realtime_offloadable includes YOLO/perception and may run on Orin or edge;
+Use exactly these workload semantics: local_safety must stay on its safety-capable source robot;
+realtime_offloadable includes YOLO/perception and may run on its source robot or edge;
 edge_heavy prefers the edge for VLA/LLM/map/data-heavy work.
 """
 

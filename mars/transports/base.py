@@ -14,7 +14,6 @@ class NodeRegistration:
     kind: NodeKind
     architecture: str
     capabilities: tuple[str, ...]
-    schema_version: str = "mars.v1"
 
 
 @dataclass(frozen=True)

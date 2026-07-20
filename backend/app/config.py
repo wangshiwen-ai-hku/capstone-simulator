@@ -53,6 +53,15 @@ class Settings(BaseSettings):
             return {"provider": provider, "api_key": self.custom_api_key, "base_url": self.custom_base_url, "model": self.custom_model}
         return {"provider": "openai", "api_key": self.openai_api_key, "base_url": self.openai_base_url, "model": self.openai_model}
 
+    def public_llm(self) -> dict[str, str | bool]:
+        """Return provider status without exposing credentials or private endpoints."""
+        config = self.current_llm()
+        return {
+            "provider": str(config["provider"]),
+            "model": str(config["model"]),
+            "configured": bool(config.get("api_key")),
+        }
+
 
 @lru_cache
 def get_settings() -> Settings:

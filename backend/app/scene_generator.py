@@ -182,6 +182,6 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             "success_rate >= 0.95 for easy/medium, >= 0.85 for hard/stress",
             "P95 latency below workload latency budgets where possible",
             "no local-safety task is offloaded from its source robot",
-            "lower total cost than local-first and edge-first baselines",
+            "deadline, latency, energy and placement metrics are reported for the run",
         ],
     )

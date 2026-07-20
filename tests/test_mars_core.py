@@ -16,7 +16,7 @@ from mars.models import (
     WorkflowSpec,
 )
 from mars.scheduler import allowed_nodes, estimate_candidate
-from mars.profiling import load_default_catalog
+from mars.profiling import ExecutionProfile, ProfileCatalog, load_default_catalog
 
 
 def task(
@@ -27,12 +27,15 @@ def task(
     compute: float = 1.0,
     accuracy: float = 1.0,
     allow_local_fallback: bool = True,
+    source_node_id: str = "robot_1",
+    arrival: float = 0.0,
+    deadline: float = 5000.0,
 ) -> TaskInstance:
     return TaskInstance(
         task_id=task_id,
         workflow_id="wf",
         name=task_id,
-        source_node_id="robot_1",
+        source_node_id=source_node_id,
         spec=TaskSpec(
             task_type=task_id,
             task_class=task_class,
@@ -44,7 +47,8 @@ def task(
             allow_local_fallback=allow_local_fallback,
         ),
         dependency_task_ids=dependencies,
-        deadline_time_ms=5000,
+        arrival_time_ms=arrival,
+        deadline_time_ms=deadline,
         expected_accuracy=accuracy,
     )
 
@@ -113,9 +117,38 @@ class TaskManagerTests(unittest.TestCase):
 
 
 class PlacementTests(unittest.TestCase):
-    def test_local_safety_can_only_run_on_source_orin(self):
+    def test_local_safety_can_only_run_on_source_robot(self):
         candidates = allowed_nodes(task("avoid", TaskClass.LOCAL_SAFETY), nodes())
         self.assertEqual([candidate.node_id for candidate in candidates], ["robot_1"])
+
+    def test_local_safety_rejects_edge_even_if_marked_safety_capable(self):
+        edge = NodeSnapshot(
+            "edge_1",
+            NodeKind.EDGE,
+            5,
+            4,
+            64,
+            1000,
+            5,
+            power_w=120,
+            safety_capable=True,
+        )
+        item = task(
+            "avoid",
+            TaskClass.LOCAL_SAFETY,
+            source_node_id="edge_1",
+        )
+        self.assertEqual(allowed_nodes(item, [edge]), [])
+        estimate = estimate_candidate(
+            item,
+            edge,
+            ready_time_ms=0,
+            node_available_ms=0,
+            nodes={edge.node_id: edge},
+            parent_artifacts=(),
+        )
+        self.assertFalse(estimate.feasible)
+        self.assertEqual(estimate.reason, "local_safety_requires_safety_capable_source_robot")
 
     def test_yolo_class_can_use_robot_or_edge(self):
         candidates = allowed_nodes(task("yolo", TaskClass.REALTIME_OFFLOADABLE), nodes())
@@ -174,6 +207,98 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(set(report.task_class_summary), {item.value for item in TaskClass})
         avoid = next(result for result in report.task_results if result.task_id == "avoid")
         self.assertEqual(avoid.target_node_id, "robot_1")
+
+    def test_future_arrival_does_not_reserve_node_ahead_of_released_child(self):
+        workflow = WorkflowSpec(
+            "wf",
+            (
+                task("future", arrival=1000),
+                task("root"),
+                task("child", dependencies=("root",)),
+            ),
+        )
+        report = run_workflow_simulation(workflow, [nodes()[0]], seed=2)
+        result = {item.task_id: item for item in report.task_results}
+        self.assertGreaterEqual(result["future"].start_time_ms, 1000)
+        self.assertLess(result["child"].finish_time_ms, result["future"].start_time_ms)
+
+    def test_early_execution_failure_is_not_a_deadline_miss(self):
+        workflow = WorkflowSpec("wf", (task("failure", accuracy=0.0, deadline=5000),))
+        report = run_workflow_simulation(
+            workflow,
+            [nodes()[0]],
+            seed=2,
+            network_jitter=0,
+            resource_noise=0,
+        )
+        result = report.task_results[0]
+        self.assertFalse(result.success)
+        self.assertFalse(result.deadline_missed)
+        self.assertEqual(report.metrics["deadline_miss_rate"], 0.0)
+
+    def test_report_preserves_measured_profile_provenance(self):
+        catalog = ProfileCatalog(
+            [
+                ExecutionProfile(
+                    task_type="measured",
+                    task_class=TaskClass.REALTIME_OFFLOADABLE,
+                    node_kind=NodeKind.ROBOT,
+                    model_variant="fixture",
+                    input_shape="1x3x640x640",
+                    precision="fp16",
+                    batch_size=1,
+                    p50_ms=8,
+                    p95_ms=10,
+                    p99_ms=12,
+                    throughput_per_s=100,
+                    peak_memory_mb=512,
+                    energy_j=1.2,
+                    output_size_mb=0.1,
+                    provenance="measured_lab",
+                )
+            ]
+        )
+        report = run_workflow_simulation(
+            WorkflowSpec("wf", (task("measured"),)),
+            [nodes()[0]],
+            profiles=catalog,
+            seed=2,
+        )
+        self.assertEqual(catalog.provenance, "measured_lab")
+        self.assertEqual(report.transport["profile_source"], "measured_lab")
+        self.assertEqual(report.transport["profile_catalog_provenance"], "measured_lab")
+
+    def test_report_identifies_formula_fallback_when_catalog_row_is_missing(self):
+        catalog = ProfileCatalog(
+            [
+                ExecutionProfile(
+                    task_type="other",
+                    task_class=TaskClass.REALTIME_OFFLOADABLE,
+                    node_kind=NodeKind.ROBOT,
+                    model_variant="fixture",
+                    input_shape="1x3x640x640",
+                    precision="fp16",
+                    batch_size=1,
+                    p50_ms=8,
+                    p95_ms=10,
+                    p99_ms=12,
+                    throughput_per_s=100,
+                    peak_memory_mb=512,
+                    energy_j=1.2,
+                    output_size_mb=0.1,
+                    provenance="measured_lab",
+                )
+            ]
+        )
+        report = run_workflow_simulation(
+            WorkflowSpec("wf", (task("unprofiled"),)),
+            [nodes()[0]],
+            profiles=catalog,
+            seed=2,
+        )
+        self.assertEqual(report.transport["profile_source"], "demand_formula_fallback")
+        self.assertEqual(report.transport["profile_sources"], ["demand_formula_fallback"])
+        self.assertEqual(report.transport["profile_catalog_provenance"], "measured_lab")
 
 
 if __name__ == "__main__":
