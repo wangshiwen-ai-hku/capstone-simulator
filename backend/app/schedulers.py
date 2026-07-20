@@ -1,3 +1,10 @@
+"""Deprecated v1 per-task schedulers.
+
+Kept only for downstream imports.  The API now uses ``edgesched.scheduler`` so
+that DAG readiness, task-class constraints and artifact locality cannot be
+bypassed by a legacy single-task decision.
+"""
+
 import logging
 from typing import Dict, List, Tuple
 import httpx

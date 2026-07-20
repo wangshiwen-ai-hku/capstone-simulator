@@ -23,6 +23,9 @@ The JSON schema must match the following high-level fields:
   "natural_language_description": string,
   "scenario_type": string,
   "difficulty": "easy" | "medium" | "hard" | "stress",
+  "workflow_id": string,
+  "workflow_deadline_ms": number,
+  "failure_policy": "skip_descendants" | "fail_fast",
   "nodes": [
     {"id": string, "kind": "robot"|"edge"|"cloud", "display_name": string,
      "cpu_capacity": number, "gpu_capacity": number, "memory_gb": number,
@@ -35,19 +38,24 @@ The JSON schema must match the following high-level fields:
   ],
   "tasks": [
     {"id": string, "name": string, "source_robot_id": string, "task_type": string,
+     "task_class": "local_safety"|"realtime_offloadable"|"edge_heavy",
      "priority": integer 1-5, "compute_demand": number, "gpu_demand": number,
      "latency_budget_ms": number, "safety_level": integer 1-5,
-     "model_requirement": string, "data_size_mb": number,
+     "model_requirement": string, "data_size_mb": number, "output_size_mb": number,
      "bandwidth_requirement_mbps": number, "energy_budget_j": number,
      "fallback_policy": "local_only"|"edge_preferred"|"local_preferred"|"any",
      "result_verification": string, "arrival_time_ms": number, "deadline_ms": number,
-     "dependencies": [string], "expected_accuracy": number}
+     "dependencies": [string], "stage_index": integer, "expected_accuracy": number}
   ],
   "stressors": [string],
   "success_criteria": [string]
 }
 Make the benchmark useful for comparing rule-based, greedy-cost, ADMM or primal-dual scheduling.
 Include heavy test cases: similar-task conflicts, priority differences, long chains, network bottlenecks, local fallback.
+Dependencies must reference tasks in the same response and form a valid directed acyclic graph.
+Use exactly these workload semantics: local_safety must stay on its source Orin;
+realtime_offloadable includes YOLO/perception and may run on Orin or edge;
+edge_heavy prefers the edge for VLA/LLM/map/data-heavy work.
 """
 
 
@@ -81,6 +89,8 @@ Important domain requirements:
 - Robot nodes are Jetson Orin-like and can execute local inference and safety tasks.
 - Edge nodes are PC/control-plane-like and can run heavier VLA/LLM/VLM workloads.
 - Use workload abstraction fields: task_type, compute_demand, latency_budget, safety_level, model_requirement, data_size, bandwidth_requirement, energy_budget, fallback_policy, result_verification.
+- Build per-robot DAG pipelines with explicit dependencies and stage_index. Never emit a cycle or a missing dependency.
+- Classify every task into local_safety, realtime_offloadable, or edge_heavy using the semantics above.
 - Include realistic initial resources: CPU/GPU/memory utilization, temperature, power, network latency.
 - Keep numeric values plausible and internally consistent.
 """

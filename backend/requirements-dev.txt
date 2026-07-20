@@ -1,0 +1,5 @@
+# Development dependencies extend the complete runtime environment.
+-r requirements.txt
+
+# Test runner for local development and CI.
+pytest==8.3.4

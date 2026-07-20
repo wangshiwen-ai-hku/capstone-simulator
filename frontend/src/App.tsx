@@ -5,7 +5,13 @@ import { TASK_CATEGORIES } from './types';
 
 const scenarioOptions: ScenarioType[] = ['warehouse', 'hospital', 'campus', 'factory', 'disaster', 'custom'];
 const difficultyOptions: Difficulty[] = ['easy', 'medium', 'hard', 'stress'];
-const algorithmOptions: Algorithm[] = ['rule_based', 'local_first', 'edge_first', 'greedy_cost', 'external'];
+const algorithmOptions: Algorithm[] = ['dag_deadline', 'rule_based', 'local_first', 'edge_first', 'greedy_cost', 'external'];
+
+const taskClassLabels: Record<string, string> = {
+  local_safety: '端侧安全关键',
+  realtime_offloadable: '可卸载实时推理',
+  edge_heavy: '边缘优先重计算',
+};
 
 function pct(x: number) {
   return `${(x * 100).toFixed(1)}%`;
@@ -25,13 +31,17 @@ function metricLabel(key: string) {
     makespan_ms: 'Makespan',
     edge_offload_ratio: 'Offload',
     safety_violation_count: 'Safety Violations',
+    skipped_task_count: 'Skipped',
+    workflow_success_rate: 'Workflow Success',
+    critical_path_ms: 'Critical Path',
+    dag_depth: 'DAG Depth',
   };
   return map[key] ?? key;
 }
 
 function formatMetric(key: string, value: number) {
   if (key.includes('rate') || key.includes('ratio')) return pct(value);
-  if (key.includes('latency') || key.includes('makespan')) return `${value.toFixed(1)} ms`;
+  if (key.includes('latency') || key.includes('makespan') || key.includes('critical_path')) return `${value.toFixed(1)} ms`;
   if (key.includes('energy')) return `${value.toFixed(1)} J`;
   if (key.includes('bandwidth')) return `${value.toFixed(1)} MB`;
   return `${value}`;
@@ -46,18 +56,20 @@ export default function App() {
   const [difficulty, setDifficulty] = useState<Difficulty>('medium');
   const [useLlm, setUseLlm] = useState(true);
   const [seed, setSeed] = useState(7);
-  const [taskCategories, setTaskCategories] = useState<TaskCategory[]>(['object_detection', 'path_planning', 'vla_inference']);
-  const [algorithm, setAlgorithm] = useState<Algorithm>('greedy_cost');
+  const [taskCategories, setTaskCategories] = useState<TaskCategory[]>(['obstacle_avoidance', 'object_detection', 'path_planning', 'vla_inference']);
+  const [algorithm, setAlgorithm] = useState<Algorithm>('dag_deadline');
   const [externalSchedulerUrl, setExternalSchedulerUrl] = useState('');
   const [scene, setScene] = useState<BenchmarkScene | null>(null);
   const [result, setResult] = useState<SimulationResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<'overview' | 'tasks' | 'json' | 'logs'>('overview');
+  const [tab, setTab] = useState<'overview' | 'dag' | 'tasks' | 'json' | 'logs'>('overview');
 
   useEffect(() => {
     health()
-      .then((h) => setProviderInfo(`${h.provider}/${h.model} · LLM ${h.llm_configured ? 'configured' : 'fallback generator'}`))
+      .then((h) => setProviderInfo(
+        `edgesched ${h.edgesched_version} · in-memory transport · LLM ${h.llm_configured ? 'configured' : 'fallback'}`,
+      ))
       .catch((e) => setProviderInfo(`backend unavailable: ${e.message}`));
   }, []);
 
@@ -115,8 +127,8 @@ export default function App() {
       <header className="hero">
         <div>
           <p className="eyebrow">Capstone · Multi-Agent Robot Scheduling</p>
-          <h1>多机器人模拟环境 / Benchmark 任务生成器</h1>
-          <p className="subtitle">用 LLM 或离线规则生成真实场景，接入调度算法，评估鲁棒性、延迟、能耗、带宽和成功率。</p>
+          <h1>端—边 DAG 调度与机器人 Benchmark</h1>
+          <p className="subtitle">统一 edgesched 控制内核、DAG 工作流与三类任务约束，评估延迟、能耗、数据移动和工作流成功率。</p>
         </div>
         <div className="status-pill">{providerInfo}</div>
       </header>
@@ -180,7 +192,10 @@ export default function App() {
             {algorithmOptions.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
           {algorithm === 'external' && (
-            <input value={externalSchedulerUrl} onChange={(e) => setExternalSchedulerUrl(e.target.value)} placeholder="http://localhost:9000/schedule" />
+            <>
+              <input value={externalSchedulerUrl} onChange={(e) => setExternalSchedulerUrl(e.target.value)} placeholder="v2 workflow-aware adapter URL" />
+              <p className="control-note">v1 单任务回调已弃用；当前会安全回退到 DAG deadline 策略。</p>
+            </>
           )}
           <button className="secondary" onClick={onSimulate} disabled={!scene || loading}>运行仿真 / 评估</button>
         </aside>
@@ -199,12 +214,14 @@ export default function App() {
               </div>
               <nav className="tabs">
                 <button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>概览</button>
+                <button className={tab === 'dag' ? 'active' : ''} onClick={() => setTab('dag')}>DAG</button>
                 <button className={tab === 'tasks' ? 'active' : ''} onClick={() => setTab('tasks')}>任务</button>
                 <button className={tab === 'json' ? 'active' : ''} onClick={() => setTab('json')}>JSON</button>
                 <button className={tab === 'logs' ? 'active' : ''} onClick={() => setTab('logs')}>日志</button>
               </nav>
 
               {tab === 'overview' && <Overview scene={scene} result={result} />}
+              {tab === 'dag' && <DagView scene={scene} result={result} />}
               {tab === 'tasks' && <Tasks scene={scene} result={result} />}
               {tab === 'json' && <pre className="json-view">{JSON.stringify({ scene, result }, null, 2)}</pre>}
               {tab === 'logs' && <Logs result={result} />}
@@ -220,7 +237,7 @@ function EmptyState() {
   return (
     <div className="empty">
       <h2>先生成一个 benchmark scene</h2>
-      <p>推荐先用 warehouse / hard / 4 robots / 1 edge PC / object_detection + path_planning + vla_inference，作为第一次汇报 Demo。</p>
+      <p>推荐先用 warehouse / hard / 4 robots / 1 edge PC / obstacle avoidance + YOLO + path planning + VLA，完整展示三类任务和 DAG。</p>
     </div>
   );
 }
@@ -232,7 +249,7 @@ function Overview({ scene, result }: { scene: BenchmarkScene; result: Simulation
         <div className="card"><span>Nodes</span><strong>{scene.nodes.length}</strong></div>
         <div className="card"><span>Robots</span><strong>{scene.nodes.filter((n) => n.kind === 'robot').length}</strong></div>
         <div className="card"><span>Tasks</span><strong>{scene.tasks.length}</strong></div>
-        <div className="card"><span>Stressors</span><strong>{scene.stressors.length}</strong></div>
+        <div className="card"><span>Workflow</span><strong className="workflow-state">{result?.workflow.state ?? 'validated'}</strong></div>
       </div>
 
       {result && (
@@ -243,6 +260,16 @@ function Overview({ scene, result }: { scene: BenchmarkScene; result: Simulation
               <div className="metric" key={key}>
                 <span>{metricLabel(key)}</span>
                 <strong>{formatMetric(key, value as number)}</strong>
+              </div>
+            ))}
+          </div>
+          <h3>三类任务汇总</h3>
+          <div className="class-grid">
+            {Object.entries(result.task_class_summary).map(([taskClass, summary]) => (
+              <div className={`class-card ${taskClass}`} key={taskClass}>
+                <span>{taskClassLabels[taskClass] ?? taskClass}</span>
+                <strong>{summary.task_count}</strong>
+                <small>success {pct(summary.success_rate)} · edge {pct(summary.edge_offload_ratio)} · avg {summary.avg_latency_ms.toFixed(1)} ms</small>
               </div>
             ))}
           </div>
@@ -285,11 +312,11 @@ function Tasks({ scene, result }: { scene: BenchmarkScene; result: SimulationRes
         <thead>
           <tr>
             <th>Task</th>
+            <th>Class / DAG</th>
             <th>Source</th>
             <th>Priority</th>
             <th>Budget</th>
             <th>Model</th>
-            <th>Fallback</th>
             <th>Target</th>
             <th>Latency</th>
             <th>Status</th>
@@ -301,19 +328,56 @@ function Tasks({ scene, result }: { scene: BenchmarkScene; result: SimulationRes
             return (
               <tr key={t.id}>
                 <td><strong>{t.id}</strong><br /><span>{t.task_type}</span></td>
+                <td><span className={`task-class ${t.task_class}`}>{taskClassLabels[t.task_class]}</span><span>stage {t.stage_index} · deps {t.dependencies.join(', ') || 'root'}</span></td>
                 <td>{t.source_robot_id}</td>
                 <td>{t.priority}</td>
                 <td>{t.latency_budget_ms.toFixed(0)} ms</td>
                 <td>{t.model_requirement}</td>
-                <td>{t.fallback_policy}</td>
                 <td>{r?.target_node_id ?? '-'}</td>
                 <td>{r ? `${r.total_latency_ms.toFixed(1)} ms` : '-'}</td>
-                <td>{r ? <span className={r.success ? 'ok' : 'bad'}>{r.success ? 'success' : 'failed'}{r.deadline_missed ? ' · timeout' : ''}</span> : '-'}</td>
+                <td>{r ? <span className={r.success ? 'ok' : 'bad'}>{r.state}{r.deadline_missed ? ' · deadline' : ''}</span> : '-'}</td>
               </tr>
             );
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function DagView({ scene, result }: { scene: BenchmarkScene; result: SimulationResponse | null }) {
+  const levels = result?.dag.levels ?? Object.fromEntries(scene.tasks.map((task) => [task.id, task.stage_index]));
+  const maxLevel = Math.max(0, ...Object.values(levels));
+  const critical = new Set(result?.workflow.critical_path ?? []);
+  const resultMap = new Map(result?.task_results.map((item) => [item.task_id, item]) ?? []);
+  return (
+    <div className="dag-view">
+      <div className="dag-summary">
+        <span>{scene.workflow_id}</span>
+        <span>{result?.dag.valid === false ? 'invalid' : 'valid DAG'}</span>
+        <span>{(result?.dag.edges.length ?? scene.tasks.reduce((sum, task) => sum + task.dependencies.length, 0))} edges</span>
+        <span>failure: {scene.failure_policy}</span>
+      </div>
+      <div className="dag-stages">
+        {Array.from({ length: maxLevel + 1 }, (_, level) => (
+          <section className="dag-stage" key={level}>
+            <div className="stage-label">Stage {level}</div>
+            <div className="stage-nodes">
+              {scene.tasks.filter((task) => levels[task.id] === level).map((task) => {
+                const run = resultMap.get(task.id);
+                return (
+                  <article className={`dag-node ${task.task_class} ${critical.has(task.id) ? 'critical' : ''}`} key={task.id}>
+                    <div><strong>{task.id}</strong><span>{run?.state ?? 'pending'}</span></div>
+                    <p>{task.task_type}</p>
+                    <small>{task.dependencies.length ? `← ${task.dependencies.join(', ')}` : 'root'} · {run?.target_node_id || task.source_robot_id}</small>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        ))}
+      </div>
+      <p className="muted">高亮边框表示关键路径；运行后节点会显示终态与实际执行位置。</p>
     </div>
   );
 }

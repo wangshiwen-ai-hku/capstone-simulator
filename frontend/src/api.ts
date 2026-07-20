@@ -15,7 +15,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function health() {
-  return request<{ status: string; provider: string; model: string; llm_configured: boolean }>('/api/health');
+  return request<{
+    status: string;
+    provider: string;
+    model: string;
+    llm_configured: boolean;
+    architecture: string;
+    edgesched_version: string;
+  }>('/api/health');
 }
 
 export function generateScene(payload: GenerateSceneRequest) {

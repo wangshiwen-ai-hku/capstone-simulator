@@ -1,6 +1,7 @@
 export type Difficulty = 'easy' | 'medium' | 'hard' | 'stress';
 export type ScenarioType = 'warehouse' | 'hospital' | 'campus' | 'factory' | 'disaster' | 'custom';
-export type Algorithm = 'rule_based' | 'local_first' | 'edge_first' | 'greedy_cost' | 'external';
+export type Algorithm = 'dag_deadline' | 'rule_based' | 'local_first' | 'edge_first' | 'greedy_cost' | 'external';
+export type TaskClass = 'local_safety' | 'realtime_offloadable' | 'edge_heavy';
 
 export const TASK_CATEGORIES = [
   'obstacle_avoidance',
@@ -55,6 +56,7 @@ export interface Workload {
   name: string;
   source_robot_id: string;
   task_type: string;
+  task_class: TaskClass;
   priority: number;
   compute_demand: number;
   gpu_demand: number;
@@ -62,6 +64,7 @@ export interface Workload {
   safety_level: number;
   model_requirement: string;
   data_size_mb: number;
+  output_size_mb: number;
   bandwidth_requirement_mbps: number;
   energy_budget_j: number;
   fallback_policy: string;
@@ -69,6 +72,7 @@ export interface Workload {
   arrival_time_ms: number;
   deadline_ms: number;
   dependencies: string[];
+  stage_index: number;
   expected_accuracy: number;
 }
 
@@ -81,6 +85,9 @@ export interface BenchmarkScene {
   nodes: NodeSpec[];
   initial_resources: ResourceSnapshot[];
   tasks: Workload[];
+  workflow_id: string;
+  workflow_deadline_ms: number;
+  failure_policy: 'skip_descendants' | 'fail_fast';
   stressors: string[];
   success_criteria: string[];
 }
@@ -98,11 +105,19 @@ export interface SimulationMetrics {
   makespan_ms: number;
   edge_offload_ratio: number;
   safety_violation_count: number;
+  skipped_task_count: number;
+  workflow_success_rate: number;
+  critical_path_ms: number;
+  dag_depth: number;
 }
 
 export interface TaskRunResult {
   task_id: string;
+  workflow_id: string;
   task_name: string;
+  task_class: TaskClass;
+  stage_index: number;
+  dependencies: string[];
   source_robot_id: string;
   target_node_id: string;
   mode: string;
@@ -116,13 +131,38 @@ export interface TaskRunResult {
   energy_j: number;
   deadline_missed: boolean;
   success: boolean;
+  state: string;
   reason: string;
+  input_locations: string[];
+  output_ref: string;
 }
 
 export interface SimulationResponse {
-  algorithm: Algorithm;
+  algorithm: string;
   metrics: SimulationMetrics;
   task_results: TaskRunResult[];
   node_utilization: Record<string, number>;
   logs: string[];
+  workflow: {
+    workflow_id: string;
+    state: string;
+    failure_policy: string;
+    deadline_time_ms: number;
+    deadline_missed: boolean;
+    state_counts: Record<string, number>;
+    critical_path: string[];
+  };
+  task_class_summary: Record<TaskClass, {
+    task_count: number;
+    success_rate: number;
+    avg_latency_ms: number;
+    edge_offload_ratio: number;
+  }>;
+  dag: {
+    valid: boolean;
+    topological_order: string[];
+    levels: Record<string, number>;
+    edges: Array<{ from: string; to: string }>;
+  };
+  transport: Record<string, unknown>;
 }

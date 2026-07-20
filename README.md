@@ -1,58 +1,56 @@
-# Capstone MARS Benchmark
+# Unified EdgeSched Simulator
 
-MARS = Multi-Agent Robot Scheduling benchmark. This is a runnable full-stack prototype for generating benchmark scenes and stress-test tasks for a multi-robot cloud-edge-device scheduling platform.
+The project combines a web benchmark with a transport-neutral edge-scheduling
+core for multi-robot workflows.
 
-It matches the Capstone direction: robot nodes submit physical-AI workloads, the control plane observes node resources, schedules local/edge execution, and evaluates latency, energy, success rate, deadline misses, bandwidth and robustness.
-
-## What is included
-
-- **Backend**: Python + FastAPI.
-- **Frontend**: React + TypeScript + plain CSS.
-- **LLM scene generator**: OpenAI-compatible chat-completions client, configurable through `.env` for OpenAI / Doubao / GLM / Gemini / custom compatible endpoints.
-- **Simulation engine**: deterministic fallback generator, workload abstraction, rule-based scheduler, local-first, edge-first, greedy-cost, and external algorithm callback support.
-- **Algorithm integration**: point the UI/API to an external scheduler HTTP endpoint and compare it with built-in baselines.
-
-## Directory
+The runnable shape is:
 
 ```text
-backend/
-  app/
-    main.py
-    config.py
-    schemas.py
-    llm_client.py
-    generators.py
-    schedulers.py
-    simulator.py
-  requirements.txt
-  .env.example
-frontend/
-  package.json
-  index.html
-  tsconfig.json
-  vite.config.ts
-  src/
-    App.tsx
-    api.ts
-    types.ts
-    main.tsx
-    styles.css
+Web UI / REST API
+        │
+        ▼
+Workflow + DAG Manager ──► DAG-aware Scheduler
+        │                         │
+        └── in-memory simulation ─┘
 ```
+
+## Implemented in v0.2
+
+- Atomic DAG validation: unique IDs, known parents, no self-dependencies and no cycles.
+- Authoritative `BLOCKED → READY → RUNNING → terminal` lifecycle.
+- Multi-parent release, idempotent completion, descendant skipping and fail-fast policies.
+- Critical-path/deadline-aware scheduling with intermediate-artifact locality.
+- Three workload classes enforced as hard placement rules.
+- Configurable synthetic profiling catalogue for runs without workload artifacts.
+- Updated React UI with workflow status, task-class metrics and a DAG stage view.
+- Legacy sequential simulation and isolated-task scheduling modules retained only as deprecated import paths.
+
+## The three task classes
+
+| Class | Typical work | Placement contract |
+|---|---|---|
+| `local_safety` | obstacle avoidance, emergency control | Must run on its source Orin |
+| `realtime_offloadable` | YOLO, segmentation, path planning, verification | May run on source Orin or edge |
+| `edge_heavy` | VLA/LLM, map fusion, compression and heavy planning | Prefer edge; explicit local fallback |
+
+Task categories remain detailed benchmark labels. `task_class` is the stable
+placement contract.
 
 ## Quick start
 
-### 1. Backend
+Python 3.10–3.13 is recommended.
+
+### Backend
 
 ```bash
 cd backend
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 2. Frontend
+### Frontend
 
 ```bash
 cd frontend
@@ -60,75 +58,64 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`.
+Open `http://localhost:5173`. Select `dag_deadline` for the new scheduler.
 
-## Environment configuration
+### Tests
 
-The backend uses one OpenAI-compatible client. Choose provider with `MODEL_PROVIDER` and fill the matching key/model/base URL.
+The core test suite uses the standard library and can run before installing the
+web dependencies:
 
-```env
-MODEL_PROVIDER=openai
-OPENAI_API_KEY=sk-...
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-4.1-mini
+```bash
+PYTHONPATH=backend python -m unittest discover -s backend -p 'test_*.py' -v
 ```
 
-For Doubao / GLM / Gemini, set provider-specific variables in `backend/.env`. Endpoint examples are intentionally left editable because each lab/company account may route through a gateway.
+## Profiles when real tasks are unavailable
 
-```env
-MODEL_PROVIDER=doubao
-DOUBAO_API_KEY=...
-DOUBAO_BASE_URL=https://your-compatible-endpoint/v1
-DOUBAO_MODEL=...
+`configs/profiles.synthetic.json` contains clearly labelled placeholder rows.
+The simulator loads them automatically and falls back to a compute-demand model
+when a row is missing. Replace rows with measurements while keeping the schema.
 
-MODEL_PROVIDER=glm
-GLM_API_KEY=...
-GLM_BASE_URL=https://your-compatible-endpoint/v1
-GLM_MODEL=...
+For each model/hardware pair, request:
 
-MODEL_PROVIDER=gemini
-GEMINI_API_KEY=...
-GEMINI_BASE_URL=https://your-compatible-endpoint/v1
-GEMINI_MODEL=...
+- exact Orin/PC hardware and power mode;
+- JetPack, CUDA, TensorRT, driver and runtime versions;
+- model artifact, precision, batch size and input shape;
+- input/output size distributions;
+- warm-up method and p50/p95/p99 latency;
+- throughput at concurrency 1/2/4;
+- peak host/device memory;
+- average/peak power or joules per task;
+- quality/accuracy for local and edge variants.
+
+## Project layout
+
+```text
+backend/
+  app/                         FastAPI and web-facing schemas
+  edgesched/
+    models.py                  transport-neutral domain model
+    dag.py                     validation, readiness and failure propagation
+    scheduler.py               constraints, cost, locality and critical path
+    engine.py                  deterministic event-driven simulator
+    profiling.py               replaceable profiling catalogue
+    transports/                transport protocol and in-memory adapter
+  tests/
+frontend/                      React benchmark and DAG UI
+configs/profiles.synthetic.json
+proto/edgesched_v2.proto       optional wire contract
 ```
 
-When no key is configured, the backend automatically uses a deterministic rule generator, so the demo still runs offline.
+## API additions
 
-## External scheduling algorithm interface
+- `GET /api/health`: core and model-provider status.
+- `GET /api/architecture`: active contracts and deprecated paths.
+- `POST /api/validate-workflow`: validate and return topology without running.
+- `POST /api/generate-scene`: generate a valid DAG benchmark.
+- `POST /api/simulate`: run the unified event-driven scheduler.
 
-If you want to plug in a custom scheduler, expose an HTTP endpoint and put its URL into the frontend field **External Scheduler URL** or API request field `external_scheduler_url`.
+## Deprecations and compatibility
 
-Your service receives:
-
-```json
-{
-  "scene": { "...": "full scene json" },
-  "task": { "...": "current workload" },
-  "resources": {
-    "robot_1": { "cpu_util": 0.3, "gpu_util": 0.1, "memory_util": 0.2, "temperature_c": 52 },
-    "edge_pc": { "cpu_util": 0.4, "gpu_util": 0.6, "memory_util": 0.5, "temperature_c": 61 }
-  },
-  "candidates": ["robot_1", "edge_pc", "robot_3"]
-}
-```
-
-Return:
-
-```json
-{
-  "target_node_id": "edge_pc",
-  "mode": "edge",
-  "reason": "lower expected finish time under current GPU load"
-}
-```
-
-If the external algorithm fails or returns an invalid node, the simulator falls back to greedy-cost scheduling and records the fallback in logs.
-
-## Suggested benchmark scenarios
-
-- Similar-task conflict: multiple robots request the same edge model simultaneously.
-- Priority queue: high-priority safety task preempts lower-priority perception/VLA tasks.
-- Long-chain task: perception → planning → VLA inference → verification with dependencies.
-- Network degradation: bandwidth and latency fluctuate during offloading.
-- Edge overload: edge PC receives too many heavy requests.
-- Local fallback: control plane unavailable or safety-critical task requires local execution.
+- `backend.app.simulator` keeps its old function name but now delegates to the unified core.
+- `backend.app.schedulers` is the v1 isolated-task implementation and is no longer called by the API.
+- The v1 external HTTP callback does not receive topology or artifact locations. The API accepts the option but routes it to `dag_deadline` until a workflow-aware v2 adapter is supplied.
+- The separate top-level `edgesched` repository contains the legacy v1 gRPC experiment runner.

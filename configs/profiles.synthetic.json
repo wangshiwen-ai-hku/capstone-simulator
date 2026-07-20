@@ -1,0 +1,31 @@
+{
+  "schema_version": "edgesched.profile.v1",
+  "provenance": "synthetic_placeholder",
+  "warning": "Synthetic placeholder values; replace every row with hardware measurements before reporting real-world performance.",
+  "profiles": [
+    {"task_type":"obstacle_avoidance","task_class":"local_safety","node_kind":"robot","model_variant":"tiny-safety-cnn","input_shape":"1x3x224x224","precision":"fp16","batch_size":1,"p50_ms":18,"p95_ms":28,"p99_ms":36,"throughput_per_s":45,"peak_memory_mb":420,"energy_j":0.42,"output_size_mb":0.02},
+    {"task_type":"object_detection","task_class":"realtime_offloadable","node_kind":"robot","model_variant":"yolo-n","input_shape":"1x3x640x640","precision":"fp16","batch_size":1,"p50_ms":52,"p95_ms":76,"p99_ms":91,"throughput_per_s":17,"peak_memory_mb":1250,"energy_j":1.45,"output_size_mb":0.08},
+    {"task_type":"object_detection","task_class":"realtime_offloadable","node_kind":"edge","model_variant":"yolo-n","input_shape":"1x3x640x640","precision":"fp16","batch_size":1,"p50_ms":14,"p95_ms":21,"p99_ms":27,"throughput_per_s":61,"peak_memory_mb":1510,"energy_j":2.35,"output_size_mb":0.08},
+    {"task_type":"segmentation","task_class":"realtime_offloadable","node_kind":"robot","model_variant":"segformer-lite","input_shape":"1x3x640x640","precision":"fp16","batch_size":1,"p50_ms":96,"p95_ms":138,"p99_ms":165,"throughput_per_s":9,"peak_memory_mb":2180,"energy_j":2.25,"output_size_mb":0.6},
+    {"task_type":"segmentation","task_class":"realtime_offloadable","node_kind":"edge","model_variant":"segformer-lite","input_shape":"1x3x640x640","precision":"fp16","batch_size":1,"p50_ms":31,"p95_ms":44,"p99_ms":53,"throughput_per_s":25,"peak_memory_mb":2650,"energy_j":3.7,"output_size_mb":0.6},
+    {"task_type":"path_planning","task_class":"realtime_offloadable","node_kind":"robot","model_variant":"astar-mpc","input_shape":"400x400 occupancy grid","precision":"fp32","batch_size":1,"p50_ms":72,"p95_ms":118,"p99_ms":155,"throughput_per_s":10,"peak_memory_mb":310,"energy_j":0.88,"output_size_mb":0.03},
+    {"task_type":"path_planning","task_class":"realtime_offloadable","node_kind":"edge","model_variant":"astar-mpc","input_shape":"400x400 occupancy grid","precision":"fp32","batch_size":1,"p50_ms":24,"p95_ms":38,"p99_ms":49,"throughput_per_s":32,"peak_memory_mb":390,"energy_j":1.25,"output_size_mb":0.03},
+    {"task_type":"vla_inference","task_class":"edge_heavy","node_kind":"robot","model_variant":"vla-small-fallback","input_shape":"image+instruction","precision":"int8","batch_size":1,"p50_ms":890,"p95_ms":1320,"p99_ms":1610,"throughput_per_s":0.8,"peak_memory_mb":7200,"energy_j":21.0,"output_size_mb":0.05},
+    {"task_type":"vla_inference","task_class":"edge_heavy","node_kind":"edge","model_variant":"vla-7b","input_shape":"image+instruction","precision":"fp16","batch_size":1,"p50_ms":310,"p95_ms":470,"p99_ms":590,"throughput_per_s":2.5,"peak_memory_mb":16800,"energy_j":38.0,"output_size_mb":0.05},
+    {"task_type":"llm_planning","task_class":"edge_heavy","node_kind":"edge","model_variant":"llm-planner-7b","input_shape":"2048 tokens","precision":"fp16","batch_size":1,"p50_ms":420,"p95_ms":720,"p99_ms":940,"throughput_per_s":1.8,"peak_memory_mb":15400,"energy_j":44.0,"output_size_mb":0.03},
+    {"task_type":"map_fusion","task_class":"edge_heavy","node_kind":"edge","model_variant":"map-fusion","input_shape":"12MB map chunks","precision":"fp32","batch_size":1,"p50_ms":180,"p95_ms":270,"p99_ms":340,"throughput_per_s":4.5,"peak_memory_mb":4100,"energy_j":15.0,"output_size_mb":4.0},
+    {"task_type":"data_compression","task_class":"edge_heavy","node_kind":"edge","model_variant":"zstd","input_shape":"8MB payload","precision":"n/a","batch_size":1,"p50_ms":42,"p95_ms":68,"p99_ms":86,"throughput_per_s":18,"peak_memory_mb":180,"energy_j":1.7,"output_size_mb":2.5},
+    {"task_type":"result_verification","task_class":"realtime_offloadable","node_kind":"edge","model_variant":"vlm-verifier","input_shape":"image+result","precision":"fp16","batch_size":1,"p50_ms":105,"p95_ms":165,"p99_ms":210,"throughput_per_s":7,"peak_memory_mb":5600,"energy_j":12.0,"output_size_mb":0.02}
+  ],
+  "measurement_fields_required": [
+    "hardware model and power mode",
+    "JetPack/CUDA/TensorRT/driver versions",
+    "model artifact, runtime, precision and batch size",
+    "input shape/size distribution and output size distribution",
+    "warm-up count and p50/p95/p99 latency over repeated runs",
+    "throughput under concurrency 1/2/4",
+    "peak device/host memory",
+    "average and peak power or per-task energy",
+    "accuracy/quality metric for local and edge variants"
+  ]
+}

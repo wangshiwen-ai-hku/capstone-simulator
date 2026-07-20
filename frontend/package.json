@@ -1,6 +1,6 @@
 {
-  "name": "capstone-mars-benchmark-ui",
-  "version": "0.1.0",
+  "name": "unified-edgesched-simulator-ui",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
