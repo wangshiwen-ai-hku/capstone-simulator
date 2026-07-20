@@ -1,20 +1,29 @@
-# Unified EdgeSched Simulator
+# MARS
 
-The project combines a web benchmark with a transport-neutral edge-scheduling
-core for multi-robot workflows.
+MARS is the transport-neutral scheduling core for multi-robot edge workflows.
+It defines middleware-level domain models, DAG lifecycle, placement policies,
+and a transport interface. The repository also contains a FastAPI adapter and a
+React benchmark interface for generating, validating, simulating, and
+inspecting workflows.
 
 The runnable shape is:
 
 ```text
-Web UI / REST API
-        │
-        ▼
-Workflow + DAG Manager ──► DAG-aware Scheduler
-        │                         │
-        └── in-memory simulation ─┘
+React UI ──► FastAPI adapter ──► MARS scheduling core
+                                    ├── DAG manager
+                                    ├── scheduler + profiles
+                                    └── deterministic engine
+
+Future executors ──► SchedulerTransport interface
 ```
 
-## Implemented in v0.2
+The dependency direction is one way: `backend` imports `mars`; MARS does not
+depend on the web application. This keeps the scheduling/control-plane layer
+available to future node agents, hardware executors, and transport adapters.
+The current runnable path is an in-process simulator, not a live distributed
+control plane.
+
+## Current scope
 
 - Atomic DAG validation: unique IDs, known parents, no self-dependencies and no cycles.
 - Authoritative `BLOCKED → READY → RUNNING → terminal` lifecycle.
@@ -23,7 +32,6 @@ Workflow + DAG Manager ──► DAG-aware Scheduler
 - Three workload classes enforced as hard placement rules.
 - Configurable synthetic profiling catalogue for runs without workload artifacts.
 - Updated React UI with workflow status, task-class metrics and a DAG stage view.
-- Legacy sequential simulation and isolated-task scheduling modules retained only as deprecated import paths.
 
 ## The three task classes
 
@@ -31,7 +39,7 @@ Workflow + DAG Manager ──► DAG-aware Scheduler
 |---|---|---|
 | `local_safety` | obstacle avoidance, emergency control | Must run on its source Orin |
 | `realtime_offloadable` | YOLO, segmentation, path planning, verification | May run on source Orin or edge |
-| `edge_heavy` | VLA/LLM, map fusion, compression and heavy planning | Prefer edge; explicit local fallback |
+| `edge_heavy` | VLA/LLM, map fusion, compression and heavy planning | Prefer edge; local fallback only when `allow_local_fallback=true` |
 
 Task categories remain detailed benchmark labels. `task_class` is the stable
 placement contract.
@@ -40,14 +48,13 @@ placement contract.
 
 Python 3.10–3.13 is recommended.
 
-### Backend
+### Python environment and backend
 
 ```bash
-cd backend
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+pip install -r backend/requirements.txt
+python -m uvicorn backend.app.main:app --reload --port 8000
 ```
 
 ### Frontend
@@ -62,16 +69,16 @@ Open `http://localhost:5173`. Select `dag_deadline` for the new scheduler.
 
 ### Tests
 
-The core test suite uses the standard library and can run before installing the
-web dependencies:
+After installing the backend requirements, run the core, transport, and web
+adapter tests from the repository root:
 
 ```bash
-PYTHONPATH=backend python -m unittest discover -s backend -p 'test_*.py' -v
+python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 ## Profiles when real tasks are unavailable
 
-`configs/profiles.synthetic.json` contains clearly labelled placeholder rows.
+`configs/mars/profiles.synthetic.json` contains clearly labelled placeholder rows.
 The simulator loads them automatically and falls back to a compute-demand model
 when a row is missing. Replace rows with measurements while keeping the schema.
 
@@ -90,32 +97,31 @@ For each model/hardware pair, request:
 ## Project layout
 
 ```text
+mars/                          scheduling/control-plane middleware
+  models.py                    transport-neutral domain model
+  dag.py                       validation, readiness, failure propagation
+  scheduler.py                 constraints, cost, locality, critical path
+  engine.py                    deterministic event-driven simulator
+  profiling.py                 replaceable profiling catalogue
+  transports/                  transport protocol and in-memory adapter
 backend/
-  app/                         FastAPI and web-facing schemas
-  edgesched/
-    models.py                  transport-neutral domain model
-    dag.py                     validation, readiness and failure propagation
-    scheduler.py               constraints, cost, locality and critical path
-    engine.py                  deterministic event-driven simulator
-    profiling.py               replaceable profiling catalogue
-    transports/                transport protocol and in-memory adapter
-  tests/
+  app/                         FastAPI adapter and web-facing schemas
 frontend/                      React benchmark and DAG UI
-configs/profiles.synthetic.json
-proto/edgesched_v2.proto       optional wire contract
+configs/mars/                  runtime and profiling configuration
+tests/                         middleware tests
 ```
 
 ## API additions
 
-- `GET /api/health`: core and model-provider status.
-- `GET /api/architecture`: active contracts and deprecated paths.
+- `GET /api/health`: MARS and model-provider status.
+- `GET /api/architecture`: active core, runtime, transport interfaces, and task classes.
 - `POST /api/validate-workflow`: validate and return topology without running.
 - `POST /api/generate-scene`: generate a valid DAG benchmark.
-- `POST /api/simulate`: run the unified event-driven scheduler.
+- `POST /api/simulate`: run the MARS event-driven scheduler.
 
-## Deprecations and compatibility
+## Transport boundary
 
-- `backend.app.simulator` keeps its old function name but now delegates to the unified core.
-- `backend.app.schedulers` is the v1 isolated-task implementation and is no longer called by the API.
-- The v1 external HTTP callback does not receive topology or artifact locations. The API accepts the option but routes it to `dag_deadline` until a workflow-aware v2 adapter is supplied.
-- The separate top-level `edgesched` repository contains the legacy v1 gRPC experiment runner.
+The deterministic web simulator runs in process. `SchedulerTransport` is the
+Python interface for future executors, and `InMemoryTransport` exercises that
+boundary in tests. A network wire protocol should be added together with its
+first real transport adapter so the two contracts cannot drift.

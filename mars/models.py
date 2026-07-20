@@ -1,4 +1,4 @@
-"""Transport-neutral domain model for the unified scheduler.
+"""Transport-neutral domain model for MARS.
 
 Framework-specific request and wire objects are adapted into these types so
 that task constraints and DAG semantics have one authoritative definition.
@@ -195,7 +195,7 @@ TASK_CLASS_LABELS: dict[TaskClass, str] = {
 
 
 def infer_task_class(task_type: str) -> TaskClass:
-    """Compatibility mapping for traces/scenes created before schema v2."""
+    """Infer a placement class when an input trace omits the explicit class."""
     normalized = task_type.lower()
     if normalized in {"obstacle_avoidance", "emergency_stop", "local_control"}:
         return TaskClass.LOCAL_SAFETY

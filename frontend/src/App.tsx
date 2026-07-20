@@ -5,7 +5,7 @@ import { TASK_CATEGORIES } from './types';
 
 const scenarioOptions: ScenarioType[] = ['warehouse', 'hospital', 'campus', 'factory', 'disaster', 'custom'];
 const difficultyOptions: Difficulty[] = ['easy', 'medium', 'hard', 'stress'];
-const algorithmOptions: Algorithm[] = ['dag_deadline', 'rule_based', 'local_first', 'edge_first', 'greedy_cost', 'external'];
+const algorithmOptions: Algorithm[] = ['dag_deadline', 'rule_based', 'local_first', 'edge_first', 'greedy_cost'];
 
 const taskClassLabels: Record<string, string> = {
   local_safety: '端侧安全关键',
@@ -58,7 +58,6 @@ export default function App() {
   const [seed, setSeed] = useState(7);
   const [taskCategories, setTaskCategories] = useState<TaskCategory[]>(['obstacle_avoidance', 'object_detection', 'path_planning', 'vla_inference']);
   const [algorithm, setAlgorithm] = useState<Algorithm>('dag_deadline');
-  const [externalSchedulerUrl, setExternalSchedulerUrl] = useState('');
   const [scene, setScene] = useState<BenchmarkScene | null>(null);
   const [result, setResult] = useState<SimulationResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -68,7 +67,7 @@ export default function App() {
   useEffect(() => {
     health()
       .then((h) => setProviderInfo(
-        `edgesched ${h.edgesched_version} · in-memory transport · LLM ${h.llm_configured ? 'configured' : 'fallback'}`,
+        `MARS ${h.mars_version} · in-process simulator · LLM ${h.llm_configured ? 'configured' : 'fallback'}`,
       ))
       .catch((e) => setProviderInfo(`backend unavailable: ${e.message}`));
   }, []);
@@ -112,7 +111,7 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
-      const r = await simulate(scene, algorithm, externalSchedulerUrl);
+      const r = await simulate(scene, algorithm);
       setResult(r);
       setTab('overview');
     } catch (e) {
@@ -128,7 +127,7 @@ export default function App() {
         <div>
           <p className="eyebrow">Capstone · Multi-Agent Robot Scheduling</p>
           <h1>端—边 DAG 调度与机器人 Benchmark</h1>
-          <p className="subtitle">统一 edgesched 控制内核、DAG 工作流与三类任务约束，评估延迟、能耗、数据移动和工作流成功率。</p>
+          <p className="subtitle">统一 MARS 控制内核、DAG 工作流与三类任务约束，评估延迟、能耗、数据移动和工作流成功率。</p>
         </div>
         <div className="status-pill">{providerInfo}</div>
       </header>
@@ -191,12 +190,6 @@ export default function App() {
           <select value={algorithm} onChange={(e) => setAlgorithm(e.target.value as Algorithm)}>
             {algorithmOptions.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
-          {algorithm === 'external' && (
-            <>
-              <input value={externalSchedulerUrl} onChange={(e) => setExternalSchedulerUrl(e.target.value)} placeholder="v2 workflow-aware adapter URL" />
-              <p className="control-note">v1 单任务回调已弃用；当前会安全回退到 DAG deadline 策略。</p>
-            </>
-          )}
           <button className="secondary" onClick={onSimulate} disabled={!scene || loading}>运行仿真 / 评估</button>
         </aside>
 

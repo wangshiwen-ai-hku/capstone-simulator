@@ -1,6 +1,10 @@
+"""Deterministic benchmark-scene generation."""
+
 import logging
 import random
 from typing import List
+
+from mars.models import TaskClass
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +15,6 @@ from .schemas import (
     NodeSpec,
     ResourceSnapshot,
     TaskCategory,
-    TaskClass,
     Workload,
 )
 
@@ -33,15 +36,15 @@ SCENE_TEXT = {
 }
 
 CATEGORY_DEFAULTS = {
-    TaskCategory.obstacle_avoidance: dict(task_class=TaskClass.local_safety, compute=0.6, gpu=0.1, latency=60, data=0.3, output=0.02, safety=5, model="tiny-safety-cnn", fallback="local_only"),
-    TaskCategory.object_detection: dict(task_class=TaskClass.realtime_offloadable, compute=1.2, gpu=0.6, latency=300, data=2.0, output=0.08, safety=3, model="yolo/rt-detr", fallback="local_preferred"),
-    TaskCategory.segmentation: dict(task_class=TaskClass.realtime_offloadable, compute=1.6, gpu=0.8, latency=450, data=3.0, output=0.6, safety=3, model="segformer/sam-lite", fallback="edge_preferred"),
-    TaskCategory.path_planning: dict(task_class=TaskClass.realtime_offloadable, compute=1.0, gpu=0.1, latency=250, data=0.5, output=0.03, safety=4, model="astar/mpc", fallback="local_preferred"),
-    TaskCategory.data_compression: dict(task_class=TaskClass.edge_heavy, compute=0.5, gpu=0.0, latency=500, data=8.0, output=2.5, safety=1, model="codec", fallback="any"),
-    TaskCategory.vla_inference: dict(task_class=TaskClass.edge_heavy, compute=4.6, gpu=2.4, latency=1400, data=6.0, output=0.05, safety=3, model="7B-10B VLA", fallback="edge_preferred"),
-    TaskCategory.llm_planning: dict(task_class=TaskClass.edge_heavy, compute=3.2, gpu=1.2, latency=2000, data=1.2, output=0.03, safety=2, model="LLM planner", fallback="edge_preferred"),
-    TaskCategory.result_verification: dict(task_class=TaskClass.realtime_offloadable, compute=1.4, gpu=0.5, latency=700, data=2.0, output=0.02, safety=3, model="VLM verifier", fallback="edge_preferred"),
-    TaskCategory.map_fusion: dict(task_class=TaskClass.edge_heavy, compute=2.2, gpu=0.6, latency=1200, data=12.0, output=4.0, safety=2, model="SLAM/map fusion", fallback="edge_preferred"),
+    TaskCategory.obstacle_avoidance: dict(task_class=TaskClass.LOCAL_SAFETY, compute=0.6, gpu=0.1, latency=60, data=0.3, output=0.02, safety=5, model="tiny-safety-cnn", local_fallback=False),
+    TaskCategory.object_detection: dict(task_class=TaskClass.REALTIME_OFFLOADABLE, compute=1.2, gpu=0.6, latency=300, data=2.0, output=0.08, safety=3, model="yolo/rt-detr", local_fallback=True),
+    TaskCategory.segmentation: dict(task_class=TaskClass.REALTIME_OFFLOADABLE, compute=1.6, gpu=0.8, latency=450, data=3.0, output=0.6, safety=3, model="segformer/sam-lite", local_fallback=True),
+    TaskCategory.path_planning: dict(task_class=TaskClass.REALTIME_OFFLOADABLE, compute=1.0, gpu=0.1, latency=250, data=0.5, output=0.03, safety=4, model="astar/mpc", local_fallback=True),
+    TaskCategory.data_compression: dict(task_class=TaskClass.EDGE_HEAVY, compute=0.5, gpu=0.0, latency=500, data=8.0, output=2.5, safety=1, model="codec", local_fallback=True),
+    TaskCategory.vla_inference: dict(task_class=TaskClass.EDGE_HEAVY, compute=4.6, gpu=2.4, latency=1400, data=6.0, output=0.05, safety=3, model="7B-10B VLA", local_fallback=True),
+    TaskCategory.llm_planning: dict(task_class=TaskClass.EDGE_HEAVY, compute=3.2, gpu=1.2, latency=2000, data=1.2, output=0.03, safety=2, model="LLM planner", local_fallback=True),
+    TaskCategory.result_verification: dict(task_class=TaskClass.REALTIME_OFFLOADABLE, compute=1.4, gpu=0.5, latency=700, data=2.0, output=0.02, safety=3, model="VLM verifier", local_fallback=True),
+    TaskCategory.map_fusion: dict(task_class=TaskClass.EDGE_HEAVY, compute=2.2, gpu=0.6, latency=1200, data=12.0, output=4.0, safety=2, model="SLAM/map fusion", local_fallback=True),
 }
 
 
@@ -125,7 +128,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
         arrival = stage_index * rng.uniform(60, 220) / factor
         deadline = arrival + latency_budget * rng.uniform(1.0, 1.8)
         dependencies: List[str] = []
-        if source_robot_id in last_by_robot and d["task_class"] != TaskClass.local_safety:
+        if source_robot_id in last_by_robot and d["task_class"] is not TaskClass.LOCAL_SAFETY:
             dependencies = [last_by_robot[source_robot_id]]
         task_id = f"task_{idx+1:03d}"
         tasks.append(Workload(
@@ -144,7 +147,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             output_size_mb=round(d["output"] * factor * rng.uniform(0.85, 1.15), 3),
             bandwidth_requirement_mbps=round(max(1.0, data_size * 8 / max(0.1, latency_budget / 1000)), 2),
             energy_budget_j=round(20 + compute * 90 + data_size * 2.0, 1),
-            fallback_policy=d["fallback"],
+            allow_local_fallback=d["local_fallback"],
             result_verification="Check returned result, latency budget, deadline and task-specific success flag.",
             arrival_time_ms=round(arrival, 1),
             deadline_ms=round(deadline, 1),
@@ -152,7 +155,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             stage_index=stage_index,
             expected_accuracy=round(max(0.72, 0.97 - 0.03 * factor - rng.random() * 0.04), 3),
         ))
-        if d["task_class"] != TaskClass.local_safety:
+        if d["task_class"] is not TaskClass.LOCAL_SAFETY:
             last_by_robot[source_robot_id] = task_id
 
     stressors = []
@@ -178,7 +181,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
         success_criteria=[
             "success_rate >= 0.95 for easy/medium, >= 0.85 for hard/stress",
             "P95 latency below workload latency budgets where possible",
-            "no safety-critical task offloaded when fallback_policy is local_only",
+            "no local-safety task is offloaded from its source robot",
             "lower total cost than local-first and edge-first baselines",
         ],
     )

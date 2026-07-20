@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from edgesched.dag import DagValidationError, TaskManager, validate_workflow
-from edgesched.engine import run_workflow_simulation
-from edgesched.models import (
+from mars.dag import DagValidationError, TaskManager, validate_workflow
+from mars.engine import run_workflow_simulation
+from mars.models import (
     ArtifactRef,
     FailurePolicy,
     NodeKind,
@@ -15,8 +15,8 @@ from edgesched.models import (
     TaskState,
     WorkflowSpec,
 )
-from edgesched.scheduler import allowed_nodes, estimate_candidate
-from edgesched.profiling import load_default_catalog
+from mars.scheduler import allowed_nodes, estimate_candidate
+from mars.profiling import load_default_catalog
 
 
 def task(
@@ -26,6 +26,7 @@ def task(
     *,
     compute: float = 1.0,
     accuracy: float = 1.0,
+    allow_local_fallback: bool = True,
 ) -> TaskInstance:
     return TaskInstance(
         task_id=task_id,
@@ -40,6 +41,7 @@ def task(
             latency_budget_ms=1000,
             input_size_mb=1.0,
             output_size_mb=0.2,
+            allow_local_fallback=allow_local_fallback,
         ),
         dependency_task_ids=dependencies,
         deadline_time_ms=5000,
@@ -118,6 +120,20 @@ class PlacementTests(unittest.TestCase):
     def test_yolo_class_can_use_robot_or_edge(self):
         candidates = allowed_nodes(task("yolo", TaskClass.REALTIME_OFFLOADABLE), nodes())
         self.assertEqual({candidate.node_id for candidate in candidates}, {"robot_1", "edge_1"})
+
+    def test_edge_heavy_can_disable_local_fallback(self):
+        candidates = allowed_nodes(
+            task("vla", TaskClass.EDGE_HEAVY, allow_local_fallback=False),
+            nodes(),
+        )
+        self.assertEqual([candidate.node_id for candidate in candidates], ["edge_1"])
+
+    def test_edge_heavy_can_explicitly_allow_local_fallback(self):
+        candidates = allowed_nodes(
+            task("vla", TaskClass.EDGE_HEAVY, allow_local_fallback=True),
+            nodes(),
+        )
+        self.assertEqual([candidate.node_id for candidate in candidates], ["edge_1", "robot_1"])
 
     def test_parent_artifact_location_replaces_source_upload_assumption(self):
         task_b = task("b", dependencies=("a",))

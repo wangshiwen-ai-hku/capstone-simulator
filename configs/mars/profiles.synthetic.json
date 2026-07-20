@@ -1,5 +1,5 @@
 {
-  "schema_version": "edgesched.profile.v1",
+  "schema_version": "mars.profile.v1",
   "provenance": "synthetic_placeholder",
   "warning": "Synthetic placeholder values; replace every row with hardware measurements before reporting real-world performance.",
   "profiles": [

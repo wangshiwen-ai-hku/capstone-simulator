@@ -1,4 +1,4 @@
-"""Execution-profile catalog for measured or synthetic workloads."""
+"""Execution-profile catalog for measured or synthetic MARS workloads."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 from .models import NodeKind, TaskClass
 
 
-DEFAULT_PROFILE_PATH = Path(__file__).resolve().parents[2] / "configs" / "profiles.synthetic.json"
+DEFAULT_PROFILE_PATH = Path(__file__).resolve().parents[1] / "configs" / "mars" / "profiles.synthetic.json"
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-"""Deterministic transport for tests and the web simulator."""
+"""Deterministic MARS transport for tests and the web simulator."""
 
 from __future__ import annotations
 

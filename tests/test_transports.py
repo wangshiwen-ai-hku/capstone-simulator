@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from edgesched.models import Assignment, ExecutionMode, WorkflowSpec
-from edgesched.transports.base import NodeRegistration
-from edgesched.transports.inmemory import InMemoryTransport
+from mars.models import Assignment, ExecutionMode, WorkflowSpec
+from mars.transports.base import NodeRegistration
+from mars.transports.inmemory import InMemoryTransport
 
-from tests.test_edgesched_core import task
-from edgesched.models import NodeKind
+from tests.test_mars_core import task
+from mars.models import NodeKind
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):

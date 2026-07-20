@@ -1,11 +1,9 @@
-"""FastAPI compatibility facade for the transport-neutral DAG engine."""
+"""Translate web-facing scene models into MARS domain objects."""
 
 from __future__ import annotations
 
-import logging
-
-from edgesched.engine import run_workflow_simulation
-from edgesched.models import (
+from mars.dag import DagIndex, DagValidationError, validate_workflow
+from mars.models import (
     FailurePolicy,
     NodeKind,
     NodeSnapshot,
@@ -16,43 +14,35 @@ from edgesched.models import (
     WorkflowSpec,
 )
 
-from .schemas import SimulateRequest, SimulationResponse
-
-logger = logging.getLogger(__name__)
+from .schemas import BenchmarkScene
 
 
-async def run_simulation(req: SimulateRequest) -> SimulationResponse:
-    workflow = _to_workflow(req)
-    nodes = _to_nodes(req)
-    algorithm = req.algorithm
-    if algorithm == "external":
-        # The v1 external contract lacks topology and artifact-location fields.
-        # DAG-aware placement is used until a v2 external contract is available.
-        logger.warning(
-            "external v1 task callback is deprecated; using dag_deadline because the endpoint "
-            "does not receive workflow topology or artifact locations"
-        )
-    report = run_workflow_simulation(
-        workflow,
-        nodes,
-        algorithm="dag_deadline" if algorithm == "external" else algorithm,
-        seed=req.seed,
-        network_jitter=req.network_jitter,
-        resource_noise=req.resource_noise,
-    )
-    if algorithm == "external":
-        report.algorithm = "external→dag_deadline"
-        report.logs.insert(
-            0,
-            "DEPRECATED: v1 external scheduler callback replaced by DAG-safe dag_deadline policy; "
-            "use the edgesched.v2 workflow adapter contract for external policies.",
-        )
-        report.transport["external_scheduler_url_ignored"] = req.external_scheduler_url or "missing"
-    return SimulationResponse.model_validate(report.as_dict())
+class SceneValidationError(ValueError):
+    """The web scene cannot be represented safely in the MARS domain."""
 
 
-def _to_workflow(req: SimulateRequest) -> WorkflowSpec:
-    scene = req.scene
+def validate_scene(scene: BenchmarkScene) -> DagIndex:
+    """Validate scene references and return the authoritative MARS DAG index."""
+    _validated_resource_map(scene)
+    node_by_id = {node.id: node for node in scene.nodes}
+    for task in scene.tasks:
+        source = node_by_id.get(task.source_robot_id)
+        if source is None:
+            raise SceneValidationError(
+                f"task {task.id} references unknown source robot: {task.source_robot_id}"
+            )
+        if source.kind != "robot":
+            raise SceneValidationError(
+                f"task {task.id} source {task.source_robot_id} must be a robot node"
+            )
+    try:
+        return validate_workflow(build_workflow(scene))
+    except DagValidationError as exc:
+        raise SceneValidationError(str(exc)) from exc
+
+
+def build_workflow(scene: BenchmarkScene) -> WorkflowSpec:
+    """Convert a web scene into the authoritative MARS workflow model."""
     tasks: list[TaskInstance] = []
     for task in scene.tasks:
         task_class = TaskClass(task.task_class.value)
@@ -81,7 +71,7 @@ def _to_workflow(req: SimulateRequest) -> WorkflowSpec:
                     bandwidth_requirement_mbps=task.bandwidth_requirement_mbps,
                     energy_budget_j=task.energy_budget_j,
                     dominant_resource=dominant,
-                    allow_local_fallback=True,
+                    allow_local_fallback=task.allow_local_fallback,
                 ),
                 dependency_task_ids=tuple(task.dependencies),
                 priority=task.priority,
@@ -101,10 +91,11 @@ def _to_workflow(req: SimulateRequest) -> WorkflowSpec:
     )
 
 
-def _to_nodes(req: SimulateRequest) -> list[NodeSnapshot]:
-    resources = {resource.node_id: resource for resource in req.scene.initial_resources}
+def build_nodes(scene: BenchmarkScene) -> list[NodeSnapshot]:
+    """Convert web resource snapshots into MARS node snapshots."""
+    resources = _validated_resource_map(scene)
     out: list[NodeSnapshot] = []
-    for node in req.scene.nodes:
+    for node in scene.nodes:
         resource = resources[node.id]
         out.append(
             NodeSnapshot(
@@ -124,3 +115,21 @@ def _to_nodes(req: SimulateRequest) -> list[NodeSnapshot]:
             )
         )
     return out
+
+
+def _validated_resource_map(scene: BenchmarkScene):
+    node_ids = [node.id for node in scene.nodes]
+    resource_ids = [resource.node_id for resource in scene.initial_resources]
+    if any(not node_id.strip() for node_id in node_ids):
+        raise SceneValidationError("node ids must be non-empty")
+    if len(node_ids) != len(set(node_ids)):
+        raise SceneValidationError("node ids must be unique")
+    if len(resource_ids) != len(set(resource_ids)):
+        raise SceneValidationError("resource snapshot node ids must be unique")
+    missing = sorted(set(node_ids) - set(resource_ids))
+    unknown = sorted(set(resource_ids) - set(node_ids))
+    if missing:
+        raise SceneValidationError(f"missing resource snapshots for nodes: {', '.join(missing)}")
+    if unknown:
+        raise SceneValidationError(f"resource snapshots reference unknown nodes: {', '.join(unknown)}")
+    return {resource.node_id: resource for resource in scene.initial_resources}

@@ -2,7 +2,7 @@ from enum import Enum
 from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from edgesched.models import infer_task_class
+from mars.models import FailurePolicy, TaskClass, infer_task_class
 
 
 class Difficulty(str, Enum):
@@ -31,17 +31,6 @@ class TaskCategory(str, Enum):
     llm_planning = "llm_planning"
     result_verification = "result_verification"
     map_fusion = "map_fusion"
-
-
-class TaskClass(str, Enum):
-    local_safety = "local_safety"
-    realtime_offloadable = "realtime_offloadable"
-    edge_heavy = "edge_heavy"
-
-
-class FailurePolicy(str, Enum):
-    skip_descendants = "skip_descendants"
-    fail_fast = "fail_fast"
 
 
 class GenerateSceneRequest(BaseModel):
@@ -106,7 +95,7 @@ class Workload(BaseModel):
     output_size_mb: float = Field(default=0.1, ge=0)
     bandwidth_requirement_mbps: float = Field(ge=0)
     energy_budget_j: float = Field(gt=0)
-    fallback_policy: Literal["local_only", "edge_preferred", "local_preferred", "any"] = "any"
+    allow_local_fallback: bool = True
     result_verification: str
     arrival_time_ms: float = Field(default=0, ge=0)
     deadline_ms: float = Field(gt=0)
@@ -115,11 +104,11 @@ class Workload(BaseModel):
     expected_accuracy: float = Field(default=0.95, ge=0, le=1)
 
     @model_validator(mode="after")
-    def infer_legacy_task_class(self):
+    def apply_task_class_defaults(self):
         if self.task_class is None:
-            self.task_class = TaskClass(infer_task_class(self.task_type).value)
-        if self.task_class == TaskClass.local_safety:
-            self.fallback_policy = "local_only"
+            self.task_class = infer_task_class(self.task_type)
+        if self.task_class is TaskClass.LOCAL_SAFETY:
+            self.allow_local_fallback = False
             self.safety_level = 5
         return self
 
@@ -135,7 +124,7 @@ class BenchmarkScene(BaseModel):
     tasks: List[Workload]
     workflow_id: str = ""
     workflow_deadline_ms: float = Field(default=0.0, ge=0)
-    failure_policy: FailurePolicy = FailurePolicy.skip_descendants
+    failure_policy: FailurePolicy = FailurePolicy.SKIP_DESCENDANTS
     stressors: List[str] = Field(default_factory=list)
     success_criteria: List[str] = Field(default_factory=list)
 
@@ -148,33 +137,9 @@ class BenchmarkScene(BaseModel):
         return tasks
 
     @model_validator(mode="after")
-    def dag_is_valid(self):
+    def apply_workflow_defaults(self):
         if not self.workflow_id:
             self.workflow_id = f"workflow_{self.id}"
-        task_ids = {task.id for task in self.tasks}
-        indegree = {task.id: len(task.dependencies) for task in self.tasks}
-        children = {task.id: [] for task in self.tasks}
-        for task in self.tasks:
-            if len(task.dependencies) != len(set(task.dependencies)):
-                raise ValueError(f"task {task.id} has duplicate dependencies")
-            if task.id in task.dependencies:
-                raise ValueError(f"task {task.id} depends on itself")
-            missing = [dep for dep in task.dependencies if dep not in task_ids]
-            if missing:
-                raise ValueError(f"task {task.id} has missing dependencies: {missing}")
-            for parent in task.dependencies:
-                children[parent].append(task.id)
-        queue = [task.id for task in self.tasks if indegree[task.id] == 0]
-        visited = 0
-        while queue:
-            task_id = queue.pop(0)
-            visited += 1
-            for child in children[task_id]:
-                indegree[child] -= 1
-                if indegree[child] == 0:
-                    queue.append(child)
-        if visited != len(self.tasks):
-            raise ValueError("task dependencies must form a DAG (cycle detected)")
         if self.workflow_deadline_ms <= 0:
             self.workflow_deadline_ms = max((task.deadline_ms for task in self.tasks), default=0.0)
         return self
@@ -182,8 +147,7 @@ class BenchmarkScene(BaseModel):
 
 class SimulateRequest(BaseModel):
     scene: BenchmarkScene
-    algorithm: Literal["dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost", "external"] = "dag_deadline"
-    external_scheduler_url: Optional[str] = None
+    algorithm: Literal["dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
     network_jitter: float = Field(default=0.1, ge=0, le=1)
     resource_noise: float = Field(default=0.05, ge=0, le=0.5)
     seed: int = Field(default=7, ge=0)

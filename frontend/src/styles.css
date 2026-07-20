@@ -179,13 +179,6 @@ input:focus, select:focus, textarea:focus {
   cursor: pointer;
 }
 
-.control-note {
-  color: var(--text-tertiary);
-  font-size: 12px;
-  line-height: 1.5;
-  margin: 8px 0 0;
-}
-
 .chips {
   display: flex;
   flex-wrap: wrap;

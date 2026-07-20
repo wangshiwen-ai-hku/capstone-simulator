@@ -1,4 +1,4 @@
-"""Unified edge scheduling core used by the API, simulator and transports."""
+"""MARS scheduling core used by the API, simulator, and transports."""
 
 from .dag import DagValidationError, TaskManager, validate_workflow
 from .models import (

@@ -1,6 +1,6 @@
 export type Difficulty = 'easy' | 'medium' | 'hard' | 'stress';
 export type ScenarioType = 'warehouse' | 'hospital' | 'campus' | 'factory' | 'disaster' | 'custom';
-export type Algorithm = 'dag_deadline' | 'rule_based' | 'local_first' | 'edge_first' | 'greedy_cost' | 'external';
+export type Algorithm = 'dag_deadline' | 'rule_based' | 'local_first' | 'edge_first' | 'greedy_cost';
 export type TaskClass = 'local_safety' | 'realtime_offloadable' | 'edge_heavy';
 
 export const TASK_CATEGORIES = [
@@ -67,7 +67,7 @@ export interface Workload {
   output_size_mb: number;
   bandwidth_requirement_mbps: number;
   energy_budget_j: number;
-  fallback_policy: string;
+  allow_local_fallback: boolean;
   result_verification: string;
   arrival_time_ms: number;
   deadline_ms: number;

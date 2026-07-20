@@ -1,4 +1,4 @@
-"""DAG validation and authoritative workflow/task lifecycle management."""
+"""DAG validation and authoritative MARS workflow lifecycle management."""
 
 from __future__ import annotations
 

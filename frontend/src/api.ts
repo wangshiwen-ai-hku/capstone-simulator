@@ -20,8 +20,8 @@ export function health() {
     provider: string;
     model: string;
     llm_configured: boolean;
-    architecture: string;
-    edgesched_version: string;
+    system: string;
+    mars_version: string;
   }>('/api/health');
 }
 
@@ -32,13 +32,12 @@ export function generateScene(payload: GenerateSceneRequest) {
   });
 }
 
-export function simulate(scene: BenchmarkScene, algorithm: Algorithm, externalSchedulerUrl?: string) {
+export function simulate(scene: BenchmarkScene, algorithm: Algorithm) {
   return request<SimulationResponse>('/api/simulate', {
     method: 'POST',
     body: JSON.stringify({
       scene,
       algorithm,
-      external_scheduler_url: externalSchedulerUrl || null,
       network_jitter: 0.12,
       resource_noise: 0.05,
       seed: 7,

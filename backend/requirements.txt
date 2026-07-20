@@ -5,4 +5,3 @@ pydantic>=2.10,<3
 pydantic-settings>=2.7,<3
 python-dotenv>=1.0,<2
 openai>=1.59,<3
-httpx>=0.28,<1

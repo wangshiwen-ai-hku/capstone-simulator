@@ -1,4 +1,4 @@
-"""DAG-aware placement, data-locality costing and hard task-class constraints."""
+"""DAG-aware placement, data-locality costing, and hard task-class constraints."""
 
 from __future__ import annotations
 

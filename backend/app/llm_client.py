@@ -6,9 +6,9 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 from openai import OpenAI
-
 from .config import Settings
-from .generators import build_deterministic_scene
+from .mars_adapter import validate_scene
+from .scene_generator import build_deterministic_scene
 from .schemas import BenchmarkScene, GenerateSceneRequest
 
 
@@ -43,7 +43,7 @@ The JSON schema must match the following high-level fields:
      "latency_budget_ms": number, "safety_level": integer 1-5,
      "model_requirement": string, "data_size_mb": number, "output_size_mb": number,
      "bandwidth_requirement_mbps": number, "energy_budget_j": number,
-     "fallback_policy": "local_only"|"edge_preferred"|"local_preferred"|"any",
+     "allow_local_fallback": boolean,
      "result_verification": string, "arrival_time_ms": number, "deadline_ms": number,
      "dependencies": [string], "stage_index": integer, "expected_accuracy": number}
   ],
@@ -88,7 +88,7 @@ Generate a benchmark scene with these controls:
 Important domain requirements:
 - Robot nodes are Jetson Orin-like and can execute local inference and safety tasks.
 - Edge nodes are PC/control-plane-like and can run heavier VLA/LLM/VLM workloads.
-- Use workload abstraction fields: task_type, compute_demand, latency_budget, safety_level, model_requirement, data_size, bandwidth_requirement, energy_budget, fallback_policy, result_verification.
+- Use workload abstraction fields: task_type, compute_demand, latency_budget, safety_level, model_requirement, data_size, bandwidth_requirement, energy_budget, allow_local_fallback, result_verification.
 - Build per-robot DAG pipelines with explicit dependencies and stage_index. Never emit a cycle or a missing dependency.
 - Classify every task into local_safety, realtime_offloadable, or edge_heavy using the semantics above.
 - Include realistic initial resources: CPU/GPU/memory utilization, temperature, power, network latency.
@@ -127,7 +127,9 @@ def generate_scene_with_llm(settings: Settings, req: GenerateSceneRequest) -> Be
         
         data = _extract_json(content)
         logger.info(f"Successfully extracted JSON from LLM response")
-        return BenchmarkScene.model_validate(data)
+        scene = BenchmarkScene.model_validate(data)
+        validate_scene(scene)
+        return scene
     except Exception as exc:
         logger.error(f"LLM generation failed with exception: {type(exc).__name__} - {str(exc)}")
         fallback = build_deterministic_scene(req)

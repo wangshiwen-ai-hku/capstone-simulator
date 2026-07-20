@@ -1,4 +1,4 @@
-"""Deterministic event-driven workflow simulator backed by the DAG state machine."""
+"""Deterministic event-driven workflow simulator backed by the MARS DAG state machine."""
 
 from __future__ import annotations
 
@@ -117,7 +117,7 @@ def run_workflow_simulation(
                 ]
                 assignment = choose_assignment(
                     task,
-                    algorithm="greedy_cost" if algorithm == "external" else algorithm,
+                    algorithm=algorithm,
                     ready_time_ms=at,
                     node_available=node_available,
                     nodes=node_by_id,
@@ -308,8 +308,8 @@ def run_workflow_simulation(
             ],
         },
         transport={
-            "active": "in_memory",
-            "contract_version": "edgesched.v2",
+            "active": "in_process_simulation",
+            "schema_version": "mars.v1",
             "profile_source": "synthetic_placeholder" if profiles is not None else "demand_formula_fallback",
         },
     )

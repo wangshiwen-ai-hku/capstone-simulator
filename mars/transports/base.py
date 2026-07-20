@@ -1,4 +1,4 @@
-"""Transport protocol implemented by scheduler communication adapters."""
+"""Transport protocol implemented by MARS communication adapters."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ class NodeRegistration:
     kind: NodeKind
     architecture: str
     capabilities: tuple[str, ...]
-    schema_version: str = "edgesched.v2"
+    schema_version: str = "mars.v1"
 
 
 @dataclass(frozen=True)
