@@ -27,14 +27,14 @@ The JSON schema must match the following high-level fields:
   "workflow_deadline_ms": number,
   "failure_policy": "skip_descendants" | "fail_fast",
   "nodes": [
-    {"id": string, "kind": "robot"|"edge"|"cloud", "display_name": string,
+    {"id": string, "kind": "robot"|"edge"|"cloud", "display_name": string, "architecture": string,
      "cpu_capacity": number, "gpu_capacity": number, "memory_gb": number,
      "bandwidth_mbps": number, "base_latency_ms": number, "battery_wh": number|null,
-     "safety_capable": boolean}
+     "safety_capable": boolean, "capabilities": [string], "supported_models": [string]}
   ],
   "initial_resources": [
     {"node_id": string, "cpu_util": number, "gpu_util": number, "memory_util": number,
-     "temperature_c": number, "power_w": number, "network_latency_ms": number}
+     "temperature_c": number, "power_w": number, "network_latency_ms": number, "online": boolean}
   ],
   "tasks": [
     {"id": string, "name": string, "source_robot_id": string, "task_type": string,
@@ -45,14 +45,21 @@ The JSON schema must match the following high-level fields:
      "bandwidth_requirement_mbps": number, "energy_budget_j": number,
      "allow_local_fallback": boolean,
      "result_verification": string, "arrival_time_ms": number, "deadline_ms": number,
-     "dependencies": [string], "stage_index": integer, "expected_accuracy": number}
+     "dependencies": [string], "stage_index": integer, "expected_accuracy": number,
+     "input_ports": [{"name": string, "message_type": string}],
+     "output_ports": [{"name": string, "message_type": string}]}
+  ],
+  "data_edges": [
+    {"producer_task": string, "producer_port": string,
+     "consumer_task": string, "consumer_port": string, "message_type": string}
   ],
   "stressors": [string],
   "success_criteria": [string]
 }
 Make the benchmark useful for comparing DAG-deadline, rule-based, greedy-cost, local-first and edge-first scheduling.
 Include heavy test cases: similar-task conflicts, priority differences, long chains, network bottlenecks, local fallback.
-Dependencies must reference tasks in the same response and form a valid directed acyclic graph.
+Dependencies and data_edges must reference tasks in the same response and form a valid directed acyclic graph.
+Every data edge must connect declared ports with the same message_type. One producer output may fan out to multiple consumers.
 Use exactly these workload semantics: local_safety must stay on its safety-capable source robot;
 realtime_offloadable includes YOLO/perception and may run on its source robot or edge;
 edge_heavy prefers the edge for VLA/LLM/map/data-heavy work.
@@ -89,7 +96,7 @@ Important domain requirements:
 - Robot nodes are Jetson Orin-like and can execute local inference and safety tasks.
 - Edge nodes are PC/control-plane-like and can run heavier VLA/LLM/VLM workloads.
 - Use workload abstraction fields: task_type, compute_demand, latency_budget, safety_level, model_requirement, data_size, bandwidth_requirement, energy_budget, allow_local_fallback, result_verification.
-- Build per-robot DAG pipelines with explicit dependencies and stage_index. Never emit a cycle or a missing dependency.
+- Build per-robot DAG pipelines with typed input/output ports, explicit data_edges, dependencies and stage_index. Never emit a cycle or a missing dependency.
 - Classify every task into local_safety, realtime_offloadable, or edge_heavy using the semantics above.
 - Include realistic initial resources: CPU/GPU/memory utilization, temperature, power, network latency.
 - Keep numeric values plausible and internally consistent.

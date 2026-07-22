@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
-from ..models import Assignment, NodeSnapshot, TaskCompletion, TaskInstance, WorkflowSpec
-from .base import NodeRegistration, TransportCapabilities
+from ..models import Assignment, NodeSnapshot, NodeSpec, TaskCompletion, TaskInstance, WorkflowSpec
+from .base import TransportCapabilities
 
 
 class InMemoryTransport:
@@ -20,16 +20,16 @@ class InMemoryTransport:
     )
 
     def __init__(self) -> None:
-        self.registrations: dict[str, NodeRegistration] = {}
+        self.registrations: dict[str, NodeSpec] = {}
         self.node_states: dict[str, NodeSnapshot] = {}
         self.workflows: dict[str, WorkflowSpec] = {}
         self.dispatches: list[tuple[TaskInstance, Assignment]] = []
         self.cancelled: dict[str, str] = {}
         self._completions: asyncio.Queue[TaskCompletion] = asyncio.Queue()
 
-    async def register(self, registration: NodeRegistration) -> bool:
-        duplicate = registration.node_id in self.registrations
-        self.registrations[registration.node_id] = registration
+    async def register(self, spec: NodeSpec) -> bool:
+        duplicate = spec.node_id in self.registrations
+        self.registrations[spec.node_id] = spec
         return not duplicate
 
     async def publish_node_state(self, snapshot: NodeSnapshot) -> None:

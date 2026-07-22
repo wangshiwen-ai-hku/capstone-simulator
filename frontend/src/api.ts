@@ -1,4 +1,11 @@
-import type { Algorithm, BenchmarkScene, GenerateSceneRequest, SimulationResponse } from './types';
+import type {
+  Algorithm,
+  BenchmarkScene,
+  GenerateSceneRequest,
+  RuntimeStatus,
+  RuntimeWorkflowRun,
+  SimulationResponse,
+} from './types';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
 
@@ -43,4 +50,34 @@ export function simulate(scene: BenchmarkScene, algorithm: Algorithm) {
       seed: 7,
     }),
   });
+}
+
+export function bootstrapRuntime() {
+  return request<RuntimeStatus>('/api/runtime/bootstrap', { method: 'POST' });
+}
+
+export function submitRuntimeWorkflow(
+  scene: BenchmarkScene,
+  algorithm: Algorithm,
+  seed: number,
+) {
+  return request<{ run_id: string; workflow_id: string; status: string }>(
+    '/api/runtime/workflows',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        scene,
+        algorithm,
+        seed,
+        max_attempts: 2,
+        inject_first_failure: true,
+        failure_task_type: 'local_llm_7b',
+        deterministic: true,
+      }),
+    },
+  );
+}
+
+export function getRuntimeWorkflow(runId: string) {
+  return request<RuntimeWorkflowRun>(`/api/runtime/workflows/${runId}`);
 }

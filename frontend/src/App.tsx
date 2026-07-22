@@ -1,6 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
-import { generateScene, health, simulate } from './api';
-import type { Algorithm, BenchmarkScene, Difficulty, GenerateSceneRequest, ScenarioType, SimulationResponse, TaskCategory } from './types';
+import {
+  bootstrapRuntime,
+  generateScene,
+  getRuntimeWorkflow,
+  health,
+  simulate,
+  submitRuntimeWorkflow,
+} from './api';
+import type {
+  Algorithm,
+  BenchmarkScene,
+  Difficulty,
+  GenerateSceneRequest,
+  RuntimeStatus,
+  RuntimeWorkflowRun,
+  ScenarioType,
+  SimulationResponse,
+  TaskCategory,
+} from './types';
 import { TASK_CATEGORIES } from './types';
 
 const scenarioOptions: ScenarioType[] = ['warehouse', 'hospital', 'campus', 'factory', 'disaster', 'custom'];
@@ -51,25 +68,40 @@ export default function App() {
   const [providerInfo, setProviderInfo] = useState<string>('checking backend...');
   const [scenarioType, setScenarioType] = useState<ScenarioType>('warehouse');
   const [customScene, setCustomScene] = useState('');
-  const [robotCount, setRobotCount] = useState(4);
+  const [robotCount, setRobotCount] = useState(2);
   const [edgeCount, setEdgeCount] = useState(1);
   const [difficulty, setDifficulty] = useState<Difficulty>('medium');
-  const [useLlm, setUseLlm] = useState(true);
+  const [useLlm, setUseLlm] = useState(false);
   const [seed, setSeed] = useState(7);
-  const [taskCategories, setTaskCategories] = useState<TaskCategory[]>(['obstacle_avoidance', 'object_detection', 'path_planning', 'vla_inference']);
+  const [taskCategories, setTaskCategories] = useState<TaskCategory[]>([
+    'localization',
+    'environment_understanding',
+    'object_detection',
+    'semantic_segmentation',
+    'local_planning',
+    'obstacle_avoidance',
+    'local_control',
+    'local_llm_7b',
+  ]);
   const [algorithm, setAlgorithm] = useState<Algorithm>('dag_deadline');
   const [scene, setScene] = useState<BenchmarkScene | null>(null);
   const [result, setResult] = useState<SimulationResponse | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [runtimeRun, setRuntimeRun] = useState<RuntimeWorkflowRun | null>(null);
   const [loading, setLoading] = useState(false);
+  const [runtimeLoading, setRuntimeLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<'overview' | 'dag' | 'tasks' | 'json' | 'logs'>('overview');
+  const [tab, setTab] = useState<'overview' | 'dag' | 'tasks' | 'runtime' | 'json' | 'logs'>('overview');
 
   useEffect(() => {
     health()
       .then((h) => setProviderInfo(
-        `MARS ${h.mars_version} · in-process simulator · LLM ${h.llm_configured ? 'configured' : 'fallback'}`,
+        `MARS ${h.mars_version} · local agent runtime · LLM ${h.llm_configured ? 'configured' : 'fallback'}`,
       ))
       .catch((e) => setProviderInfo(`backend unavailable: ${e.message}`));
+    bootstrapRuntime()
+      .then(setRuntimeStatus)
+      .catch(() => setRuntimeStatus(null));
   }, []);
 
   const requestPayload: GenerateSceneRequest = useMemo(() => ({
@@ -118,6 +150,35 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function onRuntimeRun() {
+    if (!scene) return;
+    setRuntimeLoading(true);
+    setError(null);
+    setRuntimeRun(null);
+    setTab('runtime');
+    try {
+      const accepted = await submitRuntimeWorkflow(scene, algorithm, seed);
+      let run: RuntimeWorkflowRun | null = null;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        run = await getRuntimeWorkflow(accepted.run_id);
+        setRuntimeRun(run);
+        if (run.status === 'succeeded' || run.status === 'failed') break;
+        await new Promise((resolve) => window.setTimeout(resolve, 80));
+      }
+      if (!run || (run.status !== 'succeeded' && run.status !== 'failed')) {
+        throw new Error('本地运行时未在预期时间内返回结果。');
+      }
+      if (run.status === 'failed') {
+        throw new Error(run.error || '本地 Agent 工作流运行失败。');
+      }
+      setRuntimeStatus(await bootstrapRuntime());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRuntimeLoading(false);
     }
   }
 
@@ -191,6 +252,10 @@ export default function App() {
             {algorithmOptions.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
           <button className="secondary" onClick={onSimulate} disabled={!scene || loading}>运行仿真 / 评估</button>
+          <button className="primary runtime-run" onClick={onRuntimeRun} disabled={!scene || runtimeLoading}>
+            {runtimeLoading ? 'Agent 运行中...' : '运行 2 Orin + 1 Edge 演示'}
+          </button>
+          <p className="control-note">中央 Scheduler 动态分配任务，并注入一次可恢复失败来展示 retry。</p>
         </aside>
 
         <section className="panel workspace">
@@ -209,13 +274,15 @@ export default function App() {
                 <button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>概览</button>
                 <button className={tab === 'dag' ? 'active' : ''} onClick={() => setTab('dag')}>DAG</button>
                 <button className={tab === 'tasks' ? 'active' : ''} onClick={() => setTab('tasks')}>任务</button>
+                <button className={tab === 'runtime' ? 'active' : ''} onClick={() => setTab('runtime')}>Agent 运行</button>
                 <button className={tab === 'json' ? 'active' : ''} onClick={() => setTab('json')}>JSON</button>
                 <button className={tab === 'logs' ? 'active' : ''} onClick={() => setTab('logs')}>日志</button>
               </nav>
 
               {tab === 'overview' && <Overview scene={scene} result={result} />}
-              {tab === 'dag' && <DagView scene={scene} result={result} />}
+              {tab === 'dag' && <DagView scene={scene} result={result} runtimeRun={runtimeRun} />}
               {tab === 'tasks' && <Tasks scene={scene} result={result} />}
+              {tab === 'runtime' && <RuntimeView status={runtimeStatus} run={runtimeRun} />}
               {tab === 'json' && <pre className="json-view">{JSON.stringify({ scene, result }, null, 2)}</pre>}
               {tab === 'logs' && <Logs result={result} />}
             </>
@@ -230,7 +297,7 @@ function EmptyState() {
   return (
     <div className="empty">
       <h2>先生成一个 benchmark scene</h2>
-      <p>推荐先用 warehouse / hard / 4 robots / 1 edge PC / obstacle avoidance + YOLO + path planning + VLA，完整展示三类任务和 DAG。</p>
+      <p>推荐先用 warehouse / medium / 2 Orin / 1 edge，展示三类任务、定位 fan-out、动态分配和数据移动。</p>
     </div>
   );
 }
@@ -242,7 +309,7 @@ function Overview({ scene, result }: { scene: BenchmarkScene; result: Simulation
         <div className="card"><span>Nodes</span><strong>{scene.nodes.length}</strong></div>
         <div className="card"><span>Robots</span><strong>{scene.nodes.filter((n) => n.kind === 'robot').length}</strong></div>
         <div className="card"><span>Tasks</span><strong>{scene.tasks.length}</strong></div>
-        <div className="card"><span>Workflow</span><strong className="workflow-state">{result?.workflow.state ?? 'validated'}</strong></div>
+        <div className="card"><span>Data edges</span><strong>{scene.data_edges.length}</strong></div>
       </div>
 
       {result && (
@@ -338,11 +405,21 @@ function Tasks({ scene, result }: { scene: BenchmarkScene; result: SimulationRes
   );
 }
 
-function DagView({ scene, result }: { scene: BenchmarkScene; result: SimulationResponse | null }) {
-  const levels = result?.dag.levels ?? Object.fromEntries(scene.tasks.map((task) => [task.id, task.stage_index]));
+function DagView({
+  scene,
+  result,
+  runtimeRun,
+}: {
+  scene: BenchmarkScene;
+  result: SimulationResponse | null;
+  runtimeRun: RuntimeWorkflowRun | null;
+}) {
+  const runtimeResult = runtimeRun?.result ?? null;
+  const levels = result?.dag.levels ?? runtimeResult?.workflow.levels ?? Object.fromEntries(scene.tasks.map((task) => [task.id, task.stage_index]));
   const maxLevel = Math.max(0, ...Object.values(levels));
-  const critical = new Set(result?.workflow.critical_path ?? []);
+  const critical = new Set(result?.workflow.critical_path ?? runtimeResult?.workflow.critical_path ?? []);
   const resultMap = new Map(result?.task_results.map((item) => [item.task_id, item]) ?? []);
+  const runtimeMap = new Map(runtimeResult?.task_results.map((item) => [item.task_id, item]) ?? []);
   return (
     <div className="dag-view">
       <div className="dag-summary">
@@ -357,7 +434,7 @@ function DagView({ scene, result }: { scene: BenchmarkScene; result: SimulationR
             <div className="stage-label">Stage {level}</div>
             <div className="stage-nodes">
               {scene.tasks.filter((task) => levels[task.id] === level).map((task) => {
-                const run = resultMap.get(task.id);
+                const run = resultMap.get(task.id) ?? runtimeMap.get(task.id);
                 return (
                   <article className={`dag-node ${task.task_class} ${critical.has(task.id) ? 'critical' : ''}`} key={task.id}>
                     <div><strong>{task.id}</strong><span>{run?.state ?? 'pending'}</span></div>
@@ -370,6 +447,21 @@ function DagView({ scene, result }: { scene: BenchmarkScene; result: SimulationR
           </section>
         ))}
       </div>
+      {scene.data_edges.length > 0 && (
+        <>
+          <h3>Typed data flow</h3>
+          <div className="data-edge-list">
+            {scene.data_edges.map((edge) => (
+              <div className="data-edge" key={`${edge.producer_task}.${edge.producer_port}-${edge.consumer_task}.${edge.consumer_port}`}>
+                <code>{edge.producer_task}.{edge.producer_port}</code>
+                <span>→</span>
+                <code>{edge.consumer_task}.{edge.consumer_port}</code>
+                <small>{edge.message_type}</small>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
       <p className="muted">高亮边框表示关键路径；运行后节点会显示终态与实际执行位置。</p>
     </div>
   );
@@ -378,4 +470,125 @@ function DagView({ scene, result }: { scene: BenchmarkScene; result: SimulationR
 function Logs({ result }: { result: SimulationResponse | null }) {
   if (!result) return <p className="muted">运行仿真后这里会显示调度日志。</p>;
   return <pre className="json-view">{result.logs.join('\n')}</pre>;
+}
+
+function RuntimeView({ status, run }: { status: RuntimeStatus | null; run: RuntimeWorkflowRun | null }) {
+  const result = run?.result ?? null;
+  const agents = result?.agents ?? status?.agents ?? [];
+  return (
+    <div className="runtime-view">
+      <div className="runtime-topology">
+        <div className="topology-node scheduler-node">
+          <span>Control plane</span>
+          <strong>MARS Central Scheduler</strong>
+          <small>{status?.status ?? 'starting'}</small>
+        </div>
+        <div className="topology-arrow">→</div>
+        <div className="topology-agents">
+          {agents.map((agent) => (
+            <div className={`topology-node ${agent.kind}`} key={agent.agent_id}>
+              <span>{agent.kind === 'robot' ? 'Simulated Orin Agent' : 'Simulated Edge Agent'}</span>
+              <strong>{agent.agent_id}</strong>
+              <small>{agent.registered && agent.online ? 'registered · online' : 'offline'} · heartbeat {agent.heartbeat_sequence}</small>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {!run && <p className="runtime-hint">运行本地三 Agent 演示后，这里会展示 assignment、数据传输、失败重试、Artifact 和最终结果。</p>}
+      {run && !result && <p className="runtime-hint">{run.workflow_id} · {run.status}</p>}
+
+      {result && (
+        <>
+          <h3>Runtime result · {result.workflow.state}</h3>
+          <div className="metrics-grid runtime-metrics">
+            {Object.entries(result.metrics).map(([key, value]) => (
+              <div className="metric" key={key}>
+                <span>{runtimeMetricLabel(key)}</span>
+                <strong>{runtimeMetricValue(key, value)}</strong>
+              </div>
+            ))}
+          </div>
+
+          <h3>Agent execution</h3>
+          <div className="agent-runtime-grid">
+            {result.agents.map((agent) => (
+              <div className="agent-runtime-card" key={agent.agent_id}>
+                <div><strong>{agent.agent_id}</strong><span className={agent.online ? 'ok' : 'bad'}>{agent.online ? 'online' : 'offline'}</span></div>
+                <p>{agent.architecture} · max concurrency {agent.max_concurrency}</p>
+                <small>completed {agent.completed_attempts} · failed attempts {agent.failed_attempts} · utilization {pct(agent.utilization)}</small>
+              </div>
+            ))}
+          </div>
+
+          <h3>Assignments and attempts</h3>
+          <div className="table-wrap runtime-table">
+            <table>
+              <thead>
+                <tr><th>Task</th><th>Class</th><th>Final placement</th><th>Attempts</th><th>Outputs</th><th>State</th></tr>
+              </thead>
+              <tbody>
+                {result.task_results.map((task) => (
+                  <tr key={task.task_id}>
+                    <td><strong>{task.task_id}</strong><br /><span>{task.task_type}</span></td>
+                    <td><span className={`task-class ${task.task_class}`}>{taskClassLabels[task.task_class]}</span></td>
+                    <td>{task.target_node_id || '-'}<span>{task.mode || 'not assigned'}</span></td>
+                    <td>
+                      {task.attempts.length === 0 ? '-' : task.attempts.map((attempt) => (
+                        <span className={`attempt-line ${attempt.state}`} key={attempt.attempt_id}>
+                          #{attempt.attempt_no} {attempt.target_node_id} · {attempt.state}
+                          {attempt.error_code ? ` · ${attempt.error_code}` : ''}
+                        </span>
+                      ))}
+                    </td>
+                    <td>{task.outputs.map((output) => `${output.producer_port} (${output.size_mb.toFixed(3)} MB)`).join(', ') || '-'}</td>
+                    <td><span className={task.state === 'succeeded' ? 'ok' : 'bad'}>{task.state}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Control-plane events</h3>
+          <div className="event-list">
+            {result.events.map((event) => (
+              <div className={`runtime-event ${event.event_type}`} key={event.sequence}>
+                <code>#{event.sequence} · {event.time_ms.toFixed(1)} ms</code>
+                <strong>{event.event_type}</strong>
+                <span>{event.message}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function runtimeMetricLabel(key: string) {
+  const labels: Record<string, string> = {
+    task_count: 'Tasks',
+    succeeded_task_count: 'Succeeded',
+    failed_task_count: 'Failed',
+    success_rate: 'Success',
+    attempt_count: 'Attempts',
+    retry_count: 'Retries',
+    retry_success_count: 'Recovered',
+    transferred_mb: 'Transferred',
+    transfer_time_ms: 'Transfer time',
+    total_energy_j: 'Energy',
+    makespan_ms: 'Makespan',
+    edge_offload_ratio: 'Edge offload',
+    safety_violation_count: 'Safety violations',
+    critical_path_ms: 'Critical path',
+  };
+  return labels[key] ?? key;
+}
+
+function runtimeMetricValue(key: string, value: number) {
+  if (key.includes('rate') || key.includes('ratio')) return pct(value);
+  if (key.endsWith('_ms')) return `${value.toFixed(1)} ms`;
+  if (key.endsWith('_mb')) return `${value.toFixed(3)} MB`;
+  if (key.endsWith('_j')) return `${value.toFixed(2)} J`;
+  return `${value}`;
 }

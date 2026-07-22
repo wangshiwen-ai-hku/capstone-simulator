@@ -6,9 +6,12 @@ from mars.dag import DagValidationError, TaskManager, validate_workflow
 from mars.engine import run_workflow_simulation
 from mars.models import (
     ArtifactRef,
+    DataEdge,
+    DataPort,
     FailurePolicy,
     NodeKind,
     NodeSnapshot,
+    NodeSpec,
     TaskClass,
     TaskInstance,
     TaskSpec,
@@ -53,11 +56,32 @@ def task(
     )
 
 
-def nodes() -> list[NodeSnapshot]:
+def node_specs() -> list[NodeSpec]:
     return [
-        NodeSnapshot("robot_1", NodeKind.ROBOT, 1, 1, 16, 100, 2, power_w=20),
-        NodeSnapshot("edge_1", NodeKind.EDGE, 5, 4, 64, 1000, 5, power_w=120, safety_capable=False),
+        NodeSpec("robot_1", NodeKind.ROBOT, 1, 1, 16, 100, 2, architecture="jetson-orin"),
+        NodeSpec(
+            "edge_1",
+            NodeKind.EDGE,
+            5,
+            4,
+            64,
+            1000,
+            5,
+            architecture="x86_64-cuda",
+            safety_capable=False,
+        ),
     ]
+
+
+def node_snapshots() -> list[NodeSnapshot]:
+    return [
+        NodeSnapshot("robot_1", power_w=20),
+        NodeSnapshot("edge_1", power_w=120),
+    ]
+
+
+def snapshot_map() -> dict[str, NodeSnapshot]:
+    return {snapshot.node_id: snapshot for snapshot in node_snapshots()}
 
 
 class DagValidationTests(unittest.TestCase):
@@ -80,8 +104,155 @@ class DagValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(DagValidationError, "missing dependencies"):
             validate_workflow(WorkflowSpec("wf", (task("a", dependencies=("missing",)),)))
 
+    def test_data_edges_add_dependencies_and_allow_output_fan_out(self):
+        localization = task("localization")
+        localization = TaskInstance(
+            **{
+                **localization.__dict__,
+                "spec": TaskSpec(
+                    **{
+                        **localization.spec.__dict__,
+                        "output_ports": (
+                            DataPort("state", "localization_state"),
+                        ),
+                    }
+                ),
+            }
+        )
+        perception = task("perception")
+        perception = TaskInstance(
+            **{
+                **perception.__dict__,
+                "spec": TaskSpec(
+                    **{
+                        **perception.spec.__dict__,
+                        "input_ports": (
+                            DataPort("ego_state", "localization_state"),
+                        ),
+                    }
+                ),
+            }
+        )
+        planning = task("planning")
+        planning = TaskInstance(
+            **{
+                **planning.__dict__,
+                "spec": TaskSpec(
+                    **{
+                        **planning.spec.__dict__,
+                        "input_ports": (
+                            DataPort("ego_state", "localization_state"),
+                        ),
+                    }
+                ),
+            }
+        )
+        workflow = WorkflowSpec(
+            "wf",
+            (localization, perception, planning),
+            data_edges=(
+                DataEdge(
+                    "localization",
+                    "state",
+                    "perception",
+                    "ego_state",
+                    "localization_state",
+                ),
+                DataEdge(
+                    "localization",
+                    "state",
+                    "planning",
+                    "ego_state",
+                    "localization_state",
+                ),
+            ),
+        )
+
+        index = validate_workflow(workflow)
+
+        self.assertEqual(index.parents["perception"], ("localization",))
+        self.assertEqual(index.parents["planning"], ("localization",))
+        self.assertEqual(len(index.outgoing_edges["localization"]), 2)
+
+    def test_rejects_data_edge_port_and_type_mismatches(self):
+        producer = task("producer")
+        producer = TaskInstance(
+            **{
+                **producer.__dict__,
+                "spec": TaskSpec(
+                    **{
+                        **producer.spec.__dict__,
+                        "output_ports": (DataPort("result", "detections"),),
+                    }
+                ),
+            }
+        )
+        consumer = task("consumer")
+        consumer = TaskInstance(
+            **{
+                **consumer.__dict__,
+                "spec": TaskSpec(
+                    **{
+                        **consumer.spec.__dict__,
+                        "input_ports": (DataPort("input", "planned_path"),),
+                    }
+                ),
+            }
+        )
+        workflow = WorkflowSpec(
+            "wf",
+            (producer, consumer),
+            data_edges=(
+                DataEdge(
+                    "producer",
+                    "result",
+                    "consumer",
+                    "input",
+                    "detections",
+                ),
+            ),
+        )
+
+        with self.assertRaisesRegex(DagValidationError, "type mismatch"):
+            validate_workflow(workflow)
+
+        missing_port = WorkflowSpec(
+            "wf",
+            (producer, consumer),
+            data_edges=(
+                DataEdge(
+                    "producer",
+                    "missing",
+                    "consumer",
+                    "input",
+                    "detections",
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(DagValidationError, "no output port"):
+            validate_workflow(missing_port)
+
 
 class TaskManagerTests(unittest.TestCase):
+    def test_legacy_single_artifact_api_is_normalized_to_outputs(self):
+        manager = TaskManager()
+        manager.submit(WorkflowSpec("wf", (task("capture"),)))
+        artifact = ArtifactRef("frame", "capture", "robot_1", 1.5)
+        manager.mark_running("capture")
+
+        manager.complete(
+            "capture",
+            ok=True,
+            finished_time_ms=10,
+            artifact=artifact,
+        )
+
+        self.assertIs(manager.artifact_for("capture"), artifact)
+        self.assertEqual(manager.artifacts_for("capture"), (artifact,))
+        completion = manager.completion_of("capture")
+        self.assertIsNotNone(completion)
+        self.assertEqual(completion.outputs, (artifact,))
+
     def test_children_are_blocked_until_all_parents_succeed(self):
         manager = TaskManager()
         manager.submit(WorkflowSpec("wf", (task("a"), task("b"), task("c", dependencies=("a", "b")))))
@@ -115,14 +286,161 @@ class TaskManagerTests(unittest.TestCase):
         _, skipped = manager.complete("a", ok=False, finished_time_ms=10)
         self.assertEqual(set(skipped), {"independent", "c"})
 
+    def test_stores_multiple_outputs_and_reuses_one_artifact_for_fan_out(self):
+        localization = task("localization")
+        localization = TaskInstance(
+            **{
+                **localization.__dict__,
+                "spec": TaskSpec(
+                    **{
+                        **localization.spec.__dict__,
+                        "output_ports": (
+                            DataPort("state", "localization_state"),
+                            DataPort("transform", "coordinate_transform"),
+                        ),
+                    }
+                ),
+            }
+        )
+        perception = task("perception")
+        perception = TaskInstance(
+            **{
+                **perception.__dict__,
+                "spec": TaskSpec(
+                    **{
+                        **perception.spec.__dict__,
+                        "input_ports": (DataPort("ego_state", "localization_state"),),
+                    }
+                ),
+            }
+        )
+        planning = task("planning")
+        planning = TaskInstance(
+            **{
+                **planning.__dict__,
+                "spec": TaskSpec(
+                    **{
+                        **planning.spec.__dict__,
+                        "input_ports": (DataPort("ego_state", "localization_state"),),
+                    }
+                ),
+            }
+        )
+        manager = TaskManager()
+        manager.submit(
+            WorkflowSpec(
+                "wf",
+                (localization, perception, planning),
+                data_edges=(
+                    DataEdge(
+                        "localization",
+                        "state",
+                        "perception",
+                        "ego_state",
+                        "localization_state",
+                    ),
+                    DataEdge(
+                        "localization",
+                        "state",
+                        "planning",
+                        "ego_state",
+                        "localization_state",
+                    ),
+                ),
+            )
+        )
+        state = ArtifactRef(
+            "localization-state",
+            "localization",
+            "robot_1",
+            0.01,
+            producer_port="state",
+            message_type="localization_state",
+        )
+        transform = ArtifactRef(
+            "localization-transform",
+            "localization",
+            "robot_1",
+            0.02,
+            producer_port="transform",
+            message_type="coordinate_transform",
+        )
+
+        manager.mark_running("localization")
+        released, _ = manager.complete(
+            "localization",
+            ok=True,
+            finished_time_ms=10,
+            outputs=(state, transform),
+        )
+
+        self.assertEqual(set(released), {"perception", "planning"})
+        self.assertEqual(manager.artifacts_for("localization"), (state, transform))
+        self.assertIs(manager.input_artifacts_for("perception")[0], state)
+        self.assertIs(manager.input_artifacts_for("planning")[0], state)
+        self.assertIs(manager.artifact_for("localization", "transform"), transform)
+        with self.assertRaisesRegex(ValueError, "multiple outputs"):
+            manager.artifact_for("localization")
+
+    def test_success_rejects_missing_required_edge_output_without_state_change(self):
+        producer = task("producer")
+        producer = TaskInstance(
+            **{
+                **producer.__dict__,
+                "spec": TaskSpec(
+                    **{
+                        **producer.spec.__dict__,
+                        "output_ports": (DataPort("result", "result_type"),),
+                    }
+                ),
+            }
+        )
+        consumer = task("consumer")
+        consumer = TaskInstance(
+            **{
+                **consumer.__dict__,
+                "spec": TaskSpec(
+                    **{
+                        **consumer.spec.__dict__,
+                        "input_ports": (DataPort("input", "result_type"),),
+                    }
+                ),
+            }
+        )
+        manager = TaskManager()
+        manager.submit(
+            WorkflowSpec(
+                "wf",
+                (producer, consumer),
+                data_edges=(
+                    DataEdge(
+                        "producer",
+                        "result",
+                        "consumer",
+                        "input",
+                        "result_type",
+                    ),
+                ),
+            )
+        )
+        manager.mark_running("producer")
+
+        with self.assertRaisesRegex(ValueError, "missing required output ports"):
+            manager.complete("producer", ok=True, finished_time_ms=10)
+        self.assertEqual(manager.state_of("producer"), TaskState.RUNNING)
+
 
 class PlacementTests(unittest.TestCase):
     def test_local_safety_can_only_run_on_source_robot(self):
-        candidates = allowed_nodes(task("avoid", TaskClass.LOCAL_SAFETY), nodes())
+        candidates = allowed_nodes(
+            task("avoid", TaskClass.LOCAL_SAFETY),
+            node_specs(),
+            snapshot_map(),
+        )
         self.assertEqual([candidate.node_id for candidate in candidates], ["robot_1"])
 
     def test_local_safety_rejects_edge_even_if_marked_safety_capable(self):
-        edge = NodeSnapshot(
+        edge = NodeSpec(
             "edge_1",
             NodeKind.EDGE,
             5,
@@ -130,53 +448,62 @@ class PlacementTests(unittest.TestCase):
             64,
             1000,
             5,
-            power_w=120,
             safety_capable=True,
         )
+        edge_snapshot = NodeSnapshot("edge_1", power_w=120)
         item = task(
             "avoid",
             TaskClass.LOCAL_SAFETY,
             source_node_id="edge_1",
         )
-        self.assertEqual(allowed_nodes(item, [edge]), [])
+        self.assertEqual(allowed_nodes(item, [edge], {"edge_1": edge_snapshot}), [])
         estimate = estimate_candidate(
             item,
             edge,
             ready_time_ms=0,
             node_available_ms=0,
-            nodes={edge.node_id: edge},
+            node_specs={edge.node_id: edge},
+            node_snapshots={edge_snapshot.node_id: edge_snapshot},
             parent_artifacts=(),
         )
         self.assertFalse(estimate.feasible)
         self.assertEqual(estimate.reason, "local_safety_requires_safety_capable_source_robot")
 
     def test_yolo_class_can_use_robot_or_edge(self):
-        candidates = allowed_nodes(task("yolo", TaskClass.REALTIME_OFFLOADABLE), nodes())
+        candidates = allowed_nodes(
+            task("yolo", TaskClass.REALTIME_OFFLOADABLE),
+            node_specs(),
+            snapshot_map(),
+        )
         self.assertEqual({candidate.node_id for candidate in candidates}, {"robot_1", "edge_1"})
 
     def test_edge_heavy_can_disable_local_fallback(self):
         candidates = allowed_nodes(
             task("vla", TaskClass.EDGE_HEAVY, allow_local_fallback=False),
-            nodes(),
+            node_specs(),
+            snapshot_map(),
         )
         self.assertEqual([candidate.node_id for candidate in candidates], ["edge_1"])
 
     def test_edge_heavy_can_explicitly_allow_local_fallback(self):
         candidates = allowed_nodes(
             task("vla", TaskClass.EDGE_HEAVY, allow_local_fallback=True),
-            nodes(),
+            node_specs(),
+            snapshot_map(),
         )
         self.assertEqual([candidate.node_id for candidate in candidates], ["edge_1", "robot_1"])
 
     def test_parent_artifact_location_replaces_source_upload_assumption(self):
         task_b = task("b", dependencies=("a",))
-        node_by_id = {node.node_id: node for node in nodes()}
+        node_by_id = {node.node_id: node for node in node_specs()}
+        snapshots = snapshot_map()
         estimate = estimate_candidate(
             task_b,
             node_by_id["edge_1"],
             ready_time_ms=10,
             node_available_ms=0,
-            nodes=node_by_id,
+            node_specs=node_by_id,
+            node_snapshots=snapshots,
             parent_artifacts=(ArtifactRef("x", "a", "edge_1", 20.0),),
         )
         self.assertEqual(estimate.communication_ms, 0.0)
@@ -201,7 +528,13 @@ class EngineTests(unittest.TestCase):
             ),
             deadline_time_ms=5000,
         )
-        report = run_workflow_simulation(workflow, nodes(), algorithm="dag_deadline", seed=2)
+        report = run_workflow_simulation(
+            workflow,
+            node_specs(),
+            node_snapshots(),
+            algorithm="dag_deadline",
+            seed=2,
+        )
         self.assertTrue(report.dag["valid"])
         self.assertEqual(report.metrics["safety_violation_count"], 0)
         self.assertEqual(set(report.task_class_summary), {item.value for item in TaskClass})
@@ -217,7 +550,12 @@ class EngineTests(unittest.TestCase):
                 task("child", dependencies=("root",)),
             ),
         )
-        report = run_workflow_simulation(workflow, [nodes()[0]], seed=2)
+        report = run_workflow_simulation(
+            workflow,
+            [node_specs()[0]],
+            [node_snapshots()[0]],
+            seed=2,
+        )
         result = {item.task_id: item for item in report.task_results}
         self.assertGreaterEqual(result["future"].start_time_ms, 1000)
         self.assertLess(result["child"].finish_time_ms, result["future"].start_time_ms)
@@ -226,7 +564,8 @@ class EngineTests(unittest.TestCase):
         workflow = WorkflowSpec("wf", (task("failure", accuracy=0.0, deadline=5000),))
         report = run_workflow_simulation(
             workflow,
-            [nodes()[0]],
+            [node_specs()[0]],
+            [node_snapshots()[0]],
             seed=2,
             network_jitter=0,
             resource_noise=0,
@@ -260,7 +599,8 @@ class EngineTests(unittest.TestCase):
         )
         report = run_workflow_simulation(
             WorkflowSpec("wf", (task("measured"),)),
-            [nodes()[0]],
+            [node_specs()[0]],
+            [node_snapshots()[0]],
             profiles=catalog,
             seed=2,
         )
@@ -292,7 +632,8 @@ class EngineTests(unittest.TestCase):
         )
         report = run_workflow_simulation(
             WorkflowSpec("wf", (task("unprofiled"),)),
-            [nodes()[0]],
+            [node_specs()[0]],
+            [node_snapshots()[0]],
             profiles=catalog,
             seed=2,
         )

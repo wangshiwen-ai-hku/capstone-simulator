@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -60,6 +61,79 @@ class ApiTests(unittest.TestCase):
         payload = simulated.json()
         self.assertTrue(payload["dag"]["valid"])
         self.assertEqual(payload["metrics"]["task_count"], len(scene["tasks"]))
+
+    def test_workload_catalog_covers_three_classes_and_requested_modules(self):
+        response = self.client.get("/api/workload-catalog")
+        self.assertEqual(response.status_code, 200)
+        workloads = response.json()["workloads"]
+        self.assertEqual(
+            {item["task_class"] for item in workloads},
+            {"local_safety", "realtime_offloadable", "edge_heavy"},
+        )
+        task_types = {item["task_type"] for item in workloads}
+        self.assertTrue(
+            {
+                "obstacle_avoidance",
+                "local_control",
+                "environment_understanding",
+                "semantic_segmentation",
+                "local_llm_7b",
+                "local_llm_10b",
+            }.issubset(task_types)
+        )
+
+    def test_local_runtime_bootstrap_submit_retry_and_result_flow(self):
+        bootstrapped = self.client.post("/api/runtime/bootstrap")
+        self.assertEqual(bootstrapped.status_code, 200)
+        runtime = bootstrapped.json()
+        self.assertEqual(
+            runtime["topology"],
+            {"central_schedulers": 1, "orin_agents": 2, "edge_agents": 1},
+        )
+        self.assertEqual(len(runtime["agents"]), 3)
+        self.assertTrue(all(agent["registered"] for agent in runtime["agents"]))
+
+        scene = self.client.post(
+            "/api/generate-scene",
+            json={"robot_count": 2, "edge_count": 1, "use_llm": False, "seed": 23},
+        ).json()
+        accepted = self.client.post(
+            "/api/runtime/workflows",
+            json={
+                "scene": scene,
+                "algorithm": "dag_deadline",
+                "seed": 23,
+                "max_attempts": 2,
+                "inject_first_failure": True,
+                "failure_task_type": "local_llm_7b",
+            },
+        )
+        self.assertEqual(accepted.status_code, 202)
+        run_id = accepted.json()["run_id"]
+
+        payload = None
+        for _ in range(100):
+            response = self.client.get(f"/api/runtime/workflows/{run_id}")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            if payload["status"] in {"succeeded", "failed"}:
+                break
+            time.sleep(0.01)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["status"], "succeeded")
+        result = payload["result"]
+        self.assertEqual(result["metrics"]["retry_count"], 1)
+        self.assertEqual(result["metrics"]["retry_success_count"], 1)
+        self.assertEqual(len(result["agents"]), 3)
+        self.assertTrue(result["data_edges"])
+
+        events = self.client.get(
+            f"/api/runtime/workflows/{run_id}/events?after_sequence=0"
+        )
+        self.assertEqual(events.status_code, 200)
+        event_types = {event["event_type"] for event in events.json()["events"]}
+        self.assertIn("attempt_dispatched", event_types)
+        self.assertIn("retry_scheduled", event_types)
 
 
 class LlmFallbackTests(unittest.TestCase):

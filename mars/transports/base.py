@@ -5,15 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import AsyncIterator, Protocol
 
-from ..models import Assignment, NodeKind, NodeSnapshot, TaskCompletion, TaskInstance, WorkflowSpec
-
-
-@dataclass(frozen=True)
-class NodeRegistration:
-    node_id: str
-    kind: NodeKind
-    architecture: str
-    capabilities: tuple[str, ...]
+from ..models import Assignment, NodeSnapshot, NodeSpec, TaskCompletion, TaskInstance, WorkflowSpec
 
 
 @dataclass(frozen=True)
@@ -31,7 +23,7 @@ class SchedulerTransport(Protocol):
 
     capabilities: TransportCapabilities
 
-    async def register(self, registration: NodeRegistration) -> bool: ...
+    async def register(self, spec: NodeSpec) -> bool: ...
 
     async def publish_node_state(self, snapshot: NodeSnapshot) -> None: ...
 

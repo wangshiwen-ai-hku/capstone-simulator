@@ -85,6 +85,14 @@ class ResourceClass(str, enum.Enum):
 
 
 @dataclass(frozen=True)
+class DataPort:
+    """A middleware-neutral, typed input or output of a task."""
+
+    name: str
+    message_type: str
+
+
+@dataclass(frozen=True)
 class TaskSpec:
     task_type: str
     task_class: TaskClass
@@ -98,6 +106,8 @@ class TaskSpec:
     energy_budget_j: float = 0.0
     dominant_resource: ResourceClass = ResourceClass.GPU
     allow_local_fallback: bool = True
+    input_ports: tuple[DataPort, ...] = ()
+    output_ports: tuple[DataPort, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -117,12 +127,24 @@ class TaskInstance:
 
 
 @dataclass(frozen=True)
+class DataEdge:
+    """Bind one producer output port to one consumer input port."""
+
+    producer_task: str
+    producer_port: str
+    consumer_task: str
+    consumer_port: str
+    message_type: str
+
+
+@dataclass(frozen=True)
 class WorkflowSpec:
     workflow_id: str
     tasks: tuple[TaskInstance, ...]
     deadline_time_ms: float = 0.0
     failure_policy: FailurePolicy = FailurePolicy.SKIP_DESCENDANTS
     metadata: Mapping[str, str] = field(default_factory=dict)
+    data_edges: tuple[DataEdge, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -133,10 +155,14 @@ class ArtifactRef:
     size_mb: float
     uri: str = ""
     checksum: str = ""
+    producer_port: str = "result"
+    message_type: str = ""
 
 
 @dataclass(frozen=True)
-class NodeSnapshot:
+class NodeSpec:
+    """Static node identity and declared execution capacity."""
+
     node_id: str
     kind: NodeKind
     cpu_capacity: float
@@ -144,13 +170,25 @@ class NodeSnapshot:
     memory_gb: float
     bandwidth_mbps: float
     base_latency_ms: float
+    architecture: str = "generic"
+    battery_capacity_wh: float | None = None
+    safety_capable: bool = True
+    capabilities: tuple[str, ...] = ()
+    supported_models: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class NodeSnapshot:
+    """Dynamic resource and health state reported for a registered node."""
+
+    node_id: str
     cpu_util: float = 0.0
     gpu_util: float = 0.0
     memory_util: float = 0.0
     temperature_c: float = 0.0
     power_w: float = 0.0
+    network_latency_ms: float = 0.0
     online: bool = True
-    safety_capable: bool = True
 
 
 @dataclass(frozen=True)
@@ -175,6 +213,17 @@ class TaskCompletion:
     finished_time_ms: float
     artifact: ArtifactRef | None = None
     error_code: str = ""
+    outputs: tuple[ArtifactRef, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Normalize the legacy singular artifact into the multi-output form."""
+        if self.artifact is not None and self.outputs:
+            if len(self.outputs) != 1 or self.outputs[0] != self.artifact:
+                raise ValueError("artifact and outputs describe different task outputs")
+        elif self.artifact is not None:
+            object.__setattr__(self, "outputs", (self.artifact,))
+        elif len(self.outputs) == 1:
+            object.__setattr__(self, "artifact", self.outputs[0])
 
 
 @dataclass(frozen=True)

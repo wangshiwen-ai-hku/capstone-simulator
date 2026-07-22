@@ -23,12 +23,20 @@ class ScenarioType(str, Enum):
 
 class TaskCategory(str, Enum):
     obstacle_avoidance = "obstacle_avoidance"
+    emergency_stop = "emergency_stop"
+    local_control = "local_control"
+    localization = "localization"
+    environment_understanding = "environment_understanding"
     object_detection = "object_detection"
     segmentation = "segmentation"
+    semantic_segmentation = "semantic_segmentation"
     path_planning = "path_planning"
+    local_planning = "local_planning"
     data_compression = "data_compression"
     vla_inference = "vla_inference"
     llm_planning = "llm_planning"
+    local_llm_7b = "local_llm_7b"
+    local_llm_10b = "local_llm_10b"
     result_verification = "result_verification"
     map_fusion = "map_fusion"
 
@@ -36,17 +44,21 @@ class TaskCategory(str, Enum):
 class GenerateSceneRequest(BaseModel):
     scenario_type: ScenarioType = ScenarioType.warehouse
     custom_scene: Optional[str] = None
-    robot_count: int = Field(default=4, ge=1, le=50)
+    robot_count: int = Field(default=2, ge=1, le=50)
     edge_count: int = Field(default=1, ge=1, le=8)
     task_categories: List[TaskCategory] = Field(default_factory=lambda: [
-        TaskCategory.obstacle_avoidance,
+        TaskCategory.localization,
+        TaskCategory.environment_understanding,
         TaskCategory.object_detection,
-        TaskCategory.path_planning,
-        TaskCategory.vla_inference,
+        TaskCategory.semantic_segmentation,
+        TaskCategory.local_planning,
+        TaskCategory.obstacle_avoidance,
+        TaskCategory.local_control,
+        TaskCategory.local_llm_7b,
     ])
     difficulty: Difficulty = Difficulty.medium
     seed: int = Field(default=7, ge=0)
-    use_llm: bool = True
+    use_llm: bool = False
 
     @field_validator("task_categories")
     @classmethod
@@ -60,6 +72,7 @@ class NodeSpec(BaseModel):
     id: str
     kind: Literal["robot", "edge", "cloud"]
     display_name: str
+    architecture: str = "generic"
     cpu_capacity: float = Field(gt=0)
     gpu_capacity: float = Field(ge=0)
     memory_gb: float = Field(gt=0)
@@ -67,6 +80,8 @@ class NodeSpec(BaseModel):
     base_latency_ms: float = Field(ge=0)
     battery_wh: Optional[float] = None
     safety_capable: bool = True
+    capabilities: List[str] = Field(default_factory=list)
+    supported_models: List[str] = Field(default_factory=list)
 
 
 class ResourceSnapshot(BaseModel):
@@ -77,6 +92,20 @@ class ResourceSnapshot(BaseModel):
     temperature_c: float
     power_w: float
     network_latency_ms: float
+    online: bool = True
+
+
+class PortSpec(BaseModel):
+    name: str = Field(min_length=1)
+    message_type: str = Field(min_length=1)
+
+
+class DataEdgeSpec(BaseModel):
+    producer_task: str = Field(min_length=1)
+    producer_port: str = Field(min_length=1)
+    consumer_task: str = Field(min_length=1)
+    consumer_port: str = Field(min_length=1)
+    message_type: str = Field(min_length=1)
 
 
 class Workload(BaseModel):
@@ -102,6 +131,8 @@ class Workload(BaseModel):
     dependencies: List[str] = Field(default_factory=list)
     stage_index: int = Field(default=0, ge=0)
     expected_accuracy: float = Field(default=0.95, ge=0, le=1)
+    input_ports: List[PortSpec] = Field(default_factory=list)
+    output_ports: List[PortSpec] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def apply_task_class_defaults(self):
@@ -122,6 +153,7 @@ class BenchmarkScene(BaseModel):
     nodes: List[NodeSpec]
     initial_resources: List[ResourceSnapshot]
     tasks: List[Workload]
+    data_edges: List[DataEdgeSpec] = Field(default_factory=list)
     workflow_id: str = ""
     workflow_deadline_ms: float = Field(default=0.0, ge=0)
     failure_policy: FailurePolicy = FailurePolicy.SKIP_DESCENDANTS
@@ -151,6 +183,16 @@ class SimulateRequest(BaseModel):
     network_jitter: float = Field(default=0.1, ge=0, le=1)
     resource_noise: float = Field(default=0.05, ge=0, le=0.5)
     seed: int = Field(default=7, ge=0)
+
+
+class RuntimeWorkflowRequest(BaseModel):
+    scene: BenchmarkScene
+    algorithm: Literal["dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
+    seed: int = Field(default=7, ge=0)
+    max_attempts: int = Field(default=2, ge=1, le=5)
+    inject_first_failure: bool = True
+    failure_task_type: str = "local_llm_7b"
+    deterministic: bool = True
 
 
 class TaskRunResult(BaseModel):

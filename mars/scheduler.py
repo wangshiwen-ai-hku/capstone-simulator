@@ -12,6 +12,7 @@ from .models import (
     ExecutionMode,
     NodeKind,
     NodeSnapshot,
+    NodeSpec,
     TaskClass,
     TaskInstance,
 )
@@ -31,32 +32,55 @@ class CandidateEstimate:
     reason: str = ""
 
 
-def allowed_nodes(task: TaskInstance, nodes: Iterable[NodeSnapshot]) -> list[NodeSnapshot]:
-    online = [node for node in nodes if node.online]
-    source = next((node for node in online if node.node_id == task.source_node_id), None)
-    if source is None:
+def allowed_nodes(
+    task: TaskInstance,
+    node_specs: Iterable[NodeSpec],
+    node_snapshots: dict[str, NodeSnapshot],
+    excluded_node_ids: frozenset[str] = frozenset(),
+) -> list[NodeSpec]:
+    specs = tuple(node_specs)
+    source = next((node for node in specs if node.node_id == task.source_node_id), None)
+    source_snapshot = node_snapshots.get(task.source_node_id)
+    if source is None or source_snapshot is None or not source_snapshot.online:
         return []
+    online = [
+        spec
+        for spec in specs
+        if spec.node_id not in excluded_node_ids
+        and (snapshot := node_snapshots.get(spec.node_id)) is not None
+        and snapshot.online
+    ]
+    source_candidate = next(
+        (node for node in online if node.node_id == task.source_node_id),
+        None,
+    )
     if task.spec.task_class is TaskClass.LOCAL_SAFETY:
-        return [source] if source.kind is NodeKind.ROBOT and source.safety_capable else []
+        return [source_candidate] if (
+            source_candidate is not None
+            and source.kind is NodeKind.ROBOT
+            and source.safety_capable
+        ) else []
     edges = [node for node in online if node.kind is NodeKind.EDGE]
     if task.spec.task_class is TaskClass.REALTIME_OFFLOADABLE:
-        return [source, *edges]
+        return ([source_candidate] if source_candidate is not None else []) + edges
     # The current data plane contains source robots and on-premise edge nodes.
     # Cloud nodes are excluded from placement candidates.
-    return [*edges, source] if task.spec.allow_local_fallback else edges
+    return [*edges, *([source_candidate] if source_candidate is not None else [])] if task.spec.allow_local_fallback else edges
 
 
 def estimate_candidate(
     task: TaskInstance,
-    node: NodeSnapshot,
+    node: NodeSpec,
     *,
     ready_time_ms: float,
     node_available_ms: float,
-    nodes: dict[str, NodeSnapshot],
+    node_specs: dict[str, NodeSpec],
+    node_snapshots: dict[str, NodeSnapshot],
     parent_artifacts: Iterable[ArtifactRef],
     profiles: ProfileCatalog | None = None,
 ) -> CandidateEstimate:
-    if not node.online:
+    snapshot = node_snapshots.get(node.node_id)
+    if snapshot is None or not snapshot.online:
         return _infeasible(node, "node_offline")
     if task.spec.task_class is TaskClass.LOCAL_SAFETY and (
         node.node_id != task.source_node_id
@@ -65,7 +89,11 @@ def estimate_candidate(
     ):
         return _infeasible(node, "local_safety_requires_safety_capable_source_robot")
 
-    util_penalty = 1.0 + 2.2 * max(node.cpu_util, node.gpu_util, node.memory_util)
+    util_penalty = 1.0 + 2.2 * max(
+        snapshot.cpu_util,
+        snapshot.gpu_util,
+        snapshot.memory_util,
+    )
     profile = profiles.lookup(task.spec.task_type, node.kind) if profiles is not None else None
     if profile is not None and not profile.supported:
         return _infeasible(node, "profile_marks_task_unsupported")
@@ -89,18 +117,24 @@ def estimate_candidate(
         locations.append(source_id)
         if source_id == node.node_id:
             continue
-        source = nodes.get(source_id)
-        if source is None or not source.online:
+        source = node_specs.get(source_id)
+        source_snapshot = node_snapshots.get(source_id)
+        if source is None or source_snapshot is None or not source_snapshot.online:
             return _infeasible(node, f"input_source_unavailable:{source_id}")
         bandwidth = max(1e-6, min(source.bandwidth_mbps, node.bandwidth_mbps))
         if task.spec.bandwidth_requirement_mbps and bandwidth < task.spec.bandwidth_requirement_mbps:
             return _infeasible(node, "bandwidth_below_requirement")
         communication_ms += size_mb * 8.0 / bandwidth * 1000.0
-        communication_ms += source.base_latency_ms + node.base_latency_ms
+        communication_ms += (
+            source.base_latency_ms
+            + source_snapshot.network_latency_ms
+            + node.base_latency_ms
+            + snapshot.network_latency_ms
+        )
 
     start_ms = max(ready_time_ms, node_available_ms)
     finish_ms = start_ms + communication_ms + compute_ms
-    power = max(1.0, node.power_w)
+    power = max(1.0, snapshot.power_w)
     profiled_energy = profile.energy_j * util_penalty if profile is not None else compute_ms / 1000.0 * power
     energy_j = profiled_energy + communication_ms * 0.015
     return CandidateEstimate(
@@ -121,19 +155,27 @@ def choose_assignment(
     algorithm: str,
     ready_time_ms: float,
     node_available: dict[str, float],
-    nodes: dict[str, NodeSnapshot],
+    node_specs: dict[str, NodeSpec],
+    node_snapshots: dict[str, NodeSnapshot],
     parent_artifacts: Iterable[ArtifactRef],
     critical_tail_ms: float = 0.0,
     profiles: ProfileCatalog | None = None,
+    excluded_node_ids: frozenset[str] = frozenset(),
 ) -> Assignment:
-    candidates = allowed_nodes(task, nodes.values())
+    candidates = allowed_nodes(
+        task,
+        node_specs.values(),
+        node_snapshots,
+        excluded_node_ids,
+    )
     estimates = [
         estimate_candidate(
             task,
             node,
             ready_time_ms=ready_time_ms,
             node_available_ms=node_available.get(node.node_id, 0.0),
-            nodes=nodes,
+            node_specs=node_specs,
+            node_snapshots=node_snapshots,
             parent_artifacts=parent_artifacts,
             profiles=profiles,
         )
@@ -159,13 +201,13 @@ def choose_assignment(
         reason = "local-first baseline constrained by the three-class contract"
     elif algorithm == "edge_first":
         chosen = next(
-            (item for item in feasible if nodes[item.node_id].kind is NodeKind.EDGE),
+            (item for item in feasible if node_specs[item.node_id].kind is NodeKind.EDGE),
             min(feasible, key=lambda x: x.finish_ms),
         )
         reason = "edge-first baseline constrained by safety and fallback rules"
     elif algorithm == "rule_based":
-        source = nodes[source_id]
-        edge = [item for item in feasible if nodes[item.node_id].kind is NodeKind.EDGE]
+        source = node_snapshots[source_id]
+        edge = [item for item in feasible if node_specs[item.node_id].kind is NodeKind.EDGE]
         should_offload = (
             task.spec.task_class is TaskClass.EDGE_HEAVY
             or source.cpu_util > 0.8
@@ -189,7 +231,7 @@ def choose_assignment(
         chosen = min(feasible, key=lambda item: (item.finish_ms, item.energy_j))
         reason = "minimum estimated finish time and energy"
 
-    node = nodes[chosen.node_id]
+    node = node_specs[chosen.node_id]
     mode = ExecutionMode.LOCAL if chosen.node_id == source_id else (
         ExecutionMode.EDGE if node.kind is NodeKind.EDGE else ExecutionMode.CLOUD
     )
@@ -251,7 +293,7 @@ def apply_load(node: NodeSnapshot, task: TaskInstance) -> NodeSnapshot:
     )
 
 
-def _infeasible(node: NodeSnapshot, reason: str) -> CandidateEstimate:
+def _infeasible(node: NodeSpec, reason: str) -> CandidateEstimate:
     return CandidateEstimate(
         node_id=node.node_id,
         feasible=False,

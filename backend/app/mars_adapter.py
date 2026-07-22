@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from mars.dag import DagIndex, DagValidationError, validate_workflow
 from mars.models import (
+    DataEdge,
+    DataPort,
     FailurePolicy,
     NodeKind,
     NodeSnapshot,
+    NodeSpec as MarsNodeSpec,
     ResourceClass,
     TaskClass,
     TaskInstance,
@@ -72,6 +75,14 @@ def build_workflow(scene: BenchmarkScene) -> WorkflowSpec:
                     energy_budget_j=task.energy_budget_j,
                     dominant_resource=dominant,
                     allow_local_fallback=task.allow_local_fallback,
+                    input_ports=tuple(
+                        DataPort(port.name, port.message_type)
+                        for port in task.input_ports
+                    ),
+                    output_ports=tuple(
+                        DataPort(port.name, port.message_type)
+                        for port in task.output_ports
+                    ),
                 ),
                 dependency_task_ids=tuple(task.dependencies),
                 priority=task.priority,
@@ -88,11 +99,42 @@ def build_workflow(scene: BenchmarkScene) -> WorkflowSpec:
         deadline_time_ms=scene.workflow_deadline_ms,
         failure_policy=FailurePolicy(scene.failure_policy.value),
         metadata={"scene_id": scene.id, "scenario_type": scene.scenario_type},
+        data_edges=tuple(
+            DataEdge(
+                edge.producer_task,
+                edge.producer_port,
+                edge.consumer_task,
+                edge.consumer_port,
+                edge.message_type,
+            )
+            for edge in scene.data_edges
+        ),
     )
 
 
-def build_nodes(scene: BenchmarkScene) -> list[NodeSnapshot]:
-    """Convert web resource snapshots into MARS node snapshots."""
+def build_node_specs(scene: BenchmarkScene) -> list[MarsNodeSpec]:
+    """Convert web node declarations into static MARS node specifications."""
+    return [
+        MarsNodeSpec(
+            node_id=node.id,
+            kind=NodeKind(node.kind),
+            architecture=node.architecture,
+            cpu_capacity=node.cpu_capacity,
+            gpu_capacity=node.gpu_capacity,
+            memory_gb=node.memory_gb,
+            bandwidth_mbps=node.bandwidth_mbps,
+            base_latency_ms=node.base_latency_ms,
+            battery_capacity_wh=node.battery_wh,
+            safety_capable=node.safety_capable,
+            capabilities=tuple(node.capabilities),
+            supported_models=tuple(node.supported_models),
+        )
+        for node in scene.nodes
+    ]
+
+
+def build_node_snapshots(scene: BenchmarkScene) -> list[NodeSnapshot]:
+    """Convert web resource reports into dynamic MARS node snapshots."""
     resources = _validated_resource_map(scene)
     out: list[NodeSnapshot] = []
     for node in scene.nodes:
@@ -100,18 +142,13 @@ def build_nodes(scene: BenchmarkScene) -> list[NodeSnapshot]:
         out.append(
             NodeSnapshot(
                 node_id=node.id,
-                kind=NodeKind(node.kind),
-                cpu_capacity=node.cpu_capacity,
-                gpu_capacity=node.gpu_capacity,
-                memory_gb=node.memory_gb,
-                bandwidth_mbps=node.bandwidth_mbps,
-                base_latency_ms=node.base_latency_ms + resource.network_latency_ms,
                 cpu_util=resource.cpu_util,
                 gpu_util=resource.gpu_util,
                 memory_util=resource.memory_util,
                 temperature_c=resource.temperature_c,
                 power_w=resource.power_w,
-                safety_capable=node.safety_capable,
+                network_latency_ms=resource.network_latency_ms,
+                online=resource.online,
             )
         )
     return out

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from backend.app.mars_adapter import SceneValidationError, build_workflow, validate_scene
+from backend.app.mars_adapter import (
+    SceneValidationError,
+    build_node_snapshots,
+    build_node_specs,
+    build_workflow,
+    validate_scene,
+)
 from backend.app.scene_generator import build_deterministic_scene
 from backend.app.schemas import GenerateSceneRequest
 
@@ -39,6 +45,34 @@ class MarsAdapterValidationTests(unittest.TestCase):
         workflow = build_workflow(self.scene)
         task = next(item for item in workflow.tasks if item.task_id == workload.id)
         self.assertFalse(task.spec.allow_local_fallback)
+
+    def test_keeps_static_node_spec_separate_from_dynamic_snapshot(self):
+        specs = {spec.node_id: spec for spec in build_node_specs(self.scene)}
+        snapshots = {
+            snapshot.node_id: snapshot for snapshot in build_node_snapshots(self.scene)
+        }
+        robot_id = next(node.id for node in self.scene.nodes if node.kind == "robot")
+        self.assertEqual(specs[robot_id].architecture, "jetson-orin")
+        self.assertEqual(specs[robot_id].memory_gb, 16)
+        self.assertEqual(
+            snapshots[robot_id].network_latency_ms,
+            next(item.network_latency_ms for item in self.scene.initial_resources if item.node_id == robot_id),
+        )
+
+    def test_generated_localization_output_fans_out_to_multiple_consumers(self):
+        workflow = build_workflow(self.scene)
+        localization_tasks = {
+            task.task_id
+            for task in workflow.tasks
+            if task.spec.task_type == "localization"
+        }
+        fanout: dict[tuple[str, str], set[str]] = {}
+        for edge in workflow.data_edges:
+            if edge.producer_task in localization_tasks:
+                fanout.setdefault(
+                    (edge.producer_task, edge.producer_port), set()
+                ).add(edge.consumer_task)
+        self.assertTrue(any(len(consumers) >= 2 for consumers in fanout.values()))
 
 
 if __name__ == "__main__":

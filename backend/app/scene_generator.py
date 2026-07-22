@@ -5,14 +5,17 @@ import random
 from typing import List
 
 from mars.models import TaskClass
+from mars.synthetic_workloads import ExecutionTarget, load_default_synthetic_workloads
 
 logger = logging.getLogger(__name__)
 
 from .schemas import (
     BenchmarkScene,
+    DataEdgeSpec,
     Difficulty,
     GenerateSceneRequest,
     NodeSpec,
+    PortSpec,
     ResourceSnapshot,
     TaskCategory,
     Workload,
@@ -47,6 +50,44 @@ CATEGORY_DEFAULTS = {
     TaskCategory.map_fusion: dict(task_class=TaskClass.EDGE_HEAVY, compute=2.2, gpu=0.6, latency=1200, data=12.0, output=4.0, safety=2, model="SLAM/map fusion", local_fallback=True),
 }
 
+CATEGORY_ALIASES = {
+    TaskCategory.segmentation: "semantic_segmentation",
+    TaskCategory.path_planning: "local_planning",
+    TaskCategory.vla_inference: "local_llm_10b",
+    TaskCategory.llm_planning: "local_llm_7b",
+}
+
+SYNTHETIC_CATALOG = load_default_synthetic_workloads()
+
+
+def _workload_name(category: TaskCategory) -> str:
+    return CATEGORY_ALIASES.get(category, category.value)
+
+
+def _category_definition(category: TaskCategory) -> tuple[dict, list[PortSpec], list[PortSpec]]:
+    """Resolve one UI category to a scheduler profile and typed ports."""
+    task_type = _workload_name(category)
+    try:
+        workload = SYNTHETIC_CATALOG.get(task_type)
+    except KeyError:
+        return CATEGORY_DEFAULTS[category], [], []
+
+    profile = workload.profile_for(ExecutionTarget.ORIN)
+    definition = {
+        "task_class": workload.task_class,
+        "compute": profile.resources.cpu_cores + 1.5 * profile.resources.gpu_units,
+        "gpu": profile.resources.gpu_units,
+        "latency": profile.latency.p95_ms * 1.25,
+        "data": profile.input_size_mb.typical,
+        "output": profile.output_size_mb.typical,
+        "safety": 5 if workload.task_class is TaskClass.LOCAL_SAFETY else 3,
+        "model": workload.model_variant,
+        "local_fallback": workload.task_class is not TaskClass.LOCAL_SAFETY,
+    }
+    inputs = [PortSpec(name=port.name, message_type=port.semantic_type) for port in workload.inputs]
+    outputs = [PortSpec(name=port.name, message_type=port.semantic_type) for port in workload.outputs]
+    return definition, inputs, outputs
+
 
 def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
     rng = random.Random(req.seed)
@@ -65,6 +106,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             id=rid,
             kind="robot",
             display_name=f"Jetson Orin Robot {i+1}",
+            architecture="jetson-orin",
             cpu_capacity=1.0,
             gpu_capacity=1.0,
             memory_gb=16,
@@ -72,6 +114,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             base_latency_ms=rng.uniform(6, 22) * factor,
             battery_wh=rng.uniform(50, 120),
             safety_capable=True,
+            capabilities=["cpu", "cuda", "tensorrt", "local_safety"],
         ))
         resources.append(ResourceSnapshot(
             node_id=rid,
@@ -88,7 +131,8 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
         nodes.append(NodeSpec(
             id=eid,
             kind="edge",
-            display_name=f"Control Plane / Edge PC {i+1}",
+            display_name=f"Edge GPU Agent {i+1}",
+            architecture="x86_64-cuda",
             cpu_capacity=5.0,
             gpu_capacity=4.0,
             memory_gb=64,
@@ -96,6 +140,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             base_latency_ms=rng.uniform(12, 35) * factor,
             battery_wh=None,
             safety_capable=False,
+            capabilities=["cpu", "cuda", "high_memory"],
         ))
         resources.append(ResourceSnapshot(
             node_id=eid,
@@ -114,12 +159,13 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
         base_tasks = int(base_tasks * 1.25)
 
     tasks: List[Workload] = []
-    last_by_robot: dict[str, str] = {}
+    data_edges: List[DataEdgeSpec] = []
+    available_outputs: dict[str, dict[str, tuple[str, str]]] = {}
     for idx in range(base_tasks):
         source_robot_id = f"robot_{idx % req.robot_count + 1}"
         stage_index = idx // req.robot_count
         category = req.task_categories[stage_index % len(req.task_categories)]
-        d = CATEGORY_DEFAULTS[category]
+        d, input_ports, output_ports = _category_definition(category)
         jitter = rng.uniform(0.75, 1.35)
         compute = d["compute"] * factor * jitter
         data_size = d["data"] * factor * rng.uniform(0.7, 1.5)
@@ -127,25 +173,50 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
         priority = 5 if d["safety"] >= 5 else rng.randint(1, 5)
         arrival = stage_index * rng.uniform(60, 220) / factor
         deadline = arrival + latency_budget * rng.uniform(1.0, 1.8)
-        dependencies: List[str] = []
-        if source_robot_id in last_by_robot and d["task_class"] is not TaskClass.LOCAL_SAFETY:
-            dependencies = [last_by_robot[source_robot_id]]
         task_id = f"task_{idx+1:03d}"
+        dependencies: List[str] = []
+        robot_outputs = available_outputs.setdefault(source_robot_id, {})
+        for port in input_ports:
+            producer = robot_outputs.get(port.message_type)
+            if producer is None:
+                continue
+            producer_task, producer_port = producer
+            data_edges.append(DataEdgeSpec(
+                producer_task=producer_task,
+                producer_port=producer_port,
+                consumer_task=task_id,
+                consumer_port=port.name,
+                message_type=port.message_type,
+            ))
+            if producer_task not in dependencies:
+                dependencies.append(producer_task)
         tasks.append(Workload(
             id=task_id,
-            name=f"{category.value.replace('_', ' ')} #{idx+1}",
+            name=f"{_workload_name(category).replace('_', ' ')} #{idx+1}",
             source_robot_id=source_robot_id,
-            task_type=category.value,
+            task_type=_workload_name(category),
             task_class=d["task_class"],
             priority=priority,
             compute_demand=round(compute, 3),
-            gpu_demand=round(d["gpu"] * factor * jitter, 3),
+            gpu_demand=round(min(1.0, d["gpu"] * factor * jitter), 3),
             latency_budget_ms=round(latency_budget, 1),
             safety_level=d["safety"],
             model_requirement=d["model"],
             data_size_mb=round(data_size, 3),
             output_size_mb=round(d["output"] * factor * rng.uniform(0.85, 1.15), 3),
-            bandwidth_requirement_mbps=round(max(1.0, data_size * 8 / max(0.1, latency_budget / 1000)), 2),
+            bandwidth_requirement_mbps=round(
+                min(
+                    80.0,
+                    max(
+                        1.0,
+                        data_size
+                        * 8
+                        / max(0.1, latency_budget / 1000)
+                        * 0.25,
+                    ),
+                ),
+                2,
+            ),
             energy_budget_j=round(20 + compute * 90 + data_size * 2.0, 1),
             allow_local_fallback=d["local_fallback"],
             result_verification="Check returned result, latency budget, deadline and task-specific success flag.",
@@ -154,9 +225,11 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             dependencies=dependencies,
             stage_index=stage_index,
             expected_accuracy=round(max(0.72, 0.97 - 0.03 * factor - rng.random() * 0.04), 3),
+            input_ports=input_ports,
+            output_ports=output_ports,
         ))
-        if d["task_class"] is not TaskClass.LOCAL_SAFETY:
-            last_by_robot[source_robot_id] = task_id
+        for port in output_ports:
+            robot_outputs[port.message_type] = (task_id, port.name)
 
     stressors = []
     if req.difficulty in [Difficulty.hard, Difficulty.stress]:
@@ -175,6 +248,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
         nodes=nodes,
         initial_resources=resources,
         tasks=tasks,
+        data_edges=data_edges,
         workflow_id=f"workflow_{scene_id}",
         workflow_deadline_ms=round(max((task.deadline_ms for task in tasks), default=0.0) * 1.1, 2),
         stressors=stressors,

@@ -1,0 +1,150 @@
+{
+  "schema_version": "mars.synthetic-workload.v1",
+  "provenance": "synthetic_placeholder",
+  "warning": "Illustrative values for local simulation only; they are not hardware measurements.",
+  "workloads": [
+    {
+      "task_type": "obstacle_avoidance",
+      "display_name": "Obstacle avoidance",
+      "task_class": "local_safety",
+      "description": "Produces an immediate safe-motion adjustment from nearby hazards.",
+      "model_variant": "synthetic-safety-policy",
+      "inputs": [{"name": "near_field", "semantic_type": "near_field_observation"}, {"name": "motion_state", "semantic_type": "motion_state"}],
+      "outputs": [{"name": "safe_motion", "semantic_type": "safe_motion_command"}],
+      "profiles": {
+        "orin": {"latency_ms":{"p50":8,"p95":14,"p99":20},"resources":{"cpu_cores":1.0,"gpu_units":0.15,"memory_mb":320},"input_size_mb":{"min":0.2,"typical":0.5,"max":1.0},"output_size_mb":{"min":0.001,"typical":0.003,"max":0.008},"energy_j":{"min":0.12,"typical":0.2,"max":0.36},"failure_rate":0.001,"accuracy":{"min":0.96,"typical":0.985,"max":0.995},"max_concurrency":2},
+        "edge": {"latency_ms":{"p50":5,"p95":9,"p99":13},"resources":{"cpu_cores":1.0,"gpu_units":0.1,"memory_mb":384},"input_size_mb":{"min":0.2,"typical":0.5,"max":1.0},"output_size_mb":{"min":0.001,"typical":0.003,"max":0.008},"energy_j":{"min":0.2,"typical":0.35,"max":0.6},"failure_rate":0.001,"accuracy":{"min":0.96,"typical":0.985,"max":0.995},"max_concurrency":8,"supported":false}
+      }
+    },
+    {
+      "task_type": "emergency_stop",
+      "display_name": "Emergency stop",
+      "task_class": "local_safety",
+      "description": "Evaluates stop triggers and emits a local stop command.",
+      "model_variant": "synthetic-stop-guard",
+      "inputs": [{"name": "safety_signals", "semantic_type": "safety_signals"}],
+      "outputs": [{"name": "stop_command", "semantic_type": "stop_command"}],
+      "profiles": {
+        "orin": {"latency_ms":{"p50":2,"p95":4,"p99":6},"resources":{"cpu_cores":0.3,"gpu_units":0,"memory_mb":64},"input_size_mb":{"min":0.001,"typical":0.005,"max":0.02},"output_size_mb":{"min":0.0001,"typical":0.0005,"max":0.001},"energy_j":{"min":0.01,"typical":0.02,"max":0.04},"failure_rate":0.0001,"accuracy":{"min":0.99,"typical":0.999,"max":1.0},"max_concurrency":4},
+        "edge": {"latency_ms":{"p50":1,"p95":2,"p99":3},"resources":{"cpu_cores":0.2,"gpu_units":0,"memory_mb":64},"input_size_mb":{"min":0.001,"typical":0.005,"max":0.02},"output_size_mb":{"min":0.0001,"typical":0.0005,"max":0.001},"energy_j":{"min":0.01,"typical":0.02,"max":0.04},"failure_rate":0.0001,"accuracy":{"min":0.99,"typical":0.999,"max":1.0},"max_concurrency":16,"supported":false}
+      }
+    },
+    {
+      "task_type": "local_control",
+      "display_name": "Local motion control",
+      "task_class": "local_safety",
+      "description": "Converts a short-horizon trajectory into actuator-level commands.",
+      "model_variant": "synthetic-motion-controller",
+      "inputs": [{"name": "trajectory", "semantic_type": "local_trajectory"}, {"name": "motion_state", "semantic_type": "motion_state"}],
+      "outputs": [{"name": "control", "semantic_type": "control_command"}],
+      "profiles": {
+        "orin": {"latency_ms":{"p50":4,"p95":7,"p99":10},"resources":{"cpu_cores":0.6,"gpu_units":0,"memory_mb":96},"input_size_mb":{"min":0.01,"typical":0.03,"max":0.08},"output_size_mb":{"min":0.001,"typical":0.002,"max":0.006},"energy_j":{"min":0.02,"typical":0.05,"max":0.1},"failure_rate":0.0005,"accuracy":{"min":0.97,"typical":0.99,"max":0.999},"max_concurrency":2},
+        "edge": {"latency_ms":{"p50":3,"p95":5,"p99":8},"resources":{"cpu_cores":0.5,"gpu_units":0,"memory_mb":96},"input_size_mb":{"min":0.01,"typical":0.03,"max":0.08},"output_size_mb":{"min":0.001,"typical":0.002,"max":0.006},"energy_j":{"min":0.04,"typical":0.08,"max":0.15},"failure_rate":0.0005,"accuracy":{"min":0.97,"typical":0.99,"max":0.999},"max_concurrency":12,"supported":false}
+      }
+    },
+    {
+      "task_type": "localization",
+      "display_name": "Localization",
+      "task_class": "realtime_offloadable",
+      "description": "Estimates the current pose and motion state for downstream scene understanding and planning.",
+      "model_variant": "synthetic-localizer",
+      "inputs": [{"name": "motion_observations", "semantic_type": "motion_observation_batch"}, {"name": "map", "semantic_type": "local_map"}],
+      "outputs": [{"name": "localization", "semantic_type": "localization_state"}],
+      "profiles": {
+        "orin": {"latency_ms":{"p50":24,"p95":38,"p99":52},"resources":{"cpu_cores":1.4,"gpu_units":0.2,"memory_mb":780},"input_size_mb":{"min":0.2,"typical":0.7,"max":1.8},"output_size_mb":{"min":0.002,"typical":0.008,"max":0.02},"energy_j":{"min":0.25,"typical":0.48,"max":0.85},"failure_rate":0.004,"accuracy":{"min":0.92,"typical":0.97,"max":0.995},"max_concurrency":2},
+        "edge": {"latency_ms":{"p50":11,"p95":18,"p99":26},"resources":{"cpu_cores":1.6,"gpu_units":0.08,"memory_mb":920},"input_size_mb":{"min":0.2,"typical":0.7,"max":1.8},"output_size_mb":{"min":0.002,"typical":0.008,"max":0.02},"energy_j":{"min":0.4,"typical":0.7,"max":1.2},"failure_rate":0.003,"accuracy":{"min":0.93,"typical":0.975,"max":0.997},"max_concurrency":8}
+      }
+    },
+    {
+      "task_type": "environment_understanding",
+      "display_name": "Environment understanding",
+      "task_class": "realtime_offloadable",
+      "description": "Builds a structured local scene representation from fused observations.",
+      "model_variant": "synthetic-scene-encoder",
+      "inputs": [{"name": "observations", "semantic_type": "sensor_observation_batch"}, {"name": "localization", "semantic_type": "localization_state"}],
+      "outputs": [{"name": "scene", "semantic_type": "environment_model"}],
+      "profiles": {
+        "orin": {"latency_ms":{"p50":105,"p95":155,"p99":190},"resources":{"cpu_cores":2.0,"gpu_units":0.8,"memory_mb":2800},"input_size_mb":{"min":3,"typical":7,"max":14},"output_size_mb":{"min":0.3,"typical":0.8,"max":1.8},"energy_j":{"min":2.2,"typical":3.5,"max":5.2},"failure_rate":0.008,"accuracy":{"min":0.78,"typical":0.86,"max":0.91},"max_concurrency":1},
+        "edge": {"latency_ms":{"p50":34,"p95":52,"p99":68},"resources":{"cpu_cores":2.5,"gpu_units":0.45,"memory_mb":3400},"input_size_mb":{"min":3,"typical":7,"max":14},"output_size_mb":{"min":0.3,"typical":0.8,"max":1.8},"energy_j":{"min":3.0,"typical":4.8,"max":7.0},"failure_rate":0.005,"accuracy":{"min":0.8,"typical":0.88,"max":0.93},"max_concurrency":4}
+      }
+    },
+    {
+      "task_type": "object_detection",
+      "display_name": "Object detection",
+      "task_class": "realtime_offloadable",
+      "description": "Detects and classifies objects in an observation frame.",
+      "model_variant": "synthetic-detector",
+      "inputs": [{"name": "image", "semantic_type": "image_frame"}],
+      "outputs": [{"name": "detections", "semantic_type": "object_detections"}],
+      "profiles": {
+        "orin": {"latency_ms":{"p50":48,"p95":72,"p99":90},"resources":{"cpu_cores":1.2,"gpu_units":0.65,"memory_mb":1350},"input_size_mb":{"min":1.2,"typical":3.0,"max":6.0},"output_size_mb":{"min":0.02,"typical":0.08,"max":0.2},"energy_j":{"min":0.9,"typical":1.5,"max":2.4},"failure_rate":0.006,"accuracy":{"min":0.76,"typical":0.84,"max":0.9},"max_concurrency":2},
+        "edge": {"latency_ms":{"p50":14,"p95":22,"p99":29},"resources":{"cpu_cores":1.2,"gpu_units":0.25,"memory_mb":1600},"input_size_mb":{"min":1.2,"typical":3.0,"max":6.0},"output_size_mb":{"min":0.02,"typical":0.08,"max":0.2},"energy_j":{"min":1.3,"typical":2.2,"max":3.4},"failure_rate":0.004,"accuracy":{"min":0.78,"typical":0.86,"max":0.92},"max_concurrency":8}
+      }
+    },
+    {
+      "task_type": "semantic_segmentation",
+      "display_name": "Semantic segmentation",
+      "task_class": "realtime_offloadable",
+      "description": "Labels image regions for traversability and scene semantics.",
+      "model_variant": "synthetic-segmentation-model",
+      "inputs": [{"name": "image", "semantic_type": "image_frame"}],
+      "outputs": [{"name": "semantic_map", "semantic_type": "semantic_mask"}],
+      "profiles": {
+        "orin": {"latency_ms":{"p50":92,"p95":136,"p99":168},"resources":{"cpu_cores":1.5,"gpu_units":0.85,"memory_mb":2300},"input_size_mb":{"min":1.2,"typical":3.0,"max":6.0},"output_size_mb":{"min":0.3,"typical":0.7,"max":1.5},"energy_j":{"min":1.6,"typical":2.6,"max":4.1},"failure_rate":0.009,"accuracy":{"min":0.68,"typical":0.77,"max":0.84},"max_concurrency":1},
+        "edge": {"latency_ms":{"p50":30,"p95":46,"p99":59},"resources":{"cpu_cores":1.5,"gpu_units":0.35,"memory_mb":2800},"input_size_mb":{"min":1.2,"typical":3.0,"max":6.0},"output_size_mb":{"min":0.3,"typical":0.7,"max":1.5},"energy_j":{"min":2.4,"typical":3.9,"max":5.8},"failure_rate":0.006,"accuracy":{"min":0.7,"typical":0.79,"max":0.86},"max_concurrency":5}
+      }
+    },
+    {
+      "task_type": "local_planning",
+      "display_name": "Local planning",
+      "task_class": "realtime_offloadable",
+      "description": "Generates a collision-aware short-horizon trajectory.",
+      "model_variant": "synthetic-local-planner",
+      "inputs": [{"name": "scene", "semantic_type": "environment_model"}, {"name": "localization", "semantic_type": "localization_state"}],
+      "outputs": [{"name": "trajectory", "semantic_type": "local_trajectory"}],
+      "profiles": {
+        "orin": {"latency_ms":{"p50":58,"p95":92,"p99":124},"resources":{"cpu_cores":1.8,"gpu_units":0.12,"memory_mb":520},"input_size_mb":{"min":0.2,"typical":0.8,"max":2.0},"output_size_mb":{"min":0.01,"typical":0.04,"max":0.1},"energy_j":{"min":0.45,"typical":0.8,"max":1.4},"failure_rate":0.007,"accuracy":{"min":0.88,"typical":0.94,"max":0.98},"max_concurrency":2},
+        "edge": {"latency_ms":{"p50":19,"p95":32,"p99":44},"resources":{"cpu_cores":2.0,"gpu_units":0.05,"memory_mb":650},"input_size_mb":{"min":0.2,"typical":0.8,"max":2.0},"output_size_mb":{"min":0.01,"typical":0.04,"max":0.1},"energy_j":{"min":0.7,"typical":1.15,"max":1.9},"failure_rate":0.005,"accuracy":{"min":0.88,"typical":0.94,"max":0.98},"max_concurrency":8}
+      }
+    },
+    {
+      "task_type": "local_llm_7b",
+      "display_name": "Local language model 7B",
+      "task_class": "edge_heavy",
+      "description": "Generates a structured decision or summary using a synthetic 7B workload.",
+      "model_variant": "synthetic-7b",
+      "inputs": [{"name": "context", "semantic_type": "text_context"}],
+      "outputs": [{"name": "response", "semantic_type": "structured_text"}],
+      "profiles": {
+        "orin": {"latency_ms":{"p50":1450,"p95":2250,"p99":2900},"resources":{"cpu_cores":4.0,"gpu_units":1.0,"memory_mb":7600},"input_size_mb":{"min":0.01,"typical":0.08,"max":0.3},"output_size_mb":{"min":0.002,"typical":0.015,"max":0.06},"energy_j":{"min":24,"typical":38,"max":58},"failure_rate":0.025,"accuracy":{"min":0.68,"typical":0.79,"max":0.88},"max_concurrency":1},
+        "edge": {"latency_ms":{"p50":390,"p95":650,"p99":890},"resources":{"cpu_cores":3.0,"gpu_units":0.75,"memory_mb":15000},"input_size_mb":{"min":0.01,"typical":0.08,"max":0.3},"output_size_mb":{"min":0.002,"typical":0.015,"max":0.06},"energy_j":{"min":34,"typical":52,"max":76},"failure_rate":0.012,"accuracy":{"min":0.7,"typical":0.81,"max":0.9},"max_concurrency":3}
+      }
+    },
+    {
+      "task_type": "local_llm_10b",
+      "display_name": "Local language model 10B",
+      "task_class": "edge_heavy",
+      "description": "Represents a larger local reasoning workload with a 10B-scale footprint.",
+      "model_variant": "synthetic-10b",
+      "inputs": [{"name": "context", "semantic_type": "multimodal_context"}],
+      "outputs": [{"name": "response", "semantic_type": "structured_decision"}],
+      "profiles": {
+        "orin": {"latency_ms":{"p50":2200,"p95":3400,"p99":4300},"resources":{"cpu_cores":5.0,"gpu_units":1.0,"memory_mb":11200},"input_size_mb":{"min":0.05,"typical":1.5,"max":6.0},"output_size_mb":{"min":0.002,"typical":0.02,"max":0.08},"energy_j":{"min":38,"typical":61,"max":90},"failure_rate":0.04,"accuracy":{"min":0.7,"typical":0.82,"max":0.9},"max_concurrency":1},
+        "edge": {"latency_ms":{"p50":580,"p95":940,"p99":1240},"resources":{"cpu_cores":4.0,"gpu_units":1.0,"memory_mb":21500},"input_size_mb":{"min":0.05,"typical":1.5,"max":6.0},"output_size_mb":{"min":0.002,"typical":0.02,"max":0.08},"energy_j":{"min":48,"typical":74,"max":108},"failure_rate":0.018,"accuracy":{"min":0.72,"typical":0.84,"max":0.92},"max_concurrency":2}
+      }
+    },
+    {
+      "task_type": "map_fusion",
+      "display_name": "Map fusion",
+      "task_class": "edge_heavy",
+      "description": "Combines local map fragments into a shared spatial representation.",
+      "model_variant": "synthetic-map-fusion",
+      "inputs": [{"name": "map_fragments", "semantic_type": "map_fragment_set"}, {"name": "localization", "semantic_type": "localization_state"}],
+      "outputs": [{"name": "fused_map", "semantic_type": "fused_map"}],
+      "profiles": {
+        "orin": {"latency_ms":{"p50":520,"p95":810,"p99":1050},"resources":{"cpu_cores":3.5,"gpu_units":0.55,"memory_mb":4300},"input_size_mb":{"min":5,"typical":12,"max":28},"output_size_mb":{"min":1.5,"typical":4.0,"max":9.0},"energy_j":{"min":8,"typical":13,"max":21},"failure_rate":0.018,"accuracy":{"min":0.82,"typical":0.91,"max":0.96},"max_concurrency":1},
+        "edge": {"latency_ms":{"p50":170,"p95":270,"p99":350},"resources":{"cpu_cores":4.0,"gpu_units":0.3,"memory_mb":5200},"input_size_mb":{"min":5,"typical":12,"max":28},"output_size_mb":{"min":1.5,"typical":4.0,"max":9.0},"energy_j":{"min":11,"typical":17,"max":27},"failure_rate":0.01,"accuracy":{"min":0.84,"typical":0.93,"max":0.97},"max_concurrency":4}
+      }
+    }
+  ]
+}

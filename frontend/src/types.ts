@@ -5,12 +5,20 @@ export type TaskClass = 'local_safety' | 'realtime_offloadable' | 'edge_heavy';
 
 export const TASK_CATEGORIES = [
   'obstacle_avoidance',
+  'emergency_stop',
+  'local_control',
+  'localization',
+  'environment_understanding',
   'object_detection',
   'segmentation',
+  'semantic_segmentation',
   'path_planning',
+  'local_planning',
   'data_compression',
   'vla_inference',
   'llm_planning',
+  'local_llm_7b',
+  'local_llm_10b',
   'result_verification',
   'map_fusion',
 ] as const;
@@ -32,6 +40,7 @@ export interface NodeSpec {
   id: string;
   kind: 'robot' | 'edge' | 'cloud';
   display_name: string;
+  architecture: string;
   cpu_capacity: number;
   gpu_capacity: number;
   memory_gb: number;
@@ -39,6 +48,8 @@ export interface NodeSpec {
   base_latency_ms: number;
   battery_wh?: number | null;
   safety_capable: boolean;
+  capabilities: string[];
+  supported_models: string[];
 }
 
 export interface ResourceSnapshot {
@@ -49,6 +60,7 @@ export interface ResourceSnapshot {
   temperature_c: number;
   power_w: number;
   network_latency_ms: number;
+  online: boolean;
 }
 
 export interface Workload {
@@ -74,6 +86,21 @@ export interface Workload {
   dependencies: string[];
   stage_index: number;
   expected_accuracy: number;
+  input_ports: PortSpec[];
+  output_ports: PortSpec[];
+}
+
+export interface PortSpec {
+  name: string;
+  message_type: string;
+}
+
+export interface DataEdgeSpec {
+  producer_task: string;
+  producer_port: string;
+  consumer_task: string;
+  consumer_port: string;
+  message_type: string;
 }
 
 export interface BenchmarkScene {
@@ -85,6 +112,7 @@ export interface BenchmarkScene {
   nodes: NodeSpec[];
   initial_resources: ResourceSnapshot[];
   tasks: Workload[];
+  data_edges: DataEdgeSpec[];
   workflow_id: string;
   workflow_deadline_ms: number;
   failure_policy: 'skip_descendants' | 'fail_fast';
@@ -165,4 +193,114 @@ export interface SimulationResponse {
     edges: Array<{ from: string; to: string }>;
   };
   transport: Record<string, unknown>;
+}
+
+export interface RuntimeAgent {
+  agent_id: string;
+  kind: 'robot' | 'edge';
+  architecture: string;
+  registered: boolean;
+  online: boolean;
+  heartbeat_sequence: number;
+  last_heartbeat_ms: number;
+  active_reservations: number;
+  max_concurrency: number;
+  completed_attempts: number;
+  failed_attempts: number;
+  busy_time_ms: number;
+  utilization: number;
+  capabilities: string[];
+  supported_models: string[];
+  resources: Record<string, number>;
+}
+
+export interface RuntimeStatus {
+  scheduler_id: string;
+  status: string;
+  agent_count: number;
+  agents: RuntimeAgent[];
+  runtime: string;
+  topology: {
+    central_schedulers: number;
+    orin_agents: number;
+    edge_agents: number;
+  };
+  run_count: number;
+}
+
+export interface RuntimeAttempt {
+  attempt_id: string;
+  attempt_no: number;
+  state: string;
+  target_node_id: string;
+  mode: string;
+  start_time_ms: number;
+  finish_time_ms: number;
+  compute_time_ms: number;
+  communication_time_ms: number;
+  transferred_mb: number;
+  energy_j: number;
+  input_artifact_ids: string[];
+  error_code: string;
+}
+
+export interface RuntimeTaskResult {
+  task_id: string;
+  task_name: string;
+  task_type: string;
+  task_class: TaskClass;
+  state: string;
+  source_node_id: string;
+  target_node_id: string;
+  mode: string;
+  dependencies: string[];
+  attempt_count: number;
+  attempts: RuntimeAttempt[];
+  outputs: Array<{
+    artifact_id: string;
+    producer_task_id: string;
+    node_id: string;
+    size_mb: number;
+    uri: string;
+    checksum: string;
+    producer_port: string;
+    message_type: string;
+  }>;
+}
+
+export interface RuntimeEvent {
+  sequence: number;
+  time_ms: number;
+  event_type: string;
+  message: string;
+  workflow_id: string;
+  task_id: string;
+  attempt_id: string;
+  agent_id: string;
+}
+
+export interface RuntimeReport {
+  workflow: {
+    workflow_id: string;
+    state: string;
+    failure_policy: string;
+    state_counts: Record<string, number>;
+    critical_path: string[];
+    topological_order: string[];
+    levels: Record<string, number>;
+  };
+  metrics: Record<string, number>;
+  task_results: RuntimeTaskResult[];
+  agents: RuntimeAgent[];
+  data_edges: DataEdgeSpec[];
+  events: RuntimeEvent[];
+  logs: string[];
+}
+
+export interface RuntimeWorkflowRun {
+  run_id: string;
+  workflow_id: string;
+  status: 'accepted' | 'running' | 'succeeded' | 'failed';
+  result: RuntimeReport | null;
+  error: string;
 }

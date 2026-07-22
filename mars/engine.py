@@ -13,6 +13,7 @@ from .models import (
     ArtifactRef,
     Assignment,
     NodeSnapshot,
+    NodeSpec,
     TaskClass,
     TaskInstance,
     TaskState,
@@ -69,7 +70,8 @@ class SimulationReport:
 
 def run_workflow_simulation(
     workflow: WorkflowSpec,
-    nodes: list[NodeSnapshot],
+    node_specs: list[NodeSpec],
+    node_snapshots: list[NodeSnapshot],
     *,
     algorithm: str = "dag_deadline",
     seed: int = 7,
@@ -83,9 +85,18 @@ def run_workflow_simulation(
     rng = random.Random(seed)
     if profiles is None:
         profiles = load_default_catalog()
-    node_by_id = {node.node_id: node for node in nodes}
-    node_available = {node.node_id: 0.0 for node in nodes}
-    busy_by_node = {node.node_id: 0.0 for node in nodes}
+    node_by_id = {node.node_id: node for node in node_specs}
+    snapshot_by_id = {snapshot.node_id: snapshot for snapshot in node_snapshots}
+    if len(node_by_id) != len(node_specs):
+        raise ValueError("node spec ids must be unique")
+    if len(snapshot_by_id) != len(node_snapshots):
+        raise ValueError("node snapshot ids must be unique")
+    if node_by_id.keys() != snapshot_by_id.keys():
+        missing = sorted(node_by_id.keys() - snapshot_by_id.keys())
+        unknown = sorted(snapshot_by_id.keys() - node_by_id.keys())
+        raise ValueError(f"node inventory mismatch: missing snapshots={missing}; unknown snapshots={unknown}")
+    node_available = {node_id: 0.0 for node_id in node_by_id}
+    busy_by_node = {node_id: 0.0 for node_id in node_by_id}
     completion_time: dict[str, float] = {}
     records: dict[str, SimulationRecord] = {}
     events: list[tuple[float, int, str, bool, Assignment]] = []
@@ -114,17 +125,20 @@ def run_workflow_simulation(
             for task in sorted(arrived, key=ready_key):
                 released_at = ready_at(task)
                 dispatch_at = max(released_at, current_time_ms)
-                artifacts = [
-                    artifact
-                    for parent in index.parents[task.task_id]
-                    if (artifact := manager.artifact_for(parent)) is not None
-                ]
+                artifacts = list(manager.input_artifacts_for(task.task_id))
+                typed_parents = {
+                    edge.producer_task for edge in index.incoming_edges[task.task_id]
+                }
+                for parent in index.parents[task.task_id]:
+                    if parent not in typed_parents:
+                        artifacts.extend(manager.artifacts_for(parent))
                 assignment = choose_assignment(
                     task,
                     algorithm=algorithm,
                     ready_time_ms=dispatch_at,
                     node_available=node_available,
-                    nodes=node_by_id,
+                    node_specs=node_by_id,
+                    node_snapshots=snapshot_by_id,
                     parent_artifacts=artifacts,
                     critical_tail_ms=critical_tail[task.task_id],
                     profiles=profiles,
@@ -155,8 +169,12 @@ def run_workflow_simulation(
                 )
                 node_available[assignment.target_node_id] = finish_ms
                 busy_by_node[assignment.target_node_id] += compute_ms
-                node_by_id[assignment.target_node_id] = apply_load(node_by_id[assignment.target_node_id], task)
+                snapshot_by_id[assignment.target_node_id] = apply_load(
+                    snapshot_by_id[assignment.target_node_id],
+                    task,
+                )
                 target = node_by_id[assignment.target_node_id]
+                target_snapshot = snapshot_by_id[assignment.target_node_id]
                 selected_profile = profiles.lookup(task.spec.task_type, target.kind) if profiles else None
                 profile_sources_used.add(
                     selected_profile.provenance if selected_profile else "demand_formula_fallback"
@@ -165,7 +183,7 @@ def run_workflow_simulation(
                     total_bandwidth_mb += sum(a.size_mb for a in artifacts) if artifacts else task.spec.input_size_mb
 
                 deadline_missed = finish_ms > task.deadline_time_ms
-                thermal_penalty = 0.2 if target.temperature_c > 93.0 else 0.0
+                thermal_penalty = 0.2 if target_snapshot.temperature_c > 93.0 else 0.0
                 network_penalty = 0.04 if assignment.communication_ms > task.spec.latency_budget_ms * 0.5 else 0.0
                 probability = max(
                     0.05,
@@ -215,20 +233,34 @@ def run_workflow_simulation(
             continue
         task = manager.get(task_id)
         dropped = not assignment.target_node_id
-        artifact = None
+        outputs: tuple[ArtifactRef, ...] = ()
         if ok and not dropped:
-            artifact = ArtifactRef(
-                artifact_id=f"artifact:{workflow.workflow_id}:{task_id}",
-                producer_task_id=task_id,
-                node_id=assignment.target_node_id,
-                size_mb=task.spec.output_size_mb,
-                uri=f"node://{assignment.target_node_id}/{workflow.workflow_id}/{task_id}",
+            declared = task.spec.output_ports or ()
+            output_count = max(1, len(declared))
+            ports = declared or (None,)
+            outputs = tuple(
+                ArtifactRef(
+                    artifact_id=(
+                        f"artifact:{workflow.workflow_id}:{task_id}:"
+                        f"{port.name if port is not None else 'result'}"
+                    ),
+                    producer_task_id=task_id,
+                    node_id=assignment.target_node_id,
+                    size_mb=task.spec.output_size_mb / output_count,
+                    uri=(
+                        f"node://{assignment.target_node_id}/{workflow.workflow_id}/"
+                        f"{task_id}/{port.name if port is not None else 'result'}"
+                    ),
+                    producer_port=port.name if port is not None else "result",
+                    message_type=port.message_type if port is not None else "",
+                )
+                for port in ports
             )
         released, skipped = manager.complete(
             task_id,
             ok=ok and not dropped,
             finished_time_ms=finish_ms,
-            artifact=artifact,
+            outputs=outputs,
             timed_out=(finish_ms > task.deadline_time_ms and not ok),
             dropped=dropped,
             error_code="no_feasible_node" if dropped else ("execution_failed" if not ok else ""),
@@ -239,7 +271,7 @@ def run_workflow_simulation(
         record = records[task_id]
         record.state = manager.state_of(task_id).value
         record.success = manager.state_of(task_id) is TaskState.SUCCEEDED
-        record.output_ref = artifact.uri if artifact else ""
+        record.output_ref = outputs[0].uri if outputs else ""
         record.deadline_missed = finish_ms > task.deadline_time_ms or manager.state_of(task_id) is TaskState.TIMEOUT
         logs.append(
             f"{task_id} [{task.spec.task_class.value}] -> {assignment.target_node_id or 'DROP'} "
@@ -262,7 +294,7 @@ def run_workflow_simulation(
     offloaded = sum(record.mode == "edge" for record in ordered_records)
     safety_violations = sum(
         record.task_class == TaskClass.LOCAL_SAFETY.value
-        and record.target_node_id
+        and bool(record.target_node_id)
         and record.target_node_id != record.source_robot_id
         for record in ordered_records
     )
@@ -322,7 +354,7 @@ def run_workflow_simulation(
             ],
         },
         transport={
-            "active": "in_process_simulation",
+            "active": "deterministic_event_engine",
             "profile_source": (
                 next(iter(profile_sources_used))
                 if len(profile_sources_used) == 1

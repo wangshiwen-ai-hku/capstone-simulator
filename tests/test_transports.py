@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from mars.models import Assignment, ExecutionMode, WorkflowSpec
-from mars.transports.base import NodeRegistration
+from mars.models import Assignment, ExecutionMode, NodeSnapshot, NodeSpec, WorkflowSpec
 from mars.transports.inmemory import InMemoryTransport
 
 from tests.test_mars_core import task
@@ -13,9 +12,28 @@ from mars.models import NodeKind
 class TransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_inmemory_registration_is_idempotent(self):
         transport = InMemoryTransport()
-        registration = NodeRegistration("robot_1", NodeKind.ROBOT, "jetson-orin", ("gpu",))
-        self.assertTrue(await transport.register(registration))
-        self.assertFalse(await transport.register(registration))
+        spec = NodeSpec(
+            "robot_1",
+            NodeKind.ROBOT,
+            1,
+            1,
+            16,
+            100,
+            2,
+            architecture="jetson-orin",
+            capabilities=("gpu",),
+        )
+        self.assertTrue(await transport.register(spec))
+        self.assertFalse(await transport.register(spec))
+
+    async def test_static_registration_and_dynamic_snapshot_are_separate(self):
+        transport = InMemoryTransport()
+        spec = NodeSpec("robot_1", NodeKind.ROBOT, 1, 1, 16, 100, 2)
+        snapshot = NodeSnapshot("robot_1", gpu_util=0.7, temperature_c=62)
+        await transport.register(spec)
+        await transport.publish_node_state(snapshot)
+        self.assertEqual(transport.registrations["robot_1"], spec)
+        self.assertEqual(transport.node_states["robot_1"], snapshot)
 
     async def test_inmemory_workflow_submission_is_idempotent(self):
         transport = InMemoryTransport()
