@@ -1,13 +1,12 @@
 """Deterministic benchmark-scene generation."""
 
+from dataclasses import dataclass
 import logging
 import random
 from typing import List
 
 from mars.models import TaskClass
 from mars.synthetic_workloads import ExecutionTarget, load_default_synthetic_workloads
-
-logger = logging.getLogger(__name__)
 
 from .schemas import (
     BenchmarkScene,
@@ -25,6 +24,9 @@ from .schemas import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 DIFFICULTY_FACTOR = {
     Difficulty.easy: 0.75,
     Difficulty.medium: 1.0,
@@ -33,24 +35,12 @@ DIFFICULTY_FACTOR = {
 }
 
 SCENE_TEXT = {
-    "warehouse": "同一仓库内，多台移动机器人执行货架巡检、包裹识别、路径规划和抓取/搬运任务。",
-    "hospital": "医院楼层内，配送机器人需要在病区和药房之间移动，同时执行避障、物品识别和任务规划。",
-    "campus": "校园环境中，多台机器人在楼宇之间执行递送、巡检、地图更新和异常检测。",
-    "factory": "工厂产线附近，机器人进行零件识别、质量检测、路径规划和协同搬运。",
-    "disaster": "灾害救援模拟中，机器人在网络不稳定和边缘节点负载较高的情况下进行搜索、检测和汇报。",
-    "custom": "用户自定义场景。",
-}
-
-CATEGORY_DEFAULTS = {
-    TaskCategory.obstacle_avoidance: dict(task_class=TaskClass.LOCAL_SAFETY, compute=0.6, gpu=0.1, latency=60, data=0.3, output=0.02, safety=5, model="tiny-safety-cnn", local_fallback=False),
-    TaskCategory.object_detection: dict(task_class=TaskClass.REALTIME_OFFLOADABLE, compute=1.2, gpu=0.6, latency=300, data=2.0, output=0.08, safety=3, model="yolo/rt-detr", local_fallback=True),
-    TaskCategory.segmentation: dict(task_class=TaskClass.REALTIME_OFFLOADABLE, compute=1.6, gpu=0.8, latency=450, data=3.0, output=0.6, safety=3, model="segformer/sam-lite", local_fallback=True),
-    TaskCategory.path_planning: dict(task_class=TaskClass.REALTIME_OFFLOADABLE, compute=1.0, gpu=0.1, latency=250, data=0.5, output=0.03, safety=4, model="astar/mpc", local_fallback=True),
-    TaskCategory.data_compression: dict(task_class=TaskClass.EDGE_HEAVY, compute=0.5, gpu=0.0, latency=500, data=8.0, output=2.5, safety=1, model="codec", local_fallback=True),
-    TaskCategory.vla_inference: dict(task_class=TaskClass.EDGE_HEAVY, compute=4.6, gpu=2.4, latency=1400, data=6.0, output=0.05, safety=3, model="7B-10B VLA", local_fallback=True),
-    TaskCategory.llm_planning: dict(task_class=TaskClass.EDGE_HEAVY, compute=3.2, gpu=1.2, latency=2000, data=1.2, output=0.03, safety=2, model="LLM planner", local_fallback=True),
-    TaskCategory.result_verification: dict(task_class=TaskClass.REALTIME_OFFLOADABLE, compute=1.4, gpu=0.5, latency=700, data=2.0, output=0.02, safety=3, model="VLM verifier", local_fallback=True),
-    TaskCategory.map_fusion: dict(task_class=TaskClass.EDGE_HEAVY, compute=2.2, gpu=0.6, latency=1200, data=12.0, output=4.0, safety=2, model="SLAM/map fusion", local_fallback=True),
+    "warehouse": "仓库移动机器人执行巡检、识别、路径规划和搬运任务。",
+    "hospital": "医院配送机器人在病区与药房之间执行导航、避障、识别和任务规划。",
+    "campus": "校园机器人执行递送、巡检、地图更新和异常检测。",
+    "factory": "工厂机器人执行零件识别、质量检测、路径规划和协同搬运。",
+    "disaster": "救援机器人在网络波动和边缘负载变化下执行搜索、检测和状态汇报。",
+    "custom": "自定义运行场景。",
 }
 
 CATEGORY_ALIASES = {
@@ -60,6 +50,223 @@ CATEGORY_ALIASES = {
     TaskCategory.llm_planning: "local_llm_7b",
 }
 
+
+@dataclass(frozen=True)
+class TaskTypeTemplate:
+    """Web-scene semantics for one concrete task type."""
+
+    reporting_class: TaskClass
+    safety_level: int
+    placement: PlacementConstraintsSpec
+
+    @property
+    def allow_local_fallback(self) -> bool:
+        return (
+            self.placement.allow_source_node
+            and self.placement.allow_fallback
+        )
+
+
+def _placement(**values) -> PlacementConstraintsSpec:
+    return PlacementConstraintsSpec(**values)
+
+
+# Placement is declared per concrete task type. TaskClass remains a reporting
+# cohort and is not used to construct these contracts.
+TASK_TYPE_TEMPLATES: dict[str, TaskTypeTemplate] = {
+    "obstacle_avoidance": TaskTypeTemplate(
+        reporting_class=TaskClass.LOCAL_SAFETY,
+        safety_level=5,
+        placement=_placement(
+            pin_to_source=True,
+            allowed_node_kinds=["robot"],
+            preferred_node_kinds=["robot"],
+            required_capabilities=["local_safety"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            safety_required=True,
+            allow_fallback=False,
+            stateful=True,
+            idempotent=False,
+        ),
+    ),
+    "emergency_stop": TaskTypeTemplate(
+        reporting_class=TaskClass.LOCAL_SAFETY,
+        safety_level=5,
+        placement=_placement(
+            pin_to_source=True,
+            allowed_node_kinds=["robot"],
+            preferred_node_kinds=["robot"],
+            required_capabilities=["local_safety"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            safety_required=True,
+            allow_fallback=False,
+            stateful=False,
+            idempotent=True,
+        ),
+    ),
+    "local_control": TaskTypeTemplate(
+        reporting_class=TaskClass.LOCAL_SAFETY,
+        safety_level=5,
+        placement=_placement(
+            pin_to_source=True,
+            allowed_node_kinds=["robot"],
+            preferred_node_kinds=["robot"],
+            required_capabilities=["local_safety"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            safety_required=True,
+            allow_fallback=False,
+            stateful=True,
+            idempotent=False,
+        ),
+    ),
+    "localization": TaskTypeTemplate(
+        reporting_class=TaskClass.REALTIME_OFFLOADABLE,
+        safety_level=4,
+        placement=_placement(
+            allowed_node_kinds=["robot", "edge"],
+            preferred_node_kinds=["robot"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            allow_fallback=True,
+            stateful=True,
+            idempotent=False,
+        ),
+    ),
+    "environment_understanding": TaskTypeTemplate(
+        reporting_class=TaskClass.REALTIME_OFFLOADABLE,
+        safety_level=3,
+        placement=_placement(
+            allowed_node_kinds=["robot", "edge"],
+            preferred_node_kinds=["edge"],
+            required_capabilities=["cuda"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            allow_fallback=True,
+        ),
+    ),
+    "object_detection": TaskTypeTemplate(
+        reporting_class=TaskClass.REALTIME_OFFLOADABLE,
+        safety_level=3,
+        placement=_placement(
+            allowed_node_kinds=["robot", "edge"],
+            preferred_node_kinds=["edge"],
+            required_capabilities=["cuda"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            allow_fallback=True,
+        ),
+    ),
+    "semantic_segmentation": TaskTypeTemplate(
+        reporting_class=TaskClass.REALTIME_OFFLOADABLE,
+        safety_level=3,
+        placement=_placement(
+            allowed_node_kinds=["robot", "edge"],
+            preferred_node_kinds=["edge"],
+            required_capabilities=["cuda"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            allow_fallback=True,
+        ),
+    ),
+    "local_planning": TaskTypeTemplate(
+        reporting_class=TaskClass.REALTIME_OFFLOADABLE,
+        safety_level=4,
+        placement=_placement(
+            allowed_node_kinds=["robot", "edge"],
+            preferred_node_kinds=["robot"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            allow_fallback=True,
+            stateful=True,
+            idempotent=False,
+        ),
+    ),
+    "data_compression": TaskTypeTemplate(
+        reporting_class=TaskClass.EDGE_HEAVY,
+        safety_level=1,
+        placement=_placement(
+            allowed_node_kinds=["robot", "edge"],
+            preferred_node_kinds=["edge"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            allow_fallback=True,
+        ),
+    ),
+    "local_llm_7b": TaskTypeTemplate(
+        reporting_class=TaskClass.EDGE_HEAVY,
+        safety_level=2,
+        placement=_placement(
+            allowed_node_kinds=["robot", "edge"],
+            preferred_node_kinds=["edge"],
+            required_capabilities=["cuda"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            allow_fallback=True,
+        ),
+    ),
+    "local_llm_10b": TaskTypeTemplate(
+        reporting_class=TaskClass.EDGE_HEAVY,
+        safety_level=2,
+        placement=_placement(
+            allowed_node_kinds=["robot", "edge"],
+            preferred_node_kinds=["edge"],
+            required_capabilities=["cuda"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            allow_fallback=True,
+        ),
+    ),
+    "result_verification": TaskTypeTemplate(
+        reporting_class=TaskClass.REALTIME_OFFLOADABLE,
+        safety_level=3,
+        placement=_placement(
+            allowed_node_kinds=["robot", "edge"],
+            preferred_node_kinds=["edge"],
+            required_capabilities=["cuda"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            allow_fallback=True,
+        ),
+    ),
+    "map_fusion": TaskTypeTemplate(
+        reporting_class=TaskClass.EDGE_HEAVY,
+        safety_level=2,
+        placement=_placement(
+            allowed_node_kinds=["robot", "edge"],
+            preferred_node_kinds=["edge"],
+            required_capabilities=["cuda"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            allow_fallback=True,
+            stateful=True,
+            idempotent=False,
+        ),
+    ),
+}
+
+
+PROFILE_DEFAULTS = {
+    "data_compression": dict(
+        compute=0.5,
+        gpu=0.0,
+        latency=500,
+        data=8.0,
+        output=2.5,
+        model="codec",
+    ),
+    "result_verification": dict(
+        compute=1.4,
+        gpu=0.5,
+        latency=700,
+        data=2.0,
+        output=0.02,
+        model="VLM verifier",
+    ),
+}
+
 SYNTHETIC_CATALOG = load_default_synthetic_workloads()
 
 
@@ -67,29 +274,57 @@ def _workload_name(category: TaskCategory) -> str:
     return CATEGORY_ALIASES.get(category, category.value)
 
 
-def _category_definition(category: TaskCategory) -> tuple[dict, list[PortSpec], list[PortSpec]]:
+def placement_constraints_for(
+    task_type: str,
+) -> PlacementConstraintsSpec:
+    """Return an independent placement contract for a known task type."""
+    try:
+        template = TASK_TYPE_TEMPLATES[task_type]
+    except KeyError as exc:
+        raise KeyError(
+            f"no placement template for task type: {task_type}"
+        ) from exc
+    return template.placement.model_copy(deep=True)
+
+
+def _category_definition(
+    category: TaskCategory,
+) -> tuple[
+    dict,
+    list[PortSpec],
+    list[PortSpec],
+    PlacementConstraintsSpec,
+]:
     """Resolve one UI category to a scheduler profile and typed ports."""
     task_type = _workload_name(category)
+    template = TASK_TYPE_TEMPLATES[task_type]
+    placement = placement_constraints_for(task_type)
     try:
         workload = SYNTHETIC_CATALOG.get(task_type)
     except KeyError:
-        return CATEGORY_DEFAULTS[category], [], []
+        definition = {
+            **PROFILE_DEFAULTS[task_type],
+            "task_class": template.reporting_class,
+            "safety": template.safety_level,
+            "local_fallback": template.allow_local_fallback,
+        }
+        return definition, [], [], placement
 
     profile = workload.profile_for(ExecutionTarget.ORIN)
     definition = {
-        "task_class": workload.task_class,
+        "task_class": template.reporting_class,
         "compute": profile.resources.cpu_cores + 1.5 * profile.resources.gpu_units,
         "gpu": profile.resources.gpu_units,
         "latency": profile.latency.p95_ms * 1.25,
         "data": profile.input_size_mb.typical,
         "output": profile.output_size_mb.typical,
-        "safety": 5 if workload.task_class is TaskClass.LOCAL_SAFETY else 3,
+        "safety": template.safety_level,
         "model": workload.model_variant,
-        "local_fallback": workload.task_class is not TaskClass.LOCAL_SAFETY,
+        "local_fallback": template.allow_local_fallback,
     }
     inputs = [PortSpec(name=port.name, message_type=port.semantic_type) for port in workload.inputs]
     outputs = [PortSpec(name=port.name, message_type=port.semantic_type) for port in workload.outputs]
-    return definition, inputs, outputs
+    return definition, inputs, outputs, placement
 
 
 def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
@@ -98,7 +333,15 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
     scene_id = f"scene_{req.scenario_type.value}_{req.seed:04d}"
     scene_name = req.custom_scene or SCENE_TEXT[req.scenario_type.value]
 
-    logger.info(f"Building deterministic scene '{scene_id}' (type={req.scenario_type.value}, difficulty={req.difficulty.value}, robots={req.robot_count}, edges={req.edge_count})")
+    logger.info(
+        "Building deterministic scene %s (type=%s difficulty=%s robots=%d "
+        "edges=%d)",
+        scene_id,
+        req.scenario_type.value,
+        req.difficulty.value,
+        req.robot_count,
+        req.edge_count,
+    )
 
     nodes: List[NodeSpec] = []
     resources: List[ResourceSnapshot] = []
@@ -131,7 +374,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
         ))
 
     for i in range(req.edge_count):
-        eid = f"edge_pc" if req.edge_count == 1 else f"edge_pc_{i+1}"
+        eid = "edge_pc" if req.edge_count == 1 else f"edge_pc_{i+1}"
         nodes.append(NodeSpec(
             id=eid,
             kind="edge",
@@ -170,7 +413,12 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
         source_robot_id = f"robot_{idx % req.robot_count + 1}"
         stage_index = idx // req.robot_count
         category = req.task_categories[stage_index % len(req.task_categories)]
-        d, input_ports, output_ports = _category_definition(category)
+        (
+            d,
+            input_ports,
+            output_ports,
+            placement_constraints,
+        ) = _category_definition(category)
         jitter = rng.uniform(0.75, 1.35)
         compute = d["compute"] * factor * jitter
         data_size = d["data"] * factor * rng.uniform(0.7, 1.5)
@@ -224,11 +472,11 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             ),
             energy_budget_j=round(20 + compute * 90 + data_size * 2.0, 1),
             allow_local_fallback=d["local_fallback"],
-            placement_constraints=_placement_contract(
-                d["task_class"],
-                d["local_fallback"],
+            placement_constraints=placement_constraints,
+            result_verification=(
+                "Validate the task result, latency budget, deadline, and "
+                "task-specific completion status."
             ),
-            result_verification="Check returned result, latency budget, deadline and task-specific success flag.",
             arrival_time_ms=round(arrival, 1),
             deadline_ms=round(deadline, 1),
             dependencies=dependencies,
@@ -246,12 +494,17 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
     if req.difficulty == Difficulty.stress:
         stressors.extend(["bursty VLA requests", "robot temperature throttling", "temporary bandwidth degradation"])
 
-    logger.info(f"Generated {len(tasks)} tasks and {len(nodes)} nodes for scene '{scene_id}'")
+    logger.info(
+        "Generated %d tasks and %d nodes for scene %s",
+        len(tasks),
+        len(nodes),
+        scene_id,
+    )
 
     links, link_snapshots = _directed_links(nodes, resources)
     return BenchmarkScene(
         id=scene_id,
-        title=f"{req.scenario_type.value.title()} multi-robot scheduling benchmark",
+        title=f"{req.scenario_type.value.title()} multi-robot scheduling scenario",
         natural_language_description=scene_name,
         scenario_type=req.scenario_type.value,
         difficulty=req.difficulty,
@@ -265,44 +518,11 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
         workflow_deadline_ms=round(max((task.deadline_ms for task in tasks), default=0.0) * 1.1, 2),
         stressors=stressors,
         success_criteria=[
-            "success_rate >= 0.95 for easy/medium, >= 0.85 for hard/stress",
-            "P95 latency below workload latency budgets where possible",
-            "no local-safety task is offloaded from its source robot",
-            "deadline, latency, energy and placement metrics are reported for the run",
+            "success_rate >= 0.95 for easy/medium and >= 0.85 for hard/stress",
+            "P95 latency remains within declared task budgets",
+            "source-pinned safety tasks execute only on their source robots",
+            "the run reports deadline, latency, energy, and placement metrics",
         ],
-    )
-
-
-def _placement_contract(
-    task_class: TaskClass,
-    allow_local_fallback: bool,
-) -> PlacementConstraintsSpec:
-    if task_class is TaskClass.LOCAL_SAFETY:
-        return PlacementConstraintsSpec(
-            pin_to_source=True,
-            allowed_node_kinds=["robot"],
-            preferred_node_kinds=["robot"],
-            required_capabilities=["local_safety"],
-            allow_source_node=True,
-            allow_other_robots=False,
-            safety_required=True,
-            allow_fallback=False,
-            stateful=True,
-            idempotent=False,
-        )
-    if task_class is TaskClass.REALTIME_OFFLOADABLE:
-        return PlacementConstraintsSpec(
-            allowed_node_kinds=["edge"],
-            allow_source_node=True,
-            allow_other_robots=False,
-            allow_fallback=allow_local_fallback,
-        )
-    return PlacementConstraintsSpec(
-        allowed_node_kinds=["edge"],
-        preferred_node_kinds=["edge"],
-        allow_source_node=allow_local_fallback,
-        allow_other_robots=False,
-        allow_fallback=allow_local_fallback,
     )
 
 

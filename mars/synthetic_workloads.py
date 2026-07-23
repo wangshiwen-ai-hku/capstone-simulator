@@ -360,7 +360,12 @@ def workload_from_dict(item: Mapping[str, Any]) -> SyntheticWorkload:
                 supported=bool(value.get("supported", True)),
             )
         )
-    ports = lambda values: tuple(PortDefinition(value["name"], value["semantic_type"]) for value in values)
+    def ports(values: Iterable[Mapping[str, Any]]) -> tuple[PortDefinition, ...]:
+        return tuple(
+            PortDefinition(value["name"], value["semantic_type"])
+            for value in values
+        )
+
     return SyntheticWorkload(
         task_type=item["task_type"],
         display_name=item["display_name"],

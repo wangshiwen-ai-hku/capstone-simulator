@@ -23,6 +23,64 @@ class MarsAdapterValidationTests(unittest.TestCase):
         index = validate_scene(self.scene)
         self.assertEqual(len(index.topological_order), len(self.scene.tasks))
 
+    def test_generated_tasks_declare_authoritative_placement(self):
+        self.assertTrue(
+            all(
+                task.placement_constraints is not None
+                for task in self.scene.tasks
+            )
+        )
+        localization = next(
+            task
+            for task in self.scene.tasks
+            if task.task_type == "localization"
+        )
+        perception = next(
+            task
+            for task in self.scene.tasks
+            if task.task_type == "environment_understanding"
+        )
+        self.assertEqual(
+            localization.task_class,
+            perception.task_class,
+        )
+        self.assertEqual(
+            localization.placement_constraints.preferred_node_kinds,
+            ["robot"],
+        )
+        self.assertEqual(
+            perception.placement_constraints.preferred_node_kinds,
+            ["edge"],
+        )
+
+    def test_explicit_placement_is_not_derived_from_reporting_class(self):
+        workload = next(
+            task
+            for task in self.scene.tasks
+            if task.task_type == "object_detection"
+        )
+        payload = workload.model_dump(mode="json")
+        payload["task_class"] = "local_safety"
+        scene_payload = self.scene.model_dump(mode="json")
+        scene_payload["tasks"] = [
+            payload if task["id"] == workload.id else task
+            for task in scene_payload["tasks"]
+        ]
+        reconstructed = type(self.scene).model_validate(scene_payload)
+        workflow = build_workflow(reconstructed)
+        mapped = next(
+            task
+            for task in workflow.tasks
+            if task.task_id == workload.id
+        )
+        self.assertEqual(
+            [kind.value for kind in mapped.spec.placement_constraints.allowed_node_kinds],
+            ["robot", "edge"],
+        )
+        self.assertFalse(
+            mapped.spec.placement_constraints.safety_required
+        )
+
     def test_rejects_missing_resource_snapshot(self):
         self.scene.initial_resources = self.scene.initial_resources[:-1]
         with self.assertRaisesRegex(SceneValidationError, "missing resource snapshots"):
@@ -39,12 +97,28 @@ class MarsAdapterValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(SceneValidationError, "must be a robot node"):
             validate_scene(self.scene)
 
-    def test_maps_local_fallback_into_mars_task_spec(self):
-        workload = next(task for task in self.scene.tasks if task.task_class.value == "edge_heavy")
-        workload.allow_local_fallback = False
-        workflow = build_workflow(self.scene)
-        task = next(item for item in workflow.tasks if item.task_id == workload.id)
-        self.assertFalse(task.spec.allow_local_fallback)
+    def test_explicit_placement_normalizes_legacy_fallback_field(self):
+        payload = self.scene.model_dump(mode="json")
+        workload = next(
+            task
+            for task in payload["tasks"]
+            if task["task_class"] == "edge_heavy"
+        )
+        self.assertTrue(
+            workload["placement_constraints"]["allow_source_node"]
+        )
+        self.assertTrue(
+            workload["placement_constraints"]["allow_fallback"]
+        )
+        workload["allow_local_fallback"] = False
+
+        reconstructed = type(self.scene).model_validate(payload)
+        normalized = next(
+            task
+            for task in reconstructed.tasks
+            if task.id == workload["id"]
+        )
+        self.assertTrue(normalized.allow_local_fallback)
 
     def test_keeps_static_node_spec_separate_from_dynamic_snapshot(self):
         specs = {spec.node_id: spec for spec in build_node_specs(self.scene)}

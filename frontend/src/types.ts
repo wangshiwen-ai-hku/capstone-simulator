@@ -10,13 +10,9 @@ export const TASK_CATEGORIES = [
   'localization',
   'environment_understanding',
   'object_detection',
-  'segmentation',
   'semantic_segmentation',
-  'path_planning',
   'local_planning',
   'data_compression',
-  'vla_inference',
-  'llm_planning',
   'local_llm_7b',
   'local_llm_10b',
   'result_verification',
@@ -102,7 +98,7 @@ export interface Workload {
   name: string;
   source_robot_id: string;
   task_type: string;
-  task_class: TaskClass;
+  task_class?: TaskClass | null;
   priority: number;
   compute_demand: number;
   gpu_demand: number;
@@ -155,6 +151,8 @@ export interface BenchmarkScene {
   failure_policy: 'skip_descendants' | 'fail_fast';
   stressors: string[];
   success_criteria: string[];
+  generation_source: 'deterministic' | 'llm' | 'deterministic_fallback';
+  generation_note: string;
 }
 
 export interface SimulationMetrics {
@@ -180,7 +178,7 @@ export interface TaskRunResult {
   task_id: string;
   workflow_id: string;
   task_name: string;
-  task_class: TaskClass;
+  task_class?: TaskClass | null;
   stage_index: number;
   dependencies: string[];
   source_robot_id: string;
@@ -217,12 +215,12 @@ export interface SimulationResponse {
     state_counts: Record<string, number>;
     critical_path: string[];
   };
-  task_class_summary: Record<TaskClass, {
+  task_class_summary: Partial<Record<TaskClass, {
     task_count: number;
     success_rate: number;
     avg_latency_ms: number;
     edge_offload_ratio: number;
-  }>;
+  }>>;
   dag: {
     valid: boolean;
     topological_order: string[];
@@ -285,7 +283,7 @@ export interface RuntimeTaskResult {
   task_id: string;
   task_name: string;
   task_type: string;
-  task_class: TaskClass;
+  task_class?: TaskClass | null;
   state: string;
   source_node_id: string;
   target_node_id: string;

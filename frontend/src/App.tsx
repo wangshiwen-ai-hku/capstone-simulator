@@ -1,34 +1,192 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  bootstrapRuntime,
   generateScene,
   getRuntimeWorkflow,
   health,
   simulate,
   submitRuntimeWorkflow,
 } from './api';
+import { canonicalDag } from './dag';
 import type {
   Algorithm,
   BenchmarkScene,
   Difficulty,
   GenerateSceneRequest,
-  RuntimeStatus,
+  PlacementConstraintsSpec,
   RuntimeWorkflowRun,
   ScenarioType,
   SimulationResponse,
   TaskCategory,
+  TaskClass,
 } from './types';
 import { TASK_CATEGORIES } from './types';
 
 const scenarioOptions: ScenarioType[] = ['warehouse', 'hospital', 'campus', 'factory', 'disaster', 'custom'];
 const difficultyOptions: Difficulty[] = ['easy', 'medium', 'hard', 'stress'];
 const algorithmOptions: Algorithm[] = ['dag_deadline', 'rule_based', 'local_first', 'edge_first', 'greedy_cost'];
+const MAX_ROBOTS = 50;
+const MIN_EDGE_NODES = 0;
+const MAX_EDGE_NODES = 8;
+const MAX_SEED = 2_147_483_647;
+const GRAPH_NODE_LIMIT = 120;
+const TASK_PAGE_SIZE = 50;
+const PLACEMENT_PAGE_SIZE = 24;
+const EDGE_PAGE_SIZE = 50;
+const EVENT_PAGE_SIZE = 100;
+const LOG_PAGE_SIZE = 200;
+const RUNTIME_POLL_TIMEOUT_MS = 60_000;
+const RUNTIME_POLL_INTERVAL_MS = 500;
 
-const taskClassLabels: Record<string, string> = {
-  local_safety: '端侧安全关键',
-  realtime_offloadable: '可卸载实时推理',
-  edge_heavy: '边缘优先重计算',
+const generationSourceLabels: Record<BenchmarkScene['generation_source'], string> = {
+  deterministic: 'Deterministic',
+  llm: 'LLM',
+  deterministic_fallback: 'Deterministic fallback',
 };
+
+const tabOptions = [
+  ['overview', '概览'],
+  ['dag', 'DAG'],
+  ['tasks', '任务'],
+  ['runtime', 'Agent 运行'],
+  ['json', 'JSON'],
+  ['logs', '日志'],
+] as const;
+
+type TabId = typeof tabOptions[number][0];
+
+const taskClassLabels: Record<TaskClass, string> = {
+  local_safety: '安全关键报表组',
+  realtime_offloadable: '实时卸载报表组',
+  edge_heavy: '重计算报表组',
+};
+
+type ConstraintBadgeTone = 'pin' | 'safety' | 'allowed' | 'preferred' | 'capability' | 'property' | 'warning';
+
+interface ConstraintBadge {
+  label: string;
+  tone: ConstraintBadgeTone;
+}
+
+function reportClassLabel(taskClass?: TaskClass | null) {
+  return taskClass ? taskClassLabels[taskClass] : '未设置报表分组';
+}
+
+function placementBadges(
+  placement?: PlacementConstraintsSpec | null,
+  limit = Number.POSITIVE_INFINITY,
+) {
+  if (!placement) {
+    return [{ label: '约束未声明', tone: 'warning' as const }];
+  }
+
+  const badges: ConstraintBadge[] = [];
+  if (placement.pinned_node_id) badges.push({ label: `固定 ${placement.pinned_node_id}`, tone: 'pin' });
+  if (placement.pin_to_source) badges.push({ label: '固定源节点', tone: 'pin' });
+  if (placement.safety_required) badges.push({ label: '安全节点', tone: 'safety' });
+  if (placement.allowed_node_kinds.length) {
+    badges.push({ label: `允许 ${placement.allowed_node_kinds.join(' / ')}`, tone: 'allowed' });
+  }
+  badges.push({
+    label: placement.allow_source_node ? '源节点可用' : '排除源节点',
+    tone: placement.allow_source_node ? 'allowed' : 'property',
+  });
+  if (placement.preferred_node_kinds.length) {
+    badges.push({ label: `优先 ${placement.preferred_node_kinds.join(' / ')}`, tone: 'preferred' });
+  }
+  placement.required_capabilities.forEach((capability) => {
+    badges.push({ label: `能力 ${capability}`, tone: 'capability' });
+  });
+  if (placement.allow_other_robots) badges.push({ label: '允许跨机器人', tone: 'property' });
+  if (placement.stateful) badges.push({ label: '有状态', tone: 'property' });
+  if (!placement.idempotent) badges.push({ label: '非幂等', tone: 'property' });
+  if (!placement.allow_fallback) badges.push({ label: '禁止回退', tone: 'property' });
+  if (placement.splittable) badges.push({ label: '可拆分', tone: 'property' });
+  if (placement.replicable) badges.push({ label: '可复制', tone: 'property' });
+  if (!badges.length) badges.push({ label: '通用放置', tone: 'allowed' });
+
+  if (badges.length <= limit) return badges;
+  return [
+    ...badges.slice(0, Math.max(0, limit - 1)),
+    { label: `+${badges.length - Math.max(0, limit - 1)}`, tone: 'property' as const },
+  ];
+}
+
+function PlacementBadges({
+  placement,
+  limit,
+}: {
+  placement?: PlacementConstraintsSpec | null;
+  limit?: number;
+}) {
+  return (
+    <div className="constraint-badges">
+      {placementBadges(placement, limit).map((badge, index) => (
+        <span className={`constraint-badge ${badge.tone}`} key={`${badge.label}-${index}`}>
+          {badge.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function boundedInteger(value: string, minimum: number, maximum: number, fallback: number) {
+  if (value.trim() === '') return minimum;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.trunc(parsed)));
+}
+
+function pageCount(itemCount: number, pageSize: number) {
+  return Math.max(1, Math.ceil(itemCount / pageSize));
+}
+
+function safePage(page: number, itemCount: number, pageSize: number) {
+  return Math.min(page, pageCount(itemCount, pageSize) - 1);
+}
+
+function pageItems<T>(items: T[], page: number, pageSize: number) {
+  const resolvedPage = safePage(page, items.length, pageSize);
+  return items.slice(resolvedPage * pageSize, (resolvedPage + 1) * pageSize);
+}
+
+function Pagination({
+  page,
+  itemCount,
+  pageSize,
+  onPageChange,
+  label,
+}: {
+  page: number;
+  itemCount: number;
+  pageSize: number;
+  onPageChange: (page: number) => void;
+  label: string;
+}) {
+  const pages = pageCount(itemCount, pageSize);
+  const resolvedPage = safePage(page, itemCount, pageSize);
+  if (pages <= 1) return null;
+  return (
+    <nav className="pagination" aria-label={`${label}分页`}>
+      <button
+        type="button"
+        onClick={() => onPageChange(resolvedPage - 1)}
+        disabled={resolvedPage === 0}
+      >
+        上一页
+      </button>
+      <span aria-live="polite">
+        第 {resolvedPage + 1} / {pages} 页 · 共 {itemCount} 项
+      </span>
+      <button
+        type="button"
+        onClick={() => onPageChange(resolvedPage + 1)}
+        disabled={resolvedPage >= pages - 1}
+      >
+        下一页
+      </button>
+    </nav>
+  );
+}
 
 function pct(x: number) {
   return `${(x * 100).toFixed(1)}%`;
@@ -64,32 +222,17 @@ function formatMetric(key: string, value: number) {
   return `${value}`;
 }
 
-function runtimeDemoCompatibilityIssue(
+function runtimeCompatibilityIssue(
   scene: BenchmarkScene | null,
-  runtimeStatus: RuntimeStatus | null,
 ) {
   if (!scene) return null;
-  if (!runtimeStatus) {
-    return '本地 Agent 运行时尚未就绪；当前 Scene 仍可运行 benchmark 仿真。';
-  }
-
-  const robotCount = scene.nodes.filter((node) => node.kind === 'robot').length;
-  const edgeCount = scene.nodes.filter((node) => node.kind === 'edge').length;
-  const unsupportedCount = scene.nodes.length - robotCount - edgeCount;
-  const requiredRobots = runtimeStatus.topology.orin_agents;
-  const requiredEdges = runtimeStatus.topology.edge_agents;
-  if (
-    robotCount !== requiredRobots
-    || edgeCount !== requiredEdges
-    || unsupportedCount > 0
-  ) {
-    return `Agent 演示仅支持 ${requiredRobots} 个 Orin + ${requiredEdges} 个 Edge；当前 Scene 为 ${robotCount} 个 Orin + ${edgeCount} 个 Edge${unsupportedCount ? `，另有 ${unsupportedCount} 个不支持的节点` : ''}。仍可运行 benchmark 仿真。`;
-  }
+  const unsupportedCount = scene.nodes.filter((node) => node.kind === 'cloud').length;
+  if (unsupportedCount > 0) return '本地 Agent 运行时仅接受 robot 与 edge 节点。';
   return null;
 }
 
 export default function App() {
-  const [providerInfo, setProviderInfo] = useState<string>('checking backend...');
+  const [providerInfo, setProviderInfo] = useState<string>('正在连接 MARS API...');
   const [scenarioType, setScenarioType] = useState<ScenarioType>('warehouse');
   const [customScene, setCustomScene] = useState('');
   const [robotCount, setRobotCount] = useState(2);
@@ -110,22 +253,18 @@ export default function App() {
   const [algorithm, setAlgorithm] = useState<Algorithm>('dag_deadline');
   const [scene, setScene] = useState<BenchmarkScene | null>(null);
   const [result, setResult] = useState<SimulationResponse | null>(null);
-  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [runtimeRun, setRuntimeRun] = useState<RuntimeWorkflowRun | null>(null);
   const [loading, setLoading] = useState(false);
   const [runtimeLoading, setRuntimeLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<'overview' | 'dag' | 'tasks' | 'runtime' | 'json' | 'logs'>('overview');
+  const [tab, setTab] = useState<TabId>('overview');
 
   useEffect(() => {
     health()
       .then((h) => setProviderInfo(
-        `MARS ${h.mars_version} · local agent runtime · LLM ${h.llm_configured ? 'configured' : 'fallback'}`,
+        `MARS ${h.mars_version} · Agent Runtime · LLM ${h.llm_configured ? '已配置' : '未配置'}`,
       ))
-      .catch((e) => setProviderInfo(`backend unavailable: ${e.message}`));
-    bootstrapRuntime()
-      .then(setRuntimeStatus)
-      .catch(() => setRuntimeStatus(null));
+      .catch((e) => setProviderInfo(`MARS API 不可用：${e.message}`));
   }, []);
 
   const requestPayload: GenerateSceneRequest = useMemo(() => ({
@@ -138,13 +277,10 @@ export default function App() {
     seed,
     use_llm: useLlm,
   }), [scenarioType, customScene, robotCount, edgeCount, taskCategories, difficulty, seed, useLlm]);
-  const runtimeDemoIssue = useMemo(
-    () => runtimeDemoCompatibilityIssue(scene, runtimeStatus),
-    [scene, runtimeStatus],
+  const runtimeIssue = useMemo(
+    () => runtimeCompatibilityIssue(scene),
+    [scene],
   );
-  const runtimeDemoTopology = runtimeStatus
-    ? `${runtimeStatus.topology.orin_agents} Orin + ${runtimeStatus.topology.edge_agents} Edge`
-    : '本地 Agent';
 
   function toggleTaskCategory(cat: TaskCategory) {
     setTaskCategories((prev) => {
@@ -157,8 +293,9 @@ export default function App() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setRuntimeRun(null);
     try {
-      if (taskCategories.length === 0) throw new Error('请至少选择一种原子任务类别。');
+      if (taskCategories.length === 0) throw new Error('请至少选择一种任务类型。');
       const s = await generateScene(requestPayload);
       setScene(s);
       setTab('overview');
@@ -173,8 +310,9 @@ export default function App() {
     if (!scene) return;
     setLoading(true);
     setError(null);
+    setRuntimeRun(null);
     try {
-      const r = await simulate(scene, algorithm);
+      const r = await simulate(scene, algorithm, seed);
       setResult(r);
       setTab('overview');
     } catch (e) {
@@ -185,27 +323,30 @@ export default function App() {
   }
 
   async function onRuntimeRun() {
-    if (!scene || runtimeDemoIssue) return;
+    if (!scene || runtimeIssue) return;
     setRuntimeLoading(true);
     setError(null);
+    setResult(null);
     setRuntimeRun(null);
     setTab('runtime');
     try {
       const accepted = await submitRuntimeWorkflow(scene, algorithm, seed);
       let run: RuntimeWorkflowRun | null = null;
-      for (let attempt = 0; attempt < 100; attempt += 1) {
+      const pollingStartedAt = Date.now();
+      while (Date.now() - pollingStartedAt < RUNTIME_POLL_TIMEOUT_MS) {
         run = await getRuntimeWorkflow(accepted.run_id);
         setRuntimeRun(run);
         if (run.status === 'succeeded' || run.status === 'failed') break;
-        await new Promise((resolve) => window.setTimeout(resolve, 80));
+        await new Promise((resolve) => window.setTimeout(resolve, RUNTIME_POLL_INTERVAL_MS));
       }
       if (!run || (run.status !== 'succeeded' && run.status !== 'failed')) {
-        throw new Error('本地运行时未在预期时间内返回结果。');
+        throw new Error(
+          `运行 ${accepted.run_id} 在 60 秒内未结束；已停止自动查询，服务端可能仍在执行。`,
+        );
       }
       if (run.status === 'failed') {
         throw new Error(run.error || '本地 Agent 工作流运行失败。');
       }
-      setRuntimeStatus(await bootstrapRuntime());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -217,86 +358,124 @@ export default function App() {
     <div className="app-shell">
       <header className="hero">
         <div>
-          <p className="eyebrow">Capstone · Multi-Agent Robot Scheduling</p>
-          <h1>端—边 DAG 调度与机器人 Benchmark</h1>
-          <p className="subtitle">统一 MARS 控制内核、DAG 工作流与三类任务约束，评估延迟、能耗、数据移动和工作流成功率。</p>
+          <p className="eyebrow">MARS · Multi-Agent Robot Scheduling</p>
+          <h1>端—边工作流调度</h1>
+          <p className="subtitle">构建带类型数据边的 DAG 工作流，检查放置约束、调度结果与 Agent 运行状态。</p>
         </div>
-        <div className="status-pill">{providerInfo}</div>
+        <div className="status-pill" role="status" aria-live="polite">{providerInfo}</div>
       </header>
 
       <main className="layout">
         <aside className="panel controls">
-          <h2>生成控制</h2>
-          <label>场景</label>
-          <select value={scenarioType} onChange={(e) => setScenarioType(e.target.value as ScenarioType)}>
+          <h2>工作流生成</h2>
+          <label htmlFor="scenario-type">场景</label>
+          <select id="scenario-type" value={scenarioType} onChange={(e) => setScenarioType(e.target.value as ScenarioType)}>
             {scenarioOptions.map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
 
           {scenarioType === 'custom' && (
-            <textarea value={customScene} onChange={(e) => setCustomScene(e.target.value)} placeholder="描述自定义场景，例如：医院药房配送 + 网络拥塞 + 边缘服务器过载" />
+            <>
+              <label htmlFor="custom-scene">场景描述</label>
+              <textarea id="custom-scene" value={customScene} onChange={(e) => setCustomScene(e.target.value)} placeholder="医院药房配送、网络拥塞、边缘服务器过载" />
+            </>
           )}
 
           <div className="grid2">
             <div>
-              <label>机器人数量</label>
-              <input type="number" min={1} max={50} value={robotCount} onChange={(e) => setRobotCount(Number(e.target.value))} />
+              <label htmlFor="robot-count">机器人数量</label>
+              <input
+                id="robot-count"
+                type="number"
+                min={1}
+                max={MAX_ROBOTS}
+                value={robotCount}
+                onChange={(e) => setRobotCount(
+                  boundedInteger(e.target.value, 1, MAX_ROBOTS, robotCount),
+                )}
+              />
             </div>
             <div>
-              <label>边缘 PC 数量</label>
-              <input type="number" min={1} max={8} value={edgeCount} onChange={(e) => setEdgeCount(Number(e.target.value))} />
+              <label htmlFor="edge-count">边缘 PC 数量</label>
+              <input
+                id="edge-count"
+                type="number"
+                min={MIN_EDGE_NODES}
+                max={MAX_EDGE_NODES}
+                value={edgeCount}
+                onChange={(e) => setEdgeCount(
+                  boundedInteger(e.target.value, MIN_EDGE_NODES, MAX_EDGE_NODES, edgeCount),
+                )}
+              />
             </div>
           </div>
 
-          <label>任务难度</label>
-          <select value={difficulty} onChange={(e) => setDifficulty(e.target.value as Difficulty)}>
+          <label htmlFor="difficulty">任务难度</label>
+          <select id="difficulty" value={difficulty} onChange={(e) => setDifficulty(e.target.value as Difficulty)}>
             {difficultyOptions.map((d) => <option key={d} value={d}>{d}</option>)}
           </select>
 
-          <label>原子任务类别</label>
-          <div className="chips">
-            {TASK_CATEGORIES.map((cat) => (
-              <button
-                type="button"
-                key={cat}
-                className={taskCategories.includes(cat) ? 'chip selected' : 'chip'}
-                onClick={() => toggleTaskCategory(cat)}
-              >
-                {cat}
-              </button>
-            ))}
-          </div>
+          <fieldset className="control-fieldset">
+            <legend>任务类型</legend>
+            <div className="chips">
+              {TASK_CATEGORIES.map((cat) => {
+                const selected = taskCategories.includes(cat);
+                return (
+                  <button
+                    type="button"
+                    key={cat}
+                    className={selected ? 'chip selected' : 'chip'}
+                    aria-pressed={selected}
+                    onClick={() => toggleTaskCategory(cat)}
+                  >
+                    {cat}
+                  </button>
+                );
+              })}
+            </div>
+          </fieldset>
 
           <div className="grid2">
-            <label className="checkbox-line"><input type="checkbox" checked={useLlm} onChange={(e) => setUseLlm(e.target.checked)} /> 使用 LLM</label>
+            <label className="checkbox-line" htmlFor="use-llm"><input id="use-llm" type="checkbox" checked={useLlm} onChange={(e) => setUseLlm(e.target.checked)} /> 使用 LLM</label>
             <div>
-              <label>Seed</label>
-              <input type="number" min={0} value={seed} onChange={(e) => setSeed(Number(e.target.value))} />
+              <label htmlFor="seed">Seed</label>
+              <input
+                id="seed"
+                type="number"
+                min={0}
+                max={MAX_SEED}
+                value={seed}
+                onChange={(e) => setSeed(
+                  boundedInteger(e.target.value, 0, MAX_SEED, seed),
+                )}
+              />
             </div>
           </div>
 
-          <button className="primary" onClick={onGenerate} disabled={loading}>{loading ? '处理中...' : '生成 Scene / Benchmark'}</button>
+          <button className="primary" aria-busy={loading} onClick={onGenerate} disabled={loading || runtimeLoading}>{loading ? '处理中...' : '生成工作流'}</button>
 
           <hr />
-          <h2>调度策略评估</h2>
-          <label>调度策略预设</label>
-          <select value={algorithm} onChange={(e) => setAlgorithm(e.target.value as Algorithm)}>
+          <h2>调度与运行</h2>
+          <label htmlFor="algorithm">调度策略预设</label>
+          <select id="algorithm" value={algorithm} onChange={(e) => setAlgorithm(e.target.value as Algorithm)}>
             {algorithmOptions.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
-          <button className="secondary" onClick={onSimulate} disabled={!scene || loading}>运行仿真 / 评估</button>
+          <button className="secondary" onClick={onSimulate} disabled={!scene || loading || runtimeLoading}>运行调度模拟</button>
           <button
             className="primary runtime-run"
             onClick={onRuntimeRun}
-            disabled={!scene || Boolean(runtimeDemoIssue) || runtimeLoading}
+            disabled={!scene || Boolean(runtimeIssue) || runtimeLoading || loading}
+            aria-busy={runtimeLoading}
+            aria-describedby="runtime-note"
           >
-            {runtimeLoading ? 'Agent 运行中...' : `运行 ${runtimeDemoTopology} 演示`}
+            {runtimeLoading ? 'Agent 运行中...' : '提交到 Agent Runtime'}
           </button>
-          <p className={runtimeDemoIssue ? 'control-note warning' : 'control-note'}>
-            {runtimeDemoIssue ?? '中央 Scheduler 动态分配任务；演示运行会注入一次可恢复故障并记录重试流程。'}
+          <p id="runtime-note" className={runtimeIssue ? 'control-note warning' : 'control-note'}>
+            {runtimeIssue ?? '中央 Scheduler 分配任务，并记录数据传输、执行尝试与重试事件。'}
           </p>
         </aside>
 
         <section className="panel workspace">
-          {error && <div className="error">{error}</div>}
+          {error && <div className="error" role="alert" aria-live="assertive">{error}</div>}
           {!scene && <EmptyState />}
           {scene && (
             <>
@@ -304,24 +483,46 @@ export default function App() {
                 <div>
                   <h2>{scene.title}</h2>
                   <p>{scene.natural_language_description}</p>
+                  {scene.generation_note && (
+                    <p className="generation-note">{scene.generation_note}</p>
+                  )}
                 </div>
-                <div className={`difficulty ${scene.difficulty}`}>{scene.difficulty}</div>
+                <div className="scene-badges">
+                  <div className={`generation-source ${scene.generation_source}`}>
+                    {generationSourceLabels[scene.generation_source]}
+                  </div>
+                  <div className={`difficulty ${scene.difficulty}`}>{scene.difficulty}</div>
+                </div>
               </div>
-              <nav className="tabs">
-                <button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>概览</button>
-                <button className={tab === 'dag' ? 'active' : ''} onClick={() => setTab('dag')}>DAG</button>
-                <button className={tab === 'tasks' ? 'active' : ''} onClick={() => setTab('tasks')}>任务</button>
-                <button className={tab === 'runtime' ? 'active' : ''} onClick={() => setTab('runtime')}>Agent 运行</button>
-                <button className={tab === 'json' ? 'active' : ''} onClick={() => setTab('json')}>JSON</button>
-                <button className={tab === 'logs' ? 'active' : ''} onClick={() => setTab('logs')}>日志</button>
+              <nav className="tabs" aria-label="工作流视图" role="tablist">
+                {tabOptions.map(([tabId, label]) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    id={`tab-${tabId}`}
+                    aria-controls={`panel-${tabId}`}
+                    aria-selected={tab === tabId}
+                    className={tab === tabId ? 'active' : ''}
+                    onClick={() => setTab(tabId)}
+                    key={tabId}
+                  >
+                    {label}
+                  </button>
+                ))}
               </nav>
 
-              {tab === 'overview' && <Overview scene={scene} result={result} />}
-              {tab === 'dag' && <DagView scene={scene} result={result} runtimeRun={runtimeRun} />}
-              {tab === 'tasks' && <Tasks scene={scene} result={result} />}
-              {tab === 'runtime' && <RuntimeView status={runtimeStatus} run={runtimeRun} />}
-              {tab === 'json' && <pre className="json-view">{JSON.stringify({ scene, result }, null, 2)}</pre>}
-              {tab === 'logs' && <Logs result={result} />}
+              <div
+                id={`panel-${tab}`}
+                role="tabpanel"
+                aria-labelledby={`tab-${tab}`}
+              >
+                {tab === 'overview' && <Overview scene={scene} result={result} />}
+                {tab === 'dag' && <DagView scene={scene} result={result} runtimeRun={runtimeRun} />}
+                {tab === 'tasks' && <Tasks scene={scene} result={result} />}
+                {tab === 'runtime' && <RuntimeView scene={scene} run={runtimeRun} />}
+                {tab === 'json' && <pre className="json-view">{JSON.stringify({ scene, result, runtimeRun }, null, 2)}</pre>}
+                {tab === 'logs' && <Logs result={result} />}
+              </div>
             </>
           )}
         </section>
@@ -333,25 +534,61 @@ export default function App() {
 function EmptyState() {
   return (
     <div className="empty">
-      <h2>先生成一个 benchmark scene</h2>
-      <p>默认示例配置为 warehouse / medium / 2 Orin / 1 edge，包含三类任务、定位 fan-out、动态分配和数据移动。</p>
+      <h2>生成工作流以查看调度结构</h2>
+      <p>选择拓扑规模和任务类型后，可查看 DAG、放置约束与运行结果。</p>
     </div>
   );
 }
 
 function Overview({ scene, result }: { scene: BenchmarkScene; result: SimulationResponse | null }) {
+  const [placementPage, setPlacementPage] = useState(0);
+  const resolvedPlacementPage = safePage(
+    placementPage,
+    scene.tasks.length,
+    PLACEMENT_PAGE_SIZE,
+  );
+  const visiblePlacementTasks = pageItems(
+    scene.tasks,
+    resolvedPlacementPage,
+    PLACEMENT_PAGE_SIZE,
+  );
   return (
     <div className="overview">
       <div className="cards">
-        <div className="card"><span>Nodes</span><strong>{scene.nodes.length}</strong></div>
-        <div className="card"><span>Robots</span><strong>{scene.nodes.filter((n) => n.kind === 'robot').length}</strong></div>
-        <div className="card"><span>Tasks</span><strong>{scene.tasks.length}</strong></div>
-        <div className="card"><span>Data edges</span><strong>{scene.data_edges.length}</strong></div>
+        <div className="card"><span>计算节点</span><strong>{scene.nodes.length}</strong></div>
+        <div className="card"><span>机器人</span><strong>{scene.nodes.filter((n) => n.kind === 'robot').length}</strong></div>
+        <div className="card"><span>任务</span><strong>{scene.tasks.length}</strong></div>
+        <div className="card"><span>类型数据边</span><strong>{scene.data_edges.length}</strong></div>
       </div>
+
+      <div className="section-heading">
+        <div>
+          <h3>任务放置约束</h3>
+          <p>每个任务以 task_type 标识工作内容，以独立约束维度声明可执行位置与运行属性。</p>
+        </div>
+      </div>
+      <div className="placement-overview">
+        {visiblePlacementTasks.map((task) => (
+          <article className="placement-card" key={task.id}>
+            <div>
+              <strong>{task.task_type}</strong>
+              <span>{task.id}</span>
+            </div>
+            <PlacementBadges placement={task.placement_constraints} limit={5} />
+          </article>
+        ))}
+      </div>
+      <Pagination
+        page={resolvedPlacementPage}
+        itemCount={scene.tasks.length}
+        pageSize={PLACEMENT_PAGE_SIZE}
+        onPageChange={setPlacementPage}
+        label="任务放置约束"
+      />
 
       {result && (
         <>
-          <h3>策略仿真指标 · {result.algorithm}</h3>
+          <h3>调度指标 · {result.algorithm}</h3>
           <div className="metrics-grid">
             {Object.entries(result.metrics).map(([key, value]) => (
               <div className="metric" key={key}>
@@ -360,14 +597,21 @@ function Overview({ scene, result }: { scene: BenchmarkScene; result: Simulation
               </div>
             ))}
           </div>
-          <h3>三类任务汇总</h3>
+          <div className="section-heading">
+            <div>
+              <h3>报表分组统计</h3>
+              <p>TaskClass 用于汇总结果；任务放置由 PlacementConstraints 决定。</p>
+            </div>
+          </div>
           <div className="class-grid">
             {Object.entries(result.task_class_summary).map(([taskClass, summary]) => (
-              <div className={`class-card ${taskClass}`} key={taskClass}>
-                <span>{taskClassLabels[taskClass] ?? taskClass}</span>
-                <strong>{summary.task_count}</strong>
-                <small>success {pct(summary.success_rate)} · edge {pct(summary.edge_offload_ratio)} · avg {summary.avg_latency_ms.toFixed(1)} ms</small>
-              </div>
+              summary ? (
+                <div className={`class-card ${taskClass}`} key={taskClass}>
+                  <span>{reportClassLabel(taskClass as TaskClass)}</span>
+                  <strong>{summary.task_count}</strong>
+                  <small>success {pct(summary.success_rate)} · edge {pct(summary.edge_offload_ratio)} · avg {summary.avg_latency_ms.toFixed(1)} ms</small>
+                </div>
+              ) : null
             ))}
           </div>
         </>
@@ -375,11 +619,11 @@ function Overview({ scene, result }: { scene: BenchmarkScene; result: Simulation
 
       <div className="split">
         <div>
-          <h3>Stressors</h3>
+          <h3>场景扰动</h3>
           <ul>{scene.stressors.map((s) => <li key={s}>{s}</li>)}</ul>
         </div>
         <div>
-          <h3>Success Criteria</h3>
+          <h3>成功条件</h3>
           <ul>{scene.success_criteria.map((s) => <li key={s}>{s}</li>)}</ul>
         </div>
       </div>
@@ -402,43 +646,64 @@ function Overview({ scene, result }: { scene: BenchmarkScene; result: Simulation
 }
 
 function Tasks({ scene, result }: { scene: BenchmarkScene; result: SimulationResponse | null }) {
+  const [taskPage, setTaskPage] = useState(0);
   const resultMap = new Map(result?.task_results.map((r) => [r.task_id, r]) ?? []);
+  const dag = canonicalDag(scene);
+  const resolvedTaskPage = safePage(taskPage, scene.tasks.length, TASK_PAGE_SIZE);
+  const visibleTasks = pageItems(scene.tasks, resolvedTaskPage, TASK_PAGE_SIZE);
   return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Task</th>
-            <th>Class / DAG</th>
-            <th>Source</th>
-            <th>Priority</th>
-            <th>Budget</th>
-            <th>Model</th>
-            <th>Target</th>
-            <th>Latency</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {scene.tasks.map((t) => {
-            const r = resultMap.get(t.id);
-            return (
-              <tr key={t.id}>
-                <td><strong>{t.id}</strong><br /><span>{t.task_type}</span></td>
-                <td><span className={`task-class ${t.task_class}`}>{taskClassLabels[t.task_class]}</span><span>stage {t.stage_index} · deps {t.dependencies.join(', ') || 'root'}</span></td>
-                <td>{t.source_robot_id}</td>
-                <td>{t.priority}</td>
-                <td>{t.latency_budget_ms.toFixed(0)} ms</td>
-                <td>{t.model_requirement}</td>
-                <td>{r?.target_node_id ?? '-'}</td>
-                <td>{r ? `${r.total_latency_ms.toFixed(1)} ms` : '-'}</td>
-                <td>{r ? <span className={r.success ? 'ok' : 'bad'}>{r.state}{r.deadline_missed ? ' · deadline' : ''}</span> : '-'}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+    <>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>任务类型</th>
+              <th>放置约束</th>
+              <th>DAG 输入</th>
+              <th>Priority</th>
+              <th>Budget</th>
+              <th>Model</th>
+              <th>Assignment</th>
+              <th>Latency</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visibleTasks.map((t) => {
+              const r = resultMap.get(t.id);
+              const parents = dag.parents[t.id] ?? [];
+              return (
+                <tr key={t.id}>
+                  <td>
+                    <strong>{t.task_type}</strong>
+                    <span>{t.id}</span>
+                  </td>
+                  <td><PlacementBadges placement={t.placement_constraints} /></td>
+                  <td>
+                    level {dag.levels[t.id] ?? 0}
+                    <span>{parents.length ? `依赖 ${parents.join(', ')}` : 'root task'}</span>
+                    <span>source {t.source_robot_id}</span>
+                  </td>
+                  <td>{t.priority}</td>
+                  <td>{t.latency_budget_ms.toFixed(0)} ms</td>
+                  <td>{t.model_requirement}</td>
+                  <td>{r?.target_node_id ?? '-'}</td>
+                  <td>{r ? `${r.total_latency_ms.toFixed(1)} ms` : '-'}</td>
+                  <td>{r ? <span className={r.success ? 'ok' : 'bad'}>{r.state}{r.deadline_missed ? ' · deadline' : ''}</span> : '-'}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <Pagination
+        page={resolvedTaskPage}
+        itemCount={scene.tasks.length}
+        pageSize={TASK_PAGE_SIZE}
+        onPageChange={setTaskPage}
+        label="任务表"
+      />
+    </>
   );
 }
 
@@ -451,45 +716,274 @@ function DagView({
   result: SimulationResponse | null;
   runtimeRun: RuntimeWorkflowRun | null;
 }) {
+  const [viewMode, setViewMode] = useState<'graph' | 'levels'>('graph');
+  const [levelPage, setLevelPage] = useState(0);
+  const [edgePage, setEdgePage] = useState(0);
   const runtimeResult = runtimeRun?.result ?? null;
-  const levels = result?.dag.levels ?? runtimeResult?.workflow.levels ?? Object.fromEntries(scene.tasks.map((task) => [task.id, task.stage_index]));
+  const dag = useMemo(() => canonicalDag(scene), [scene]);
+  const levels = dag.levels;
   const maxLevel = Math.max(0, ...Object.values(levels));
+  const graphAvailable = scene.tasks.length <= GRAPH_NODE_LIMIT;
+  const effectiveViewMode = graphAvailable ? viewMode : 'levels';
   const critical = new Set(result?.workflow.critical_path ?? runtimeResult?.workflow.critical_path ?? []);
   const resultMap = new Map(result?.task_results.map((item) => [item.task_id, item]) ?? []);
   const runtimeMap = new Map(runtimeResult?.task_results.map((item) => [item.task_id, item]) ?? []);
+  const nodeWidth = 248;
+  const nodeHeight = 190;
+  const levelGap = 112;
+  const nodeGap = 28;
+  const marginX = 48;
+  const marginY = 44;
+  const groupedTasks = Array.from({ length: maxLevel + 1 }, () => [] as typeof scene.tasks);
+  scene.tasks.forEach((task) => {
+    groupedTasks[levels[task.id] ?? 0]?.push(task);
+  });
+  const maxTasksInLevel = Math.max(1, ...groupedTasks.map((tasks) => tasks.length));
+  const graphWidth = Math.max(
+    960,
+    marginX * 2 + ((maxLevel + 1) * nodeWidth) + (maxLevel * levelGap),
+  );
+  const graphHeight = Math.max(
+    520,
+    marginY * 2 + (maxTasksInLevel * nodeHeight) + ((maxTasksInLevel - 1) * nodeGap),
+  );
+  const positions = new Map<string, { x: number; y: number }>();
+  if (graphAvailable) {
+    groupedTasks.forEach((tasks, level) => {
+      const levelHeight = (tasks.length * nodeHeight) + (Math.max(0, tasks.length - 1) * nodeGap);
+      const startY = (graphHeight - levelHeight) / 2;
+      tasks.forEach((task, index) => {
+        positions.set(task.id, {
+          x: marginX + level * (nodeWidth + levelGap),
+          y: startY + index * (nodeHeight + nodeGap),
+        });
+      });
+    });
+  }
+
+  const typedPairCounts = new Map<string, number>();
+  dag.graphEdges.forEach((edge) => {
+    if (edge.kind !== 'data') return;
+    const key = `${edge.from}\u0000${edge.to}`;
+    typedPairCounts.set(key, (typedPairCounts.get(key) ?? 0) + 1);
+  });
+  const typedPairSeen = new Map<string, number>();
+  const taskById = new Map(scene.tasks.map((task) => [task.id, task]));
+  const topologicalIds = new Set(dag.topologicalOrder);
+  const orderedIds = [
+    ...dag.topologicalOrder,
+    ...scene.tasks
+      .map((task) => task.id)
+      .filter((taskId) => !topologicalIds.has(taskId)),
+  ];
+  const orderedTasks = orderedIds.flatMap((taskId) => {
+    const task = taskById.get(taskId);
+    return task ? [task] : [];
+  });
+  const resolvedLevelPage = safePage(levelPage, orderedTasks.length, TASK_PAGE_SIZE);
+  const visibleLevelTasks = pageItems(orderedTasks, resolvedLevelPage, TASK_PAGE_SIZE);
+  const visibleLevelGroups = new Map<number, typeof scene.tasks>();
+  visibleLevelTasks.forEach((task) => {
+    const level = levels[task.id] ?? 0;
+    const tasks = visibleLevelGroups.get(level) ?? [];
+    tasks.push(task);
+    visibleLevelGroups.set(level, tasks);
+  });
+  const resolvedEdgePage = safePage(edgePage, scene.data_edges.length, EDGE_PAGE_SIZE);
+  const visibleDataEdges = pageItems(scene.data_edges, resolvedEdgePage, EDGE_PAGE_SIZE);
+
   return (
     <div className="dag-view">
-      <div className="dag-summary">
-        <span>{scene.workflow_id}</span>
-        <span>{result?.dag.valid === false ? 'invalid' : 'valid DAG'}</span>
-        <span>{(result?.dag.edges.length ?? scene.tasks.reduce((sum, task) => sum + task.dependencies.length, 0))} edges</span>
-        <span>failure: {scene.failure_policy}</span>
+      <div className="dag-toolbar">
+        <div className="dag-summary">
+          <span>{scene.workflow_id}</span>
+          <span className={dag.valid && result?.dag.valid !== false ? 'valid' : 'invalid'}>
+            {dag.valid && result?.dag.valid !== false ? 'valid DAG' : 'invalid DAG'}
+          </span>
+          <span>{dag.dependencyEdges.length} task.dependencies</span>
+          <span>{scene.data_edges.length} typed DataEdges</span>
+          <span>failure: {scene.failure_policy}</span>
+        </div>
+        <div className="view-switch" role="group" aria-label="DAG 视图模式">
+          <button
+            type="button"
+            className={effectiveViewMode === 'graph' ? 'active' : ''}
+            aria-pressed={effectiveViewMode === 'graph'}
+            disabled={!graphAvailable}
+            title={graphAvailable ? undefined : `图形视图最多支持 ${GRAPH_NODE_LIMIT} 个任务节点`}
+            onClick={() => setViewMode('graph')}
+          >
+            图
+          </button>
+          <button
+            type="button"
+            className={effectiveViewMode === 'levels' ? 'active' : ''}
+            aria-pressed={effectiveViewMode === 'levels'}
+            onClick={() => setViewMode('levels')}
+          >
+            层级
+          </button>
+        </div>
       </div>
-      <div className="dag-stages">
-        {Array.from({ length: maxLevel + 1 }, (_, level) => (
-          <section className="dag-stage" key={level}>
-            <div className="stage-label">Stage {level}</div>
-            <div className="stage-nodes">
-              {scene.tasks.filter((task) => levels[task.id] === level).map((task) => {
-                const run = resultMap.get(task.id) ?? runtimeMap.get(task.id);
+
+      {!graphAvailable && (
+        <p className="scale-notice" role="status">
+          当前工作流包含 {scene.tasks.length} 个任务。图形视图上限为 {GRAPH_NODE_LIMIT} 个节点；层级视图按页显示全部任务。
+        </p>
+      )}
+
+      <div className="dag-legend">
+        <span><i className="legend-line dependency" />未声明数据契约的依赖</span>
+        <span><i className="legend-line data" />Typed DataEdge</span>
+        <span><i className="legend-node critical" />关键路径</span>
+        <span><i className="legend-node assigned" />已分配 / 已运行</span>
+      </div>
+
+      {effectiveViewMode === 'graph' ? (
+        <div className="dag-graph-scroll">
+          <svg
+            className="dag-graph"
+            width={graphWidth}
+            height={graphHeight}
+            viewBox={`0 0 ${graphWidth} ${graphHeight}`}
+            role="img"
+            aria-label={`${scene.workflow_id} directed acyclic graph`}
+          >
+            <title>{scene.workflow_id} directed acyclic graph</title>
+            <defs>
+              <marker id="arrow-dependency" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" className="dependency-arrow" />
+              </marker>
+              <marker id="arrow-data" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" className="data-arrow" />
+              </marker>
+            </defs>
+            {groupedTasks.map((_, level) => {
+              const x = marginX + level * (nodeWidth + levelGap) - 18;
+              return (
+                <g className="level-guide" key={level}>
+                  <text x={x + 18} y={24}>LEVEL {level}</text>
+                  <line x1={x} x2={x} y1={34} y2={graphHeight - 24} />
+                </g>
+              );
+            })}
+            <g className="graph-edges">
+              {dag.graphEdges.map((edge) => {
+                const source = positions.get(edge.from);
+                const target = positions.get(edge.to);
+                if (!source || !target) return null;
+                const pairKey = `${edge.from}\u0000${edge.to}`;
+                const pairCount = edge.kind === 'data' ? (typedPairCounts.get(pairKey) ?? 1) : 1;
+                const pairIndex = edge.kind === 'data' ? (typedPairSeen.get(pairKey) ?? 0) : 0;
+                if (edge.kind === 'data') typedPairSeen.set(pairKey, pairIndex + 1);
+                const offset = edge.kind === 'data' ? (pairIndex - ((pairCount - 1) / 2)) * 22 : 0;
+                const x1 = source.x + nodeWidth;
+                const y1 = source.y + nodeHeight / 2;
+                const x2 = target.x;
+                const y2 = target.y + nodeHeight / 2;
+                const curve = Math.max(48, (x2 - x1) * 0.42);
+                const path = `M ${x1} ${y1} C ${x1 + curve} ${y1 + offset}, ${x2 - curve} ${y2 + offset}, ${x2} ${y2}`;
+                const labelX = (x1 + x2) / 2;
+                const labelY = (y1 + y2) / 2 + offset - 8;
+                const label = edge.label ?? '';
+                const labelWidth = Math.min(170, Math.max(72, label.length * 7.2 + 18));
                 return (
-                  <article className={`dag-node ${task.task_class} ${critical.has(task.id) ? 'critical' : ''}`} key={task.id}>
-                    <div><strong>{task.id}</strong><span>{run?.state ?? 'pending'}</span></div>
-                    <p>{task.task_type}</p>
-                    <small>{task.dependencies.length ? `← ${task.dependencies.join(', ')}` : 'root'} · {run?.target_node_id || task.source_robot_id}</small>
-                  </article>
+                  <g className={`graph-edge ${edge.kind}`} key={edge.id}>
+                    <path d={path} markerEnd={`url(#arrow-${edge.kind})`} />
+                    {edge.kind === 'data' && (
+                      <g className="edge-label">
+                        <title>{label}</title>
+                        <rect x={labelX - labelWidth / 2} y={labelY - 11} width={labelWidth} height={20} rx={8} />
+                        <text x={labelX} y={labelY + 3}>{label.length > 22 ? `${label.slice(0, 20)}…` : label}</text>
+                      </g>
+                    )}
+                  </g>
                 );
               })}
-            </div>
-          </section>
-        ))}
-      </div>
-      {scene.data_edges.length > 0 && (
+            </g>
+            <g className="graph-nodes">
+              {scene.tasks.map((task) => {
+                const position = positions.get(task.id);
+                if (!position) return null;
+                const run = runtimeMap.get(task.id) ?? resultMap.get(task.id);
+                const state = run?.state ?? 'not-run';
+                const stateClass = state.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+                return (
+                  <foreignObject
+                    x={position.x}
+                    y={position.y}
+                    width={nodeWidth}
+                    height={nodeHeight}
+                    key={task.id}
+                  >
+                    <article className={`graph-task-node status-${stateClass} ${critical.has(task.id) ? 'critical' : ''}`}>
+                      <div className="graph-node-heading">
+                        <span>{task.id}</span>
+                        <strong>{state === 'not-run' ? '未运行' : state}</strong>
+                      </div>
+                      <h4>{task.task_type}</h4>
+                      <div className="graph-assignment">
+                        <span>assignment</span>
+                        <strong>{run?.target_node_id || '未分配'}</strong>
+                      </div>
+                      <PlacementBadges placement={task.placement_constraints} limit={4} />
+                      <div className="graph-node-footer">
+                        <span>source {task.source_robot_id}</span>
+                        <span>priority {task.priority}</span>
+                      </div>
+                    </article>
+                  </foreignObject>
+                );
+              })}
+            </g>
+          </svg>
+        </div>
+      ) : (
         <>
-          <h3>Typed data flow</h3>
+          <div className="dag-stages">
+            {[...visibleLevelGroups.entries()]
+              .sort(([left], [right]) => left - right)
+              .map(([level, tasks]) => (
+                <section className="dag-stage" key={level}>
+                  <div className="stage-label">Level {level}</div>
+                  <div className="stage-nodes">
+                    {tasks.map((task) => {
+                      const run = runtimeMap.get(task.id) ?? resultMap.get(task.id);
+                      const parents = dag.parents[task.id] ?? [];
+                      return (
+                        <article className={`dag-node ${critical.has(task.id) ? 'critical' : ''} ${run ? 'assigned' : ''}`} key={task.id}>
+                          <div><strong>{task.task_type}</strong><span>{run?.state ?? '未运行'}</span></div>
+                          <p>{task.id}</p>
+                          <PlacementBadges placement={task.placement_constraints} limit={4} />
+                          <small>{parents.length ? `依赖 ${parents.join(', ')}` : 'root'} · {run?.target_node_id || '未分配'}</small>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+              ))}
+          </div>
+          <Pagination
+            page={resolvedLevelPage}
+            itemCount={orderedTasks.length}
+            pageSize={TASK_PAGE_SIZE}
+            onPageChange={setLevelPage}
+            label="DAG 层级任务"
+          />
+        </>
+      )}
+
+      {scene.data_edges.length > 0 && (
+        <section className="data-contracts">
+          <div className="section-heading">
+            <div>
+              <h3>DataEdge 契约</h3>
+              <p>端口与 message_type 定义生产者和消费者之间的数据接口。</p>
+            </div>
+          </div>
           <div className="data-edge-list">
-            {scene.data_edges.map((edge) => (
-              <div className="data-edge" key={`${edge.producer_task}.${edge.producer_port}-${edge.consumer_task}.${edge.consumer_port}`}>
+            {visibleDataEdges.map((edge, index) => (
+              <div className="data-edge" key={`${edge.producer_task}.${edge.producer_port}-${edge.consumer_task}.${edge.consumer_port}-${index}`}>
                 <code>{edge.producer_task}.{edge.producer_port}</code>
                 <span>→</span>
                 <code>{edge.consumer_task}.{edge.consumer_port}</code>
@@ -497,43 +991,87 @@ function DagView({
               </div>
             ))}
           </div>
-        </>
+          <Pagination
+            page={resolvedEdgePage}
+            itemCount={scene.data_edges.length}
+            pageSize={EDGE_PAGE_SIZE}
+            onPageChange={setEdgePage}
+            label="DataEdge 契约"
+          />
+        </section>
       )}
-      <p className="muted">高亮边框表示关键路径；运行后节点会显示终态与实际执行位置。</p>
     </div>
   );
 }
 
 function Logs({ result }: { result: SimulationResponse | null }) {
+  const [logPage, setLogPage] = useState(0);
   if (!result) return <p className="muted">运行仿真后这里会显示调度日志。</p>;
-  return <pre className="json-view">{result.logs.join('\n')}</pre>;
+  const resolvedLogPage = safePage(logPage, result.logs.length, LOG_PAGE_SIZE);
+  const visibleLogs = pageItems(result.logs, resolvedLogPage, LOG_PAGE_SIZE);
+  return (
+    <>
+      <pre className="json-view">{visibleLogs.join('\n')}</pre>
+      <Pagination
+        page={resolvedLogPage}
+        itemCount={result.logs.length}
+        pageSize={LOG_PAGE_SIZE}
+        onPageChange={setLogPage}
+        label="调度日志"
+      />
+    </>
+  );
 }
 
-function RuntimeView({ status, run }: { status: RuntimeStatus | null; run: RuntimeWorkflowRun | null }) {
+function RuntimeView({
+  scene,
+  run,
+}: {
+  scene: BenchmarkScene;
+  run: RuntimeWorkflowRun | null;
+}) {
+  const [taskPage, setTaskPage] = useState(0);
+  const [eventPage, setEventPage] = useState(0);
   const result = run?.result ?? null;
-  const agents = result?.agents ?? status?.agents ?? [];
+  const sceneTaskMap = new Map(scene.tasks.map((task) => [task.id, task]));
+  const runtimeTasks = result?.task_results ?? [];
+  const resolvedTaskPage = safePage(taskPage, runtimeTasks.length, TASK_PAGE_SIZE);
+  const visibleRuntimeTasks = pageItems(runtimeTasks, resolvedTaskPage, TASK_PAGE_SIZE);
+  const runtimeEvents = result?.events ?? [];
+  const resolvedEventPage = safePage(eventPage, runtimeEvents.length, EVENT_PAGE_SIZE);
+  const visibleRuntimeEvents = pageItems(runtimeEvents, resolvedEventPage, EVENT_PAGE_SIZE);
   return (
     <div className="runtime-view">
       <div className="runtime-topology">
         <div className="topology-node scheduler-node">
           <span>Control plane</span>
           <strong>MARS Central Scheduler</strong>
-          <small>{status?.status ?? 'starting'}</small>
+          <small>{result?.workflow.state ?? run?.status ?? 'scene declared'}</small>
         </div>
         <div className="topology-arrow">→</div>
         <div className="topology-agents">
-          {agents.map((agent) => (
-            <div className={`topology-node ${agent.kind}`} key={agent.agent_id}>
-              <span>{agent.kind === 'robot' ? 'Simulated Orin Agent' : 'Simulated Edge Agent'}</span>
-              <strong>{agent.agent_id}</strong>
-              <small>{agent.registered && agent.online ? 'registered · online' : 'offline'} · heartbeat {agent.heartbeat_sequence}</small>
-            </div>
-          ))}
+          {result
+            ? result.agents.map((agent) => (
+              <div className={`topology-node ${agent.kind}`} key={agent.agent_id}>
+                <span>{agent.kind === 'robot' ? 'Robot Agent' : 'Edge Agent'}</span>
+                <strong>{agent.agent_id}</strong>
+                <small>{agent.registered && agent.online ? 'registered · online' : 'offline'} · heartbeat {agent.heartbeat_sequence}</small>
+              </div>
+            ))
+            : scene.nodes
+              .filter((node) => node.kind === 'robot' || node.kind === 'edge')
+              .map((node) => (
+                <div className={`topology-node ${node.kind}`} key={node.id}>
+                  <span>{node.kind === 'robot' ? 'Robot Agent' : 'Edge Agent'}</span>
+                  <strong>{node.id}</strong>
+                  <small>{node.architecture} · scene declared · max concurrency {node.max_concurrency}</small>
+                </div>
+              ))}
         </div>
       </div>
 
-      {!run && <p className="runtime-hint">运行本地三 Agent 演示后，这里会展示 assignment、数据传输、失败重试、Artifact 和最终结果。</p>}
-      {run && !result && <p className="runtime-hint">{run.workflow_id} · {run.status}</p>}
+      {!run && <p className="runtime-hint">提交工作流后，此处显示 assignment、数据传输、执行尝试、Artifact 与运行结果。</p>}
+      {run && !result && <p className="runtime-hint" role="status" aria-live="polite">{run.workflow_id} · {run.status}</p>}
 
       {result && (
         <>
@@ -562,33 +1100,46 @@ function RuntimeView({ status, run }: { status: RuntimeStatus | null; run: Runti
           <div className="table-wrap runtime-table">
             <table>
               <thead>
-                <tr><th>Task</th><th>Class</th><th>Final placement</th><th>Attempts</th><th>Outputs</th><th>State</th></tr>
+                <tr><th>任务类型</th><th>放置约束</th><th>Final placement</th><th>Attempts</th><th>Outputs</th><th>State</th></tr>
               </thead>
               <tbody>
-                {result.task_results.map((task) => (
-                  <tr key={task.task_id}>
-                    <td><strong>{task.task_id}</strong><br /><span>{task.task_type}</span></td>
-                    <td><span className={`task-class ${task.task_class}`}>{taskClassLabels[task.task_class]}</span></td>
-                    <td>{task.target_node_id || '-'}<span>{task.mode || 'not assigned'}</span></td>
-                    <td>
-                      {task.attempts.length === 0 ? '-' : task.attempts.map((attempt) => (
-                        <span className={`attempt-line ${attempt.state}`} key={attempt.attempt_id}>
-                          #{attempt.attempt_no} {attempt.target_node_id} · {attempt.state}
-                          {attempt.error_code ? ` · ${attempt.error_code}` : ''}
-                        </span>
-                      ))}
-                    </td>
-                    <td>{task.outputs.map((output) => `${output.producer_port} (${output.size_mb.toFixed(3)} MB)`).join(', ') || '-'}</td>
-                    <td><span className={task.state === 'succeeded' ? 'ok' : 'bad'}>{task.state}</span></td>
-                  </tr>
-                ))}
+                {visibleRuntimeTasks.map((task) => {
+                  const taskSpec = sceneTaskMap.get(task.task_id);
+                  return (
+                    <tr key={task.task_id}>
+                      <td>
+                        <strong>{task.task_type}</strong>
+                        <span>{task.task_id}</span>
+                      </td>
+                      <td><PlacementBadges placement={taskSpec?.placement_constraints} /></td>
+                      <td>{task.target_node_id || '-'}<span>{task.mode || 'not assigned'}</span></td>
+                      <td>
+                        {task.attempts.length === 0 ? '-' : task.attempts.map((attempt) => (
+                          <span className={`attempt-line ${attempt.state}`} key={attempt.attempt_id}>
+                            #{attempt.attempt_no} {attempt.target_node_id} · {attempt.state}
+                            {attempt.error_code ? ` · ${attempt.error_code}` : ''}
+                          </span>
+                        ))}
+                      </td>
+                      <td>{task.outputs.map((output) => `${output.producer_port} (${output.size_mb.toFixed(3)} MB)`).join(', ') || '-'}</td>
+                      <td><span className={task.state === 'succeeded' ? 'ok' : 'bad'}>{task.state}</span></td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
+          <Pagination
+            page={resolvedTaskPage}
+            itemCount={runtimeTasks.length}
+            pageSize={TASK_PAGE_SIZE}
+            onPageChange={setTaskPage}
+            label="Runtime assignments"
+          />
 
           <h3>Control-plane events</h3>
           <div className="event-list">
-            {result.events.map((event) => (
+            {visibleRuntimeEvents.map((event) => (
               <div className={`runtime-event ${event.event_type}`} key={event.sequence}>
                 <code>#{event.sequence} · {event.time_ms.toFixed(1)} ms</code>
                 <strong>{event.event_type}</strong>
@@ -596,6 +1147,13 @@ function RuntimeView({ status, run }: { status: RuntimeStatus | null; run: Runti
               </div>
             ))}
           </div>
+          <Pagination
+            page={resolvedEventPage}
+            itemCount={runtimeEvents.length}
+            pageSize={EVENT_PAGE_SIZE}
+            onPageChange={setEventPage}
+            label="Control-plane events"
+          />
         </>
       )}
     </div>

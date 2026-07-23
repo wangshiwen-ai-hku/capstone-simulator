@@ -1,4 +1,4 @@
-"""Process-local runtime service for the three-agent MARS simulation."""
+"""Process-local runtime service for MARS robot and edge agents."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ class LocalRuntimeService:
             return self._runtime_view_locked()
 
     def submit(self, request: RuntimeWorkflowRequest) -> dict[str, object]:
-        _validate_demo_topology(request)
+        _validate_runtime_topology(request)
         coordinator = _coordinator_for_scene(request.scene)
         workflow = build_workflow(request.scene)
         failure_ids: tuple[str, ...] = ()
@@ -75,30 +75,53 @@ class LocalRuntimeService:
                     for task in workflow.tasks
                     if task.spec.task_type == request.failure_task_type
                 ),
-                workflow.tasks[0].task_id,
+                None,
             )
+            if selected is None:
+                raise ValueError(
+                    "failure injection target task type is not present in "
+                    f"the workflow: {request.failure_task_type}"
+                )
             failure_ids = (selected,)
 
         run_id = f"run_{uuid4().hex[:12]}"
         run = RuntimeRun(run_id, workflow.workflow_id, "accepted")
         with self._lock:
-            self._coordinator = coordinator
             self._runs[run_id] = run
-            run.status = "running"
             run.future = self._executor.submit(
-                coordinator.run,
+                self._execute_run,
+                run_id,
+                coordinator,
                 workflow,
-                algorithm=request.algorithm,
-                seed=request.seed,
-                max_attempts=request.max_attempts,
-                fail_first_task_ids=failure_ids,
-                deterministic=request.deterministic,
+                request,
+                failure_ids,
             )
         return {
             "run_id": run_id,
             "workflow_id": workflow.workflow_id,
-            "status": "running",
+            "status": "accepted",
         }
+
+    def _execute_run(
+        self,
+        run_id: str,
+        coordinator: CentralCoordinator,
+        workflow,
+        request: RuntimeWorkflowRequest,
+        failure_ids: tuple[str, ...],
+    ) -> CoordinatorReport:
+        with self._lock:
+            run = self._runs[run_id]
+            run.status = "running"
+            self._coordinator = coordinator
+        return coordinator.run(
+            workflow,
+            algorithm=request.algorithm,
+            seed=request.seed,
+            max_attempts=request.max_attempts,
+            fail_first_task_ids=failure_ids,
+            deterministic=request.deterministic,
+        )
 
     def get_run(self, run_id: str) -> dict[str, object] | None:
         with self._lock:
@@ -157,13 +180,20 @@ class LocalRuntimeService:
         coordinator = self._coordinator
         assert coordinator is not None
         view = coordinator.describe()
+        agents = list(view.get("agents", []))
+        kind_counts: dict[str, int] = {}
+        for agent in agents:
+            kind = str(agent.get("kind", "unknown"))
+            kind_counts[kind] = kind_counts.get(kind, 0) + 1
         view.update(
             {
                 "runtime": "process_local_virtual_time",
                 "topology": {
                     "central_schedulers": 1,
-                    "orin_agents": 2,
-                    "edge_agents": 1,
+                    "orin_agents": kind_counts.get("robot", 0),
+                    "edge_agents": kind_counts.get("edge", 0),
+                    "cloud_agents": kind_counts.get("cloud", 0),
+                    "total_agents": len(agents),
                 },
                 "run_count": len(self._runs),
             }
@@ -187,13 +217,12 @@ def _coordinator_for_scene(scene) -> CentralCoordinator:
     )
 
 
-def _validate_demo_topology(request: RuntimeWorkflowRequest) -> None:
-    robots = [node for node in request.scene.nodes if node.kind == "robot"]
-    edges = [node for node in request.scene.nodes if node.kind == "edge"]
+def _validate_runtime_topology(request: RuntimeWorkflowRequest) -> None:
     clouds = [node for node in request.scene.nodes if node.kind == "cloud"]
-    if len(robots) != 2 or len(edges) != 1 or clouds:
+    if clouds:
         raise ValueError(
-            "the local runtime demo requires exactly two Orin robot nodes and one edge node"
+            "the process-local runtime supports robot and edge nodes; "
+            "cloud nodes are not supported"
         )
 
 

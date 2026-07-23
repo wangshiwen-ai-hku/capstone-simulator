@@ -16,9 +16,8 @@ React UI ──► FastAPI adapter
                │                        │                    └── validated SchedulingPlan
                │                        └── RuntimePort
                │                               └── InProcessRuntime
-               │                                     ├── Simulated Orin 1
-               │                                     ├── Simulated Orin 2
-               │                                     └── Simulated edge
+               │                                     ├── Simulated Robot Agent(s)
+               │                                     └── Simulated Edge Agent(s)
                └── benchmark request ─► deterministic benchmark engine
 ```
 
@@ -40,7 +39,7 @@ that port.
 - One output may fan out to multiple consumers without duplicating its Artifact.
 - One task may publish multiple typed output Artifacts.
 - Transfer cost includes only the output ports selected by downstream DataEdges.
-- `TaskClass` business labels are separate from declarative placement constraints.
+- Optional `TaskClass` reporting cohorts are separate from declarative placement constraints.
 - Directed `LinkSpec` and `LinkSnapshot` topology with multi-hop transfer estimates.
 - Every planning iteration captures runtime facts in an immutable
   `SchedulingSnapshot`.
@@ -56,26 +55,27 @@ that port.
 - Invalid plug-in plans are rejected and may be re-solved by the configured
   fallback optimizer.
 - Critical-path, deadline, load, locality, bandwidth, and energy-aware built-in policies.
-- Central scheduler with two simulated Orin Agents and one simulated edge Agent.
-- Explicit registration, heartbeat, reservation/release, attempts, and retry.
+- Central scheduler with scene-defined simulated Orin and edge Agents.
+- Explicit registration, heartbeat, reservation/release, attempts, and
+  contract-safe retry.
 - Replaceable synthetic workload profiles for local development and integration testing.
 - Web views for DAGs, typed data flow, assignments, attempts, Artifacts, metrics, and events.
 
-## The three task classes
+## Task placement and reporting cohorts
 
-| Class | Typical work | Legacy default placement |
+| Reporting cohort | Typical work | Legacy default placement |
 |---|---|---|
 | `local_safety` | obstacle avoidance, emergency stop, local control | Must run on its safety-capable source robot |
 | `realtime_offloadable` | localization, environment understanding, detection, segmentation, local planning | May run on its source robot or edge |
 | `edge_heavy` | 7B/10B local models and map fusion | Prefer edge; local fallback only when enabled |
 
-Task types and `task_class` describe business capabilities and reporting
-categories. New workloads use `PlacementConstraints` for pinning, allowed node
-kinds, required capabilities, source/peer permissions, safety requirements,
-and ordered node-kind preferences. Preferences guide optimizer scoring;
-setting `allow_fallback=false` makes the preferred kinds exclusive. Scenes
-without explicit constraints are mapped from the three legacy labels for
-backward compatibility.
+`task_type` identifies the concrete work. `task_class` is optional compatibility
+metadata used for aggregate reporting; it is not a placement rule. New workloads
+use `PlacementConstraints` for pinning, allowed node kinds, required
+capabilities, source/peer permissions, safety requirements, fallback,
+statefulness, idempotence, splitting, replication, and ordered node-kind
+preferences. Scenes without explicit constraints are mapped from the legacy
+reporting cohorts for backward compatibility.
 
 ## Scheduling pipeline
 
@@ -139,7 +139,7 @@ model, or runtime interface.
 
 ## Quick start
 
-Supported Python versions: 3.10–3.13.
+The CI runtime is Python 3.12.
 
 ### Backend
 
@@ -159,20 +159,24 @@ npm run dev
 ```
 
 Open `http://localhost:5173`. The default scene has two Orin nodes, one edge
-node, all three task classes, and a localization Artifact that fans out to
-environment understanding and planning.
+node, explicit per-task placement constraints, and a localization Artifact that
+fans out to environment understanding and planning.
 
 Use either execution path:
 
-- **Run simulation / evaluation** compares scheduling policy presets in the deterministic engine.
-- **Run 2 Orin + 1 Edge demo** runs the central Agent lifecycle and injects one recoverable failure.
+- **运行调度模拟** evaluates a scheduling policy preset in the deterministic engine.
+- **提交到 Agent Runtime** runs registration, assignment, transfer, execution,
+  and completion through the process-local RuntimePort adapter. Failure
+  injection is available through the runtime API and is disabled by default.
 
 ### Tests
 
 ```bash
 pip install -r backend/requirements-dev.txt
+python -m ruff check backend mars tests
+python -m compileall -q backend mars tests
 python -m pytest -q
-cd frontend && npm run build
+cd frontend && npm test && npm run build
 ```
 
 ## Synthetic workloads
@@ -182,7 +186,8 @@ for:
 
 - obstacle avoidance, emergency stop, and local control;
 - localization, environment understanding, object detection, semantic segmentation, and local planning;
-- 7B/10B local model inference and map fusion.
+- 7B/10B local model inference, data compression, result verification, and map
+  fusion.
 
 Each target profile includes p50/p95/p99 latency, CPU/GPU/memory demand,
 input/output size ranges, energy, failure rate, accuracy, and maximum

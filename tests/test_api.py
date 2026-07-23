@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import unittest
+import json
 import time
 from types import SimpleNamespace
+import unittest
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -10,13 +11,29 @@ from fastapi.testclient import TestClient
 from backend.app import main as api_main
 from backend.app.llm_client import generate_scene_with_llm
 from backend.app.mars_adapter import validate_scene
-from backend.app.scene_generator import build_deterministic_scene
+from backend.app.scene_generator import (
+    TASK_TYPE_TEMPLATES,
+    build_deterministic_scene,
+)
 from backend.app.schemas import GenerateSceneRequest
 
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(api_main.app)
+
+    def _wait_for_run(self, run_id: str) -> dict:
+        payload = None
+        for _ in range(200):
+            response = self.client.get(
+                f"/api/runtime/workflows/{run_id}"
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            if payload["status"] in {"succeeded", "failed"}:
+                return payload
+            time.sleep(0.01)
+        self.fail(f"runtime workflow did not finish: {payload}")
 
     def test_provider_status_never_exposes_api_key(self):
         secret = "sentinel-secret-that-must-not-leak"
@@ -48,10 +65,21 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(generated.status_code, 200)
         scene = generated.json()
+        self.assertEqual(scene["generation_source"], "deterministic")
 
         validated = self.client.post("/api/validate-workflow", json=scene)
         self.assertEqual(validated.status_code, 200)
-        self.assertTrue(validated.json()["valid"])
+        graph = validated.json()
+        self.assertTrue(graph["valid"])
+        self.assertEqual(len(graph["tasks"]), len(scene["tasks"]))
+        self.assertEqual(graph["depth"], len(graph["level_groups"]))
+        self.assertEqual(
+            len(graph["data_edges"]),
+            len(scene["data_edges"]),
+        )
+        self.assertTrue(
+            all(edge["kind"] == "dependency" for edge in graph["edges"])
+        )
 
         simulated = self.client.post(
             "/api/simulate",
@@ -62,7 +90,7 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(payload["dag"]["valid"])
         self.assertEqual(payload["metrics"]["task_count"], len(scene["tasks"]))
 
-    def test_workload_catalog_covers_three_classes_and_configured_modules(self):
+    def test_workload_catalog_reports_cohorts_and_explicit_placement(self):
         response = self.client.get("/api/workload-catalog")
         self.assertEqual(response.status_code, 200)
         workloads = response.json()["workloads"]
@@ -71,15 +99,15 @@ class ApiTests(unittest.TestCase):
             {"local_safety", "realtime_offloadable", "edge_heavy"},
         )
         task_types = {item["task_type"] for item in workloads}
+        self.assertEqual(task_types, set(TASK_TYPE_TEMPLATES))
         self.assertTrue(
-            {
-                "obstacle_avoidance",
-                "local_control",
-                "environment_understanding",
-                "semantic_segmentation",
-                "local_llm_7b",
-                "local_llm_10b",
-            }.issubset(task_types)
+            all(
+                item["task_class_role"] == "reporting_compatibility"
+                for item in workloads
+            )
+        )
+        self.assertTrue(
+            all("placement_constraints" in item for item in workloads)
         )
 
     def test_architecture_exposes_one_runtime_boundary(self):
@@ -98,11 +126,19 @@ class ApiTests(unittest.TestCase):
         bootstrapped = self.client.post("/api/runtime/bootstrap")
         self.assertEqual(bootstrapped.status_code, 200)
         runtime = bootstrapped.json()
+        self.assertEqual(runtime["topology"]["central_schedulers"], 1)
         self.assertEqual(
-            runtime["topology"],
-            {"central_schedulers": 1, "orin_agents": 2, "edge_agents": 1},
+            runtime["topology"]["total_agents"],
+            len(runtime["agents"]),
         )
-        self.assertEqual(len(runtime["agents"]), 3)
+        self.assertEqual(
+            runtime["topology"]["orin_agents"],
+            sum(agent["kind"] == "robot" for agent in runtime["agents"]),
+        )
+        self.assertEqual(
+            runtime["topology"]["edge_agents"],
+            sum(agent["kind"] == "edge" for agent in runtime["agents"]),
+        )
         self.assertTrue(all(agent["registered"] for agent in runtime["agents"]))
 
         scene = self.client.post(
@@ -123,15 +159,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(accepted.status_code, 202)
         run_id = accepted.json()["run_id"]
 
-        payload = None
-        for _ in range(100):
-            response = self.client.get(f"/api/runtime/workflows/{run_id}")
-            self.assertEqual(response.status_code, 200)
-            payload = response.json()
-            if payload["status"] in {"succeeded", "failed"}:
-                break
-            time.sleep(0.01)
-        self.assertIsNotNone(payload)
+        payload = self._wait_for_run(run_id)
         self.assertEqual(payload["status"], "succeeded")
         result = payload["result"]
         self.assertEqual(result["metrics"]["retry_count"], 1)
@@ -147,7 +175,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("attempt_dispatched", event_types)
         self.assertIn("retry_scheduled", event_types)
 
-    def test_incompatible_scene_is_rejected_only_by_local_runtime_demo(self):
+    def test_process_local_runtime_accepts_scene_declared_agent_counts(self):
         scene = self.client.post(
             "/api/generate-scene",
             json={"robot_count": 3, "edge_count": 2, "use_llm": False, "seed": 31},
@@ -163,10 +191,138 @@ class ApiTests(unittest.TestCase):
             "/api/runtime/workflows",
             json={"scene": scene, "algorithm": "dag_deadline", "seed": 31},
         )
-        self.assertEqual(runtime.status_code, 422)
+        self.assertEqual(runtime.status_code, 202)
+        payload = self._wait_for_run(runtime.json()["run_id"])
+        self.assertEqual(payload["status"], "succeeded")
+        agents = payload["result"]["agents"]
+        self.assertEqual(
+            [agent["kind"] for agent in agents].count("robot"),
+            3,
+        )
+        self.assertEqual(
+            [agent["kind"] for agent in agents].count("edge"),
+            2,
+        )
+
+    def test_process_local_runtime_accepts_robot_only_scene(self):
+        scene = self.client.post(
+            "/api/generate-scene",
+            json={
+                "robot_count": 2,
+                "edge_count": 0,
+                "task_categories": [
+                    "localization",
+                    "local_control",
+                ],
+                "use_llm": False,
+                "seed": 41,
+            },
+        )
+        self.assertEqual(scene.status_code, 200)
+        payload = scene.json()
+        self.assertEqual(
+            [node["kind"] for node in payload["nodes"]],
+            ["robot", "robot"],
+        )
+
+        accepted = self.client.post(
+            "/api/runtime/workflows",
+            json={
+                "scene": payload,
+                "algorithm": "dag_deadline",
+                "seed": 41,
+            },
+        )
+        self.assertEqual(accepted.status_code, 202)
+        run = self._wait_for_run(accepted.json()["run_id"])
+        self.assertEqual(run["status"], "succeeded")
+
+    def test_failure_injection_requires_a_matching_task_type(self):
+        scene = self.client.post(
+            "/api/generate-scene",
+            json={
+                "robot_count": 1,
+                "edge_count": 1,
+                "task_categories": ["localization"],
+                "use_llm": False,
+                "seed": 43,
+            },
+        ).json()
+
+        response = self.client.post(
+            "/api/runtime/workflows",
+            json={
+                "scene": scene,
+                "inject_first_failure": True,
+                "failure_task_type": "local_llm_7b",
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertIn(
+            "failure injection target task type is not present",
+            response.json()["detail"],
+        )
+
+    def test_all_web_only_task_profiles_execute_in_runtime(self):
+        scene = self.client.post(
+            "/api/generate-scene",
+            json={
+                "robot_count": 1,
+                "edge_count": 1,
+                "task_categories": [
+                    "data_compression",
+                    "result_verification",
+                ],
+                "use_llm": False,
+                "seed": 47,
+            },
+        )
+        self.assertEqual(scene.status_code, 200)
+
+        accepted = self.client.post(
+            "/api/runtime/workflows",
+            json={
+                "scene": scene.json(),
+                "algorithm": "dag_deadline",
+                "seed": 47,
+            },
+        )
+        self.assertEqual(accepted.status_code, 202)
+        run = self._wait_for_run(accepted.json()["run_id"])
+        self.assertEqual(run["status"], "succeeded")
+        self.assertEqual(
+            {
+                result["task_type"]
+                for result in run["result"]["task_results"]
+            },
+            {"data_compression", "result_verification"},
+        )
+
+    def test_process_local_runtime_rejects_cloud_nodes(self):
+        scene = self.client.post(
+            "/api/generate-scene",
+            json={
+                "robot_count": 2,
+                "edge_count": 1,
+                "use_llm": False,
+                "seed": 37,
+            },
+        ).json()
+        edge = next(node for node in scene["nodes"] if node["kind"] == "edge")
+        edge["kind"] = "cloud"
+
+        runtime = self.client.post(
+            "/api/runtime/workflows",
+            json={"scene": scene, "algorithm": "dag_deadline", "seed": 37},
+        )
+        self.assertEqual(
+            runtime.status_code,
+            422,
+        )
         self.assertEqual(
             runtime.json()["detail"],
-            "the local runtime demo requires exactly two Orin robot nodes and one edge node",
+            "the process-local runtime supports robot and edge nodes; "
+            "cloud nodes are not supported",
         )
 
 
@@ -201,7 +357,63 @@ class LlmFallbackTests(unittest.TestCase):
             scene = generate_scene_with_llm(settings, request)
 
         validate_scene(scene)
-        self.assertTrue(any("deterministic fallback used" in item for item in scene.stressors))
+        self.assertNotIn("LLM", " ".join(scene.stressors))
+        self.assertEqual(
+            scene.generation_source,
+            "deterministic_fallback",
+        )
+
+    def test_llm_scene_without_explicit_placement_uses_fallback(self):
+        request = GenerateSceneRequest(
+            robot_count=1,
+            edge_count=1,
+            seed=17,
+            use_llm=True,
+        )
+        payload = build_deterministic_scene(request).model_dump(
+            mode="json"
+        )
+        for task in payload["tasks"]:
+            task["placement_constraints"] = None
+
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(payload)
+                    )
+                )
+            ]
+        )
+        client = MagicMock()
+        client.chat.completions.create.return_value = response
+        settings = SimpleNamespace(
+            llm_timeout_seconds=1,
+            llm_temperature=0.0,
+            current_llm=lambda: {
+                "provider": "openai",
+                "api_key": "test-key",
+                "base_url": "https://example.invalid/v1",
+                "model": "test-model",
+            },
+        )
+
+        with patch(
+            "backend.app.llm_client.OpenAI",
+            return_value=client,
+        ):
+            scene = generate_scene_with_llm(settings, request)
+
+        self.assertEqual(
+            scene.generation_source,
+            "deterministic_fallback",
+        )
+        self.assertTrue(
+            all(
+                task.placement_constraints is not None
+                for task in scene.tasks
+            )
+        )
 
 
 if __name__ == "__main__":

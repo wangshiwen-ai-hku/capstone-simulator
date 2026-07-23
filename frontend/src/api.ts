@@ -2,7 +2,6 @@ import type {
   Algorithm,
   BenchmarkScene,
   GenerateSceneRequest,
-  RuntimeStatus,
   RuntimeWorkflowRun,
   SimulationResponse,
 } from './types';
@@ -39,7 +38,7 @@ export function generateScene(payload: GenerateSceneRequest) {
   });
 }
 
-export function simulate(scene: BenchmarkScene, algorithm: Algorithm) {
+export function simulate(scene: BenchmarkScene, algorithm: Algorithm, seed: number) {
   return request<SimulationResponse>('/api/simulate', {
     method: 'POST',
     body: JSON.stringify({
@@ -47,13 +46,9 @@ export function simulate(scene: BenchmarkScene, algorithm: Algorithm) {
       algorithm,
       network_jitter: 0.12,
       resource_noise: 0.05,
-      seed: 7,
+      seed,
     }),
   });
-}
-
-export function bootstrapRuntime() {
-  return request<RuntimeStatus>('/api/runtime/bootstrap', { method: 'POST' });
 }
 
 export function submitRuntimeWorkflow(
@@ -70,8 +65,7 @@ export function submitRuntimeWorkflow(
         algorithm,
         seed,
         max_attempts: 2,
-        inject_first_failure: true,
-        failure_task_type: 'local_llm_7b',
+        inject_first_failure: false,
         deterministic: true,
       }),
     },

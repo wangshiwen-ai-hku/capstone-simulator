@@ -12,7 +12,7 @@ from .mars_adapter import (
 from .schemas import SimulateRequest, SimulationResponse
 
 
-async def run_simulation(req: SimulateRequest) -> SimulationResponse:
+def run_simulation(req: SimulateRequest) -> SimulationResponse:
     report = run_workflow_simulation(
         build_workflow(req.scene),
         build_node_specs(req.scene),

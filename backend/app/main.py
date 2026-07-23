@@ -1,7 +1,8 @@
+from dataclasses import asdict
+import logging
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-import logging
-from dataclasses import asdict
 
 from mars import __version__ as mars_version
 from mars.models import TASK_CLASS_LABELS, TaskClass
@@ -12,16 +13,14 @@ from mars.optimizers import (
 )
 from mars.synthetic_workloads import load_default_synthetic_workloads
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
-
 from .config import get_settings
 from .llm_client import generate_scene_with_llm
 from .mars_adapter import SceneValidationError, validate_scene
 from .runtime import runtime_service
+from .scene_generator import (
+    TASK_TYPE_TEMPLATES,
+    placement_constraints_for,
+)
 from .schemas import (
     BenchmarkScene,
     GenerateSceneRequest,
@@ -30,12 +29,22 @@ from .schemas import (
 )
 from .simulation import run_simulation
 
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
 settings = get_settings()
 synthetic_workloads = load_default_synthetic_workloads()
 
 app = FastAPI(
     title="MARS Simulator API",
-    description="Web adapter for DAG-aware MARS scheduling and benchmark simulation.",
+    description=(
+        "HTTP interface for MARS workflow validation, simulation, and "
+        "runtime control."
+    ),
     version=mars_version,
 )
 
@@ -73,7 +82,10 @@ def providers():
     return {
         "current": settings.public_llm(),
         "available": ["openai", "doubao", "glm", "gemini", "custom"],
-        "note": "Use backend/.env to switch provider. The app calls the selected endpoint through the OpenAI-compatible client.",
+        "note": (
+            "Provider configuration is loaded from backend/.env through an "
+            "OpenAI-compatible client."
+        ),
     }
 
 
@@ -102,19 +114,47 @@ def architecture():
         "optimizers": list(built_in_registry().ids()),
         "policies": list(built_in_policy_ids()),
         "algorithm_aliases": algorithm_aliases(),
+        "task_class_role": "reporting_compatibility",
         "task_classes": [
             {"id": task_class.value, "label": TASK_CLASS_LABELS[task_class]}
             for task_class in TaskClass
         ],
+        "placement_contract": {
+            "authority": "task.placement_constraints",
+            "dimensions": [
+                "node_eligibility",
+                "node_preference",
+                "required_capabilities",
+                "source_and_robot_locality",
+                "safety",
+                "fallback",
+                "statefulness",
+                "idempotence",
+                "splitting",
+                "replication",
+            ],
+        },
     }
 
 
 @app.get("/api/workload-catalog")
 def workload_catalog():
+    workloads = []
+    for workload in synthetic_workloads:
+        item = asdict(workload)
+        if workload.task_type in TASK_TYPE_TEMPLATES:
+            item["placement_constraints"] = placement_constraints_for(
+                workload.task_type
+            ).model_dump(mode="json")
+        item["task_class_role"] = "reporting_compatibility"
+        workloads.append(item)
     return {
         "provenance": "synthetic_placeholder",
-        "warning": "Local simulation values; replace them with measured deployment profiles before production use.",
-        "workloads": [asdict(workload) for workload in synthetic_workloads],
+        "warning": (
+            "Synthetic profiles are local simulation inputs. Deployment "
+            "profiles require measured telemetry."
+        ),
+        "workloads": workloads,
     }
 
 
@@ -164,29 +204,116 @@ def get_runtime_events(
 @app.post("/api/validate-workflow")
 def validate_scene_workflow(scene: BenchmarkScene):
     index = _validate_scene_request(scene)
+    task_by_id = {task.id: task for task in scene.tasks}
+    dependency_edges = [
+        {
+            "from": parent,
+            "to": child,
+            "source": parent,
+            "target": child,
+            "kind": "dependency",
+        }
+        for child in index.topological_order
+        for parent in index.parents[child]
+    ]
+    data_edges = [
+        {
+            "id": (
+                f"{edge.producer_task}.{edge.producer_port}->"
+                f"{edge.consumer_task}.{edge.consumer_port}"
+            ),
+            "from": edge.producer_task,
+            "to": edge.consumer_task,
+            "source": edge.producer_task,
+            "target": edge.consumer_task,
+            "kind": "data",
+            "producer_task": edge.producer_task,
+            "producer_port": edge.producer_port,
+            "consumer_task": edge.consumer_task,
+            "consumer_port": edge.consumer_port,
+            "message_type": edge.message_type,
+        }
+        for edge in index.data_edges
+    ]
+    tasks = [
+        {
+            "id": task_id,
+            "task_id": task_id,
+            "name": task_by_id[task_id].name,
+            "task_type": task_by_id[task_id].task_type,
+            "task_class": task_by_id[task_id].task_class.value,
+            "level": index.levels[task_id],
+            "dependencies": list(index.parents[task_id]),
+            "children": list(index.children[task_id]),
+            "input_ports": [
+                port.model_dump(mode="json")
+                for port in task_by_id[task_id].input_ports
+            ],
+            "output_ports": [
+                port.model_dump(mode="json")
+                for port in task_by_id[task_id].output_ports
+            ],
+            "placement_constraints": (
+                task_by_id[task_id].placement_constraints.model_dump(
+                    mode="json"
+                )
+                if task_by_id[task_id].placement_constraints is not None
+                else None
+            ),
+        }
+        for task_id in index.topological_order
+    ]
+    level_numbers = sorted(set(index.levels.values()))
     return {
         "valid": True,
         "workflow_id": scene.workflow_id,
         "topological_order": list(index.topological_order),
         "levels": index.levels,
-        "edges": [
-            {"from": parent, "to": child}
-            for child in index.topological_order
-            for parent in index.parents[child]
+        "level_groups": [
+            {
+                "level": level,
+                "task_ids": [
+                    task_id
+                    for task_id in index.topological_order
+                    if index.levels[task_id] == level
+                ],
+            }
+            for level in level_numbers
         ],
+        "roots": [
+            task_id
+            for task_id in index.topological_order
+            if not index.parents[task_id]
+        ],
+        "leaves": [
+            task_id
+            for task_id in index.topological_order
+            if not index.children[task_id]
+        ],
+        "depth": max(index.levels.values(), default=-1) + 1,
+        "tasks": tasks,
+        "edges": dependency_edges,
+        "data_edges": data_edges,
     }
 
 
 @app.post("/api/generate-scene")
 def generate_scene(req: GenerateSceneRequest):
-    logger.info(f"Received request to generate scene: {req.scenario_type.value} with difficulty {req.difficulty.value}")
+    logger.info(
+        "Received scene-generation request: scenario=%s difficulty=%s",
+        req.scenario_type.value,
+        req.difficulty.value,
+    )
     scene = generate_scene_with_llm(settings, req)
     _validate_scene_request(scene)
     return scene
 
 
 @app.post("/api/simulate")
-async def simulate(req: SimulateRequest):
-    logger.info(f"Received request to run simulation with policy preset: {req.algorithm}")
+def simulate(req: SimulateRequest):
+    logger.info(
+        "Received simulation request with policy preset=%s",
+        req.algorithm,
+    )
     _validate_scene_request(req.scene)
-    return await run_simulation(req)
+    return run_simulation(req)

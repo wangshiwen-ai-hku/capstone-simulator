@@ -141,6 +141,40 @@ class CoordinatorTests(unittest.TestCase):
                     retried["attempts"][1]["target_node_id"],
                 )
 
+    def test_stateful_non_idempotent_task_is_not_retried(self):
+        failed_task_id = next(
+            task.task_id
+            for task in self.workflow.tasks
+            if task.spec.task_type == "localization"
+        )
+
+        report = CentralCoordinator(self._new_runtime()).run(
+            self.workflow,
+            max_attempts=3,
+            fail_first_task_ids=(failed_task_id,),
+        )
+        failed = next(
+            item
+            for item in report.task_results
+            if item["task_id"] == failed_task_id
+        )
+
+        self.assertEqual(failed["attempt_count"], 1)
+        self.assertNotEqual(failed["state"], "succeeded")
+        events = [
+            event
+            for event in report.events
+            if event.task_id == failed_task_id
+        ]
+        self.assertIn(
+            "retry_suppressed",
+            {event.event_type for event in events},
+        )
+        self.assertNotIn(
+            "retry_scheduled",
+            {event.event_type for event in events},
+        )
+
     def test_only_the_selected_output_port_contributes_transfer_cost(self):
         runtime = _minimal_runtime()
         producer = TaskInstance(

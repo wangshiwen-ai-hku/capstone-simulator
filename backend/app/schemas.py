@@ -45,7 +45,7 @@ class GenerateSceneRequest(BaseModel):
     scenario_type: ScenarioType = ScenarioType.warehouse
     custom_scene: Optional[str] = None
     robot_count: int = Field(default=2, ge=1, le=50)
-    edge_count: int = Field(default=1, ge=1, le=8)
+    edge_count: int = Field(default=1, ge=0, le=8)
     task_categories: List[TaskCategory] = Field(default_factory=lambda: [
         TaskCategory.localization,
         TaskCategory.environment_understanding,
@@ -197,7 +197,13 @@ class Workload(BaseModel):
     name: str
     source_robot_id: str
     task_type: str
-    task_class: Optional[TaskClass] = None
+    task_class: Optional[TaskClass] = Field(
+        default=None,
+        description=(
+            "Optional reporting cohort. PlacementConstraintsSpec is the "
+            "authoritative scheduling contract."
+        ),
+    )
     priority: int = Field(default=3, ge=1, le=5)
     compute_demand: float = Field(gt=0, description="Normalized compute units.")
     gpu_demand: float = Field(default=0.0, ge=0)
@@ -209,7 +215,13 @@ class Workload(BaseModel):
     bandwidth_requirement_mbps: float = Field(ge=0)
     energy_budget_j: float = Field(gt=0)
     allow_local_fallback: Optional[bool] = None
-    placement_constraints: Optional[PlacementConstraintsSpec] = None
+    placement_constraints: Optional[PlacementConstraintsSpec] = Field(
+        default=None,
+        description=(
+            "Authoritative node eligibility, preference, safety, and "
+            "execution-semantics contract."
+        ),
+    )
     result_verification: str
     arrival_time_ms: float = Field(default=0, ge=0)
     deadline_ms: float = Field(gt=0)
@@ -220,9 +232,24 @@ class Workload(BaseModel):
     output_ports: List[PortSpec] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def apply_task_class_defaults(self):
+    def apply_compatibility_defaults(self):
+        """Normalize legacy scenes without overriding explicit placement."""
         if self.task_class is None:
             self.task_class = infer_task_class(self.task_type)
+
+        if self.placement_constraints is not None:
+            # Keep the legacy field as a derived compatibility projection so
+            # it cannot contradict the authoritative placement contract.
+            self.allow_local_fallback = (
+                self.placement_constraints.allow_source_node
+                and self.placement_constraints.allow_fallback
+            )
+            if self.placement_constraints.safety_required:
+                self.safety_level = 5
+            return self
+
+        # Compatibility path for imported scenes that predate explicit
+        # placement contracts.
         if self.allow_local_fallback is None:
             self.allow_local_fallback = (
                 self.task_class is not TaskClass.LOCAL_SAFETY
@@ -251,6 +278,12 @@ class BenchmarkScene(BaseModel):
     failure_policy: FailurePolicy = FailurePolicy.SKIP_DESCENDANTS
     stressors: List[str] = Field(default_factory=list)
     success_criteria: List[str] = Field(default_factory=list)
+    generation_source: Literal[
+        "deterministic",
+        "llm",
+        "deterministic_fallback",
+    ] = "deterministic"
+    generation_note: str = ""
 
     @field_validator("tasks")
     @classmethod
@@ -330,7 +363,7 @@ class RuntimeWorkflowRequest(BaseModel):
     algorithm: Literal["dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
     seed: int = Field(default=7, ge=0)
     max_attempts: int = Field(default=2, ge=1, le=5)
-    inject_first_failure: bool = True
+    inject_first_failure: bool = False
     failure_task_type: str = "local_llm_7b"
     deterministic: bool = True
 

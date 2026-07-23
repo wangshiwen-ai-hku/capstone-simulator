@@ -10,7 +10,6 @@ from typing import Iterable
 
 from .dag import TaskManager, resolve_task_input_bindings
 from .models import (
-    Assignment,
     ExecutionMode,
     LinkSnapshot,
     LinkSpec,
@@ -340,6 +339,11 @@ class CentralCoordinator:
             # only the selected assignment and its matching reservation
             # fragment.
             task = manager.get(initial_assignment.task_id)
+            placement = resolved_placement_constraints(task)
+            retry_allowed = (
+                placement.idempotent
+                and not placement.stateful
+            )
             manager.mark_running(task.task_id)
             input_bindings = input_bindings_by_task[task.task_id]
             input_artifacts = artifacts_from_bindings(input_bindings)
@@ -704,7 +708,7 @@ class CentralCoordinator:
                     agent_id=execution.agent_id,
                 )
                 failed_nodes.add(execution.agent_id)
-                if attempt_no < max_attempts:
+                if attempt_no < max_attempts and retry_allowed:
                     self._emit(
                         finish_time_ms,
                         "retry_scheduled",
@@ -714,6 +718,18 @@ class CentralCoordinator:
                         attempt_id=attempt_id,
                     )
                     continue
+                if attempt_no < max_attempts:
+                    self._emit(
+                        finish_time_ms,
+                        "retry_suppressed",
+                        (
+                            f"{task.task_id} is stateful or non-idempotent; "
+                            "automatic retry suppressed"
+                        ),
+                        workflow.workflow_id,
+                        task_id=task.task_id,
+                        attempt_id=attempt_id,
+                    )
                 manager.complete(
                     task.task_id,
                     ok=False,
@@ -723,6 +739,7 @@ class CentralCoordinator:
                 )
                 completion_time[task.task_id] = finish_time_ms
                 task_finished = True
+                break
 
             if not task_finished:
                 raise RuntimeError(f"task {task.task_id} left the retry loop unresolved")

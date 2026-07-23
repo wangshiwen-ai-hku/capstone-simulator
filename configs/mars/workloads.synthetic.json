@@ -134,6 +134,32 @@
       }
     },
     {
+      "task_type": "data_compression",
+      "display_name": "Data compression",
+      "task_class": "edge_heavy",
+      "description": "Compresses an artifact before transmission or storage.",
+      "model_variant": "synthetic-codec",
+      "inputs": [{"name": "payload", "semantic_type": "binary_payload"}],
+      "outputs": [{"name": "compressed_payload", "semantic_type": "compressed_payload"}],
+      "profiles": {
+        "orin": {"latency_ms":{"p50":110,"p95":170,"p99":220},"resources":{"cpu_cores":0.5,"gpu_units":0.0,"memory_mb":220},"input_size_mb":{"min":2.0,"typical":8.0,"max":24.0},"output_size_mb":{"min":0.8,"typical":2.5,"max":8.0},"energy_j":{"min":0.7,"typical":1.2,"max":2.1},"failure_rate":0.004,"accuracy":{"min":1.0,"typical":1.0,"max":1.0},"max_concurrency":2},
+        "edge": {"latency_ms":{"p50":42,"p95":68,"p99":86},"resources":{"cpu_cores":0.7,"gpu_units":0.0,"memory_mb":180},"input_size_mb":{"min":2.0,"typical":8.0,"max":24.0},"output_size_mb":{"min":0.8,"typical":2.5,"max":8.0},"energy_j":{"min":1.0,"typical":1.7,"max":2.8},"failure_rate":0.003,"accuracy":{"min":1.0,"typical":1.0,"max":1.0},"max_concurrency":10}
+      }
+    },
+    {
+      "task_type": "result_verification",
+      "display_name": "Result verification",
+      "task_class": "realtime_offloadable",
+      "description": "Checks a candidate result and emits a structured verification report.",
+      "model_variant": "synthetic-vlm-verifier",
+      "inputs": [{"name": "candidate", "semantic_type": "structured_decision"}],
+      "outputs": [{"name": "verification", "semantic_type": "verification_report"}],
+      "profiles": {
+        "orin": {"latency_ms":{"p50":310,"p95":480,"p99":620},"resources":{"cpu_cores":1.4,"gpu_units":0.5,"memory_mb":4200},"input_size_mb":{"min":0.2,"typical":2.0,"max":8.0},"output_size_mb":{"min":0.005,"typical":0.02,"max":0.08},"energy_j":{"min":5.0,"typical":8.5,"max":14.0},"failure_rate":0.014,"accuracy":{"min":0.8,"typical":0.9,"max":0.96},"max_concurrency":1},
+        "edge": {"latency_ms":{"p50":105,"p95":165,"p99":210},"resources":{"cpu_cores":2.0,"gpu_units":0.4,"memory_mb":5600},"input_size_mb":{"min":0.2,"typical":2.0,"max":8.0},"output_size_mb":{"min":0.005,"typical":0.02,"max":0.08},"energy_j":{"min":7.0,"typical":12.0,"max":19.0},"failure_rate":0.008,"accuracy":{"min":0.82,"typical":0.92,"max":0.97},"max_concurrency":4}
+      }
+    },
+    {
       "task_type": "map_fusion",
       "display_name": "Map fusion",
       "task_class": "edge_heavy",

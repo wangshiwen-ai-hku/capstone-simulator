@@ -1,6 +1,7 @@
 # Development dependencies extend the complete runtime environment.
 -r requirements.txt
 
-# Test runner for local development and CI.
+# Quality and test tooling for local development and CI.
 pytest==8.3.4
 httpx2>=2.7,<3
+ruff==0.15.22
