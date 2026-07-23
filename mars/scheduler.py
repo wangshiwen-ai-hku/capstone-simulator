@@ -590,7 +590,7 @@ def critical_path(
 
 
 def apply_load(node: NodeSnapshot, task: TaskInstance) -> NodeSnapshot:
-    """Small deterministic utilization update used by simulation snapshots."""
+    """Deterministic utilization update used by simulation snapshots."""
     return replace(
         node,
         cpu_util=min(0.99, node.cpu_util * 0.96 + min(0.22, task.spec.compute_demand * 0.015)),

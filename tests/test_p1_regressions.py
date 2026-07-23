@@ -309,7 +309,7 @@ def test_candidate_generation_materializes_artifact_iterables_once() -> None:
     )
 
 
-def test_failed_builtin_id_override_repairs_with_safe_builtin() -> None:
+def test_failed_builtin_id_override_uses_builtin_fallback() -> None:
     class BrokenHeuristic:
         optimizer_id = "heuristic"
 

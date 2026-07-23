@@ -608,7 +608,7 @@ def test_optimizer_registry_runs_a_custom_optimizer() -> None:
     assert plan.assignments[0].optimizer_id == "custom"
 
 
-def test_invalid_plugin_plan_is_repaired_by_safe_fallback() -> None:
+def test_invalid_plugin_plan_uses_configured_fallback() -> None:
     nodes = _nodes()
     snapshots = _snapshots(nodes)
     task = _task("repair")
@@ -631,7 +631,7 @@ def test_invalid_plugin_plan_is_repaired_by_safe_fallback() -> None:
     assert "assign or explicitly defer" in plan.diagnostics["repair_reason"]
 
 
-def test_plugin_exception_is_repaired_by_safe_fallback() -> None:
+def test_plugin_exception_uses_configured_fallback() -> None:
     nodes = _nodes()
     snapshots = _snapshots(nodes)
     task = _task("repair-exception")

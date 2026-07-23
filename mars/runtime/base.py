@@ -267,8 +267,8 @@ class RuntimePort(Protocol):
     """Coordinator-facing runtime contract implemented by every adapter.
 
     An adapter may execute agents in process or translate these operations to
-    gRPC, DDS, or a partner runtime. Workflow submission remains an application
-    concern and is intentionally outside this boundary.
+    gRPC, DDS, or a deployment-specific runtime. Workflow submission remains
+    an application concern and is intentionally outside this boundary.
     """
 
     capabilities: RuntimeCapabilities

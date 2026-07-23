@@ -291,7 +291,7 @@ export default function App() {
             {runtimeLoading ? 'Agent 运行中...' : `运行 ${runtimeDemoTopology} 演示`}
           </button>
           <p className={runtimeDemoIssue ? 'control-note warning' : 'control-note'}>
-            {runtimeDemoIssue ?? '中央 Scheduler 动态分配任务，并注入一次可恢复失败来展示 retry。'}
+            {runtimeDemoIssue ?? '中央 Scheduler 动态分配任务；演示运行会注入一次可恢复故障并记录重试流程。'}
           </p>
         </aside>
 
@@ -334,7 +334,7 @@ function EmptyState() {
   return (
     <div className="empty">
       <h2>先生成一个 benchmark scene</h2>
-      <p>推荐先用 warehouse / medium / 2 Orin / 1 edge，展示三类任务、定位 fan-out、动态分配和数据移动。</p>
+      <p>默认示例配置为 warehouse / medium / 2 Orin / 1 edge，包含三类任务、定位 fan-out、动态分配和数据移动。</p>
     </div>
   );
 }

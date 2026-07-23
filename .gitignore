@@ -104,18 +104,16 @@ target/
 .ipython/
 
 # pyenv
-#   For a library or package, you might want to share your .python-version.
-#   For an app, you probably want to ignore it.
+#   Library and package repositories may track .python-version.
+#   Application repositories typically ignore it.
 # .python-version
 
 # pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, if you're executing pipenv install --ignore-pipfile, you can ignore Pipfile.lock.
+#   Pipfile.lock is normally tracked unless pipenv runs with --ignore-pipfile.
 #   Pipfile.lock
 
 # poetry
-#   Poetry uses pyproject.toml and poetry.lock. poetry.lock should be committed.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
+#   Poetry projects normally track poetry.lock.
 
 # pdm
 #   PDM stores project-wide configurations in .pdm-python and local configurations in .pdm.toml

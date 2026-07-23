@@ -13,9 +13,9 @@ from .schemas import BenchmarkScene, GenerateSceneRequest
 
 
 SYSTEM_PROMPT = """
-You are a benchmark designer for a multi-robot cloud-edge-device scheduling platform.
-Generate one realistic simulation scene for stress-testing scheduling algorithms.
-Return STRICT JSON only. Do not include markdown.
+Generate one benchmark scene for stress-testing a multi-robot
+cloud-edge-device scheduling platform.
+Return strict JSON without Markdown.
 The JSON schema must match the following high-level fields:
 {
   "id": string,
@@ -56,8 +56,10 @@ The JSON schema must match the following high-level fields:
   "stressors": [string],
   "success_criteria": [string]
 }
-Make the benchmark useful for comparing DAG-deadline, rule-based, greedy-cost, local-first and edge-first scheduling.
-Include heavy test cases: similar-task conflicts, priority differences, long chains, network bottlenecks, local fallback.
+The scene must differentiate DAG-deadline, rule-based, greedy-cost,
+local-first, and edge-first scheduling behavior.
+Include similar-task resource conflicts, priority differences, long dependency
+chains, network bottlenecks, and local fallback.
 Dependencies and data_edges must reference tasks in the same response and form a valid directed acyclic graph.
 Every data edge must connect declared ports with the same message_type. One producer output may fan out to multiple consumers.
 Use exactly these workload semantics: local_safety must stay on its safety-capable source robot;
@@ -83,7 +85,7 @@ def _extract_json(text: str) -> Dict[str, Any]:
 
 def _request_prompt(req: GenerateSceneRequest) -> str:
     return f"""
-Generate a benchmark scene with these controls:
+Benchmark controls:
 - scenario_type: {req.scenario_type.value}
 - custom_scene: {req.custom_scene or "N/A"}
 - robot_count: {req.robot_count}
@@ -92,14 +94,14 @@ Generate a benchmark scene with these controls:
 - difficulty: {req.difficulty.value}
 - seed: {req.seed}
 
-Important domain requirements:
+Domain constraints:
 - Robot nodes are Jetson Orin-like and can execute local inference and safety tasks.
 - Edge nodes are PC/control-plane-like and can run heavier VLA/LLM/VLM workloads.
 - Use workload abstraction fields: task_type, compute_demand, latency_budget, safety_level, model_requirement, data_size, bandwidth_requirement, energy_budget, allow_local_fallback, result_verification.
 - Build per-robot DAG pipelines with typed input/output ports, explicit data_edges, dependencies and stage_index. Never emit a cycle or a missing dependency.
 - Classify every task into local_safety, realtime_offloadable, or edge_heavy using the semantics above.
-- Include realistic initial resources: CPU/GPU/memory utilization, temperature, power, network latency.
-- Keep numeric values plausible and internally consistent.
+- Include initial CPU/GPU/memory utilization, temperature, power, and network latency.
+- Keep utilization values within [0, 1], physical measurements non-negative, and capacities and demands internally consistent.
 """
 
 
@@ -117,8 +119,8 @@ def generate_scene_with_llm(settings: Settings, req: GenerateSceneRequest) -> Be
     try:
         user_prompt = _request_prompt(req)
         logger.info(f"Sending request to LLM base_url: {base_url} model: {model}")
-        logger.info(f"LLM User Prompt: {user_prompt}")
-        
+        logger.info(f"LLM request prompt: {user_prompt}")
+
         resp = client.chat.completions.create(
             model=model,
             temperature=settings.llm_temperature,
@@ -130,10 +132,10 @@ def generate_scene_with_llm(settings: Settings, req: GenerateSceneRequest) -> Be
         )
         content = resp.choices[0].message.content or "{}"
         logger.info(f"Received LLM response, length: {len(content)}")
-        logger.info(f"LLM Response Content: {content}")
-        
+        logger.info(f"LLM response content: {content}")
+
         data = _extract_json(content)
-        logger.info(f"Successfully extracted JSON from LLM response")
+        logger.info("Extracted JSON from LLM response")
         scene = BenchmarkScene.model_validate(data)
         validate_scene(scene)
         return scene

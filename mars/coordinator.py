@@ -1,4 +1,4 @@
-"""Central MARS coordinator for local multi-agent workflow exercises."""
+"""Central MARS coordinator for local multi-agent workflow execution."""
 
 from __future__ import annotations
 

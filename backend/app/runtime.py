@@ -1,4 +1,4 @@
-"""Process-local runtime service for the three-agent MARS demonstration."""
+"""Process-local runtime service for the three-agent MARS simulation."""
 
 from __future__ import annotations
 

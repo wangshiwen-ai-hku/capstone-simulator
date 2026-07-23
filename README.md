@@ -53,11 +53,12 @@ that port.
   and constraints rather than trusting solver-reported values.
 - Runtime dispatch carries the exact validated Assignment and its matching node
   and link reservation fragment.
-- Invalid plug-in plans are rejected and may be re-solved by a configured safe fallback.
+- Invalid plug-in plans are rejected and may be re-solved by the configured
+  fallback optimizer.
 - Critical-path, deadline, load, locality, bandwidth, and energy-aware built-in policies.
 - Central scheduler with two simulated Orin Agents and one simulated edge Agent.
 - Explicit registration, heartbeat, reservation/release, attempts, and retry.
-- Replaceable synthetic workload profiles for local development without business code.
+- Replaceable synthetic workload profiles for local development and integration testing.
 - Web views for DAGs, typed data flow, assignments, attempts, Artifacts, metrics, and events.
 
 ## The three task classes
@@ -138,7 +139,7 @@ model, or runtime interface.
 
 ## Quick start
 
-Python 3.10–3.13 is recommended.
+Supported Python versions: 3.10–3.13.
 
 ### Backend
 
@@ -186,10 +187,10 @@ for:
 Each target profile includes p50/p95/p99 latency, CPU/GPU/memory demand,
 input/output size ranges, energy, failure rate, accuracy, and maximum
 concurrency. `SyntheticWorkloadCatalog.register_dict(...)` can add or replace a
-fake task directly from a dictionary or JSON object.
+synthetic workload definition from a dictionary or JSON object.
 
-The values are explicitly synthetic. When partner measurements become
-available, request and record:
+The values are explicitly synthetic. Deployment profiles require the following
+measured metadata:
 
 - exact Orin/edge hardware, power mode, and runtime versions;
 - model artifact, precision, batch size, and input shape;
@@ -200,8 +201,8 @@ available, request and record:
 - average/peak power or joules per task;
 - failure rate and output quality for each hardware target.
 
-`configs/mars/profiles.synthetic.json` contains compact benchmark-engine
-profiles for older task labels.
+`configs/mars/profiles.synthetic.json` contains benchmark-engine profiles for
+older task labels.
 
 ## Project layout
 
@@ -219,8 +220,8 @@ mars/
   runtime/base.py              sole asynchronous control-plane runtime contract
   runtime/inprocess.py         process-local simulated runtime adapter
   engine.py                    deterministic algorithm benchmark engine
-  synthetic_workloads.py       replaceable fake workload registry and sampler
-  profiling.py                 compact execution-profile catalog
+  synthetic_workloads.py       replaceable synthetic workload registry and sampler
+  profiling.py                 execution-profile catalog
 backend/app/
   main.py                      FastAPI endpoints
   runtime.py                   background local-runtime service and run store
@@ -238,9 +239,9 @@ the language-neutral interface source; Python domain classes remain the
 in-process implementation model.
 
 Current scope does not include generated Proto bindings, RPC service
-definitions, a gRPC or DDS network adapter, partner middleware integration, or
-production optimizer implementations such as MILP, ADMM, or primal-dual
-solvers. Those components can be added against the frozen Problem, Plan, and
+definitions, a gRPC or DDS network adapter, deployment middleware integration,
+or production optimizer implementations such as MILP, ADMM, or primal-dual
+solvers. Those components can be added against the defined Problem, Plan, and
 RuntimePort boundaries.
 
 ## API
@@ -273,6 +274,6 @@ matching resource and transfer reservations and exact consumer-port input
 bindings. Command validation rejects an inconsistent plan fragment before an
 adapter receives it, and preserves the Problem, Snapshot, and Policy
 correlation identifiers for replay and audit.
-`InProcessRuntime` implements the contract with virtual time. Future gRPC,
-DDS, or partner adapters implement the same contract; the coordinator does
+`InProcessRuntime` implements the contract with virtual time. Networked or
+deployment-specific adapters implement the same contract; the coordinator does
 not depend on their communication mechanism.

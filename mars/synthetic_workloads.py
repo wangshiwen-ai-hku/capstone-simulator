@@ -24,7 +24,7 @@ DEFAULT_SYNTHETIC_WORKLOAD_PATH = (
 
 
 class ExecutionTarget(str, enum.Enum):
-    """Hardware roles used by the local fake-agent environment."""
+    """Hardware roles used by the local simulated-agent environment."""
 
     ORIN = "orin"
     EDGE = "edge"
@@ -193,7 +193,7 @@ class SyntheticExecution:
 
 
 class SyntheticSampler:
-    """Samples repeatable fake executions without global random state."""
+    """Samples repeatable simulated executions without global random state."""
 
     def __init__(
         self,
@@ -260,7 +260,7 @@ class SyntheticSampler:
 
 
 @dataclass(frozen=True)
-class FakeComponent:
+class SimulatedComponent:
     """Catalog-backed execution facade for simulated agents."""
 
     workload: SyntheticWorkload
@@ -319,13 +319,13 @@ class SyntheticWorkloadCatalog:
         *,
         seed: int | None = None,
         deterministic: bool = False,
-    ) -> FakeComponent:
+    ) -> SimulatedComponent:
         resolved = ExecutionTarget(target)
         workload = self.get(task_type)
         profile = workload.profile_for(resolved)
         if not profile.supported:
             raise UnsupportedTargetError(f"{task_type} is not supported on {resolved.value}")
-        return FakeComponent(workload, resolved, SyntheticSampler(self, seed=seed, deterministic=deterministic))
+        return SimulatedComponent(workload, resolved, SyntheticSampler(self, seed=seed, deterministic=deterministic))
 
     @classmethod
     def load(cls, path: str | Path = DEFAULT_SYNTHETIC_WORKLOAD_PATH) -> "SyntheticWorkloadCatalog":
@@ -334,7 +334,7 @@ class SyntheticWorkloadCatalog:
 
 
 def workload_from_dict(item: Mapping[str, Any]) -> SyntheticWorkload:
-    """Build a validated workload from a compact dictionary or JSON object."""
+    """Build a validated workload from a dictionary or JSON object."""
 
     profiles = []
     for target_name, value in item["profiles"].items():

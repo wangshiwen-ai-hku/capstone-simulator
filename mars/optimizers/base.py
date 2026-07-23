@@ -163,7 +163,7 @@ class PlannedResourceReservation:
 
 @dataclass(frozen=True)
 class SchedulingSnapshot:
-    """Deeply immutable facts captured for one optimization run."""
+    """Immutable facts captured for one optimization run."""
 
     schema_version: str
     snapshot_id: str

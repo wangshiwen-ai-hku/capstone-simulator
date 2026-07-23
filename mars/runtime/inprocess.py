@@ -67,7 +67,7 @@ class _ExecutionResult:
 
 
 class _SimulatedAgent:
-    """One fake Orin or edge executor with explicit capacity accounting.
+    """One simulated Orin or edge executor with explicit capacity accounting.
 
     Execution is virtual-time based: ``execute`` returns a repeatable sampled
     duration immediately, while the coordinator decides when that completion

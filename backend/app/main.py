@@ -113,7 +113,7 @@ def architecture():
 def workload_catalog():
     return {
         "provenance": "synthetic_placeholder",
-        "warning": "Local simulation values; replace them with measured partner profiles when available.",
+        "warning": "Local simulation values; replace them with measured deployment profiles before production use.",
         "workloads": [asdict(workload) for workload in synthetic_workloads],
     }
 

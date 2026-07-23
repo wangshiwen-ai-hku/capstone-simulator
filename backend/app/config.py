@@ -24,19 +24,19 @@ class Settings(BaseSettings):
     openai_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_MODEL")
 
     doubao_api_key: Optional[str] = Field(default=None, alias="DOUBAO_API_KEY")
-    doubao_base_url: str = Field(default="https://your-doubao-or-company-gateway/v1", alias="DOUBAO_BASE_URL")
+    doubao_base_url: str = Field(default="https://doubao-gateway.example.com/v1", alias="DOUBAO_BASE_URL")
     doubao_model: str = Field(default="doubao-seed-1-6", alias="DOUBAO_MODEL")
 
     glm_api_key: Optional[str] = Field(default=None, alias="GLM_API_KEY")
-    glm_base_url: str = Field(default="https://your-glm-or-company-gateway/v1", alias="GLM_BASE_URL")
+    glm_base_url: str = Field(default="https://glm-gateway.example.com/v1", alias="GLM_BASE_URL")
     glm_model: str = Field(default="glm-4-plus", alias="GLM_MODEL")
 
     gemini_api_key: Optional[str] = Field(default=None, alias="GEMINI_API_KEY")
-    gemini_base_url: str = Field(default="https://your-gemini-compatible-gateway/v1", alias="GEMINI_BASE_URL")
+    gemini_base_url: str = Field(default="https://gemini-gateway.example.com/v1", alias="GEMINI_BASE_URL")
     gemini_model: str = Field(default="gemini-2.0-flash", alias="GEMINI_MODEL")
 
     custom_api_key: Optional[str] = Field(default=None, alias="CUSTOM_API_KEY")
-    custom_base_url: str = Field(default="https://your-company-gateway/v1", alias="CUSTOM_BASE_URL")
+    custom_base_url: str = Field(default="https://llm-gateway.example.com/v1", alias="CUSTOM_BASE_URL")
     custom_model: str = Field(default="", alias="CUSTOM_MODEL")
 
     cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173", alias="CORS_ORIGINS")

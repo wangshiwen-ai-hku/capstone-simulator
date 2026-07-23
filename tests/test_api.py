@@ -62,7 +62,7 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(payload["dag"]["valid"])
         self.assertEqual(payload["metrics"]["task_count"], len(scene["tasks"]))
 
-    def test_workload_catalog_covers_three_classes_and_requested_modules(self):
+    def test_workload_catalog_covers_three_classes_and_configured_modules(self):
         response = self.client.get("/api/workload-catalog")
         self.assertEqual(response.status_code, 200)
         workloads = response.json()["workloads"]

@@ -110,7 +110,7 @@ def evaluate_constraints(
     problem: SchedulingProblem,
     plan: SchedulingPlan,
 ) -> tuple[ConstraintEvaluation, ...]:
-    """Evaluate policy bounds without weakening domain safety validation."""
+    """Evaluate policy bounds independently of domain safety validation."""
 
     evaluations: list[ConstraintEvaluation] = []
     for constraint in problem.policy.constraints:

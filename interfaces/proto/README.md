@@ -1,8 +1,9 @@
 # MARS protocol contracts
 
 `mars/v1/` contains transport-neutral, data-only Protocol Buffer contracts.
-They can be carried by gRPC, DDS, a partner middleware, files, or replay logs.
-No RPC service, generated stub, or transport implementation is defined here.
+They can be carried by gRPC, DDS, deployment-specific middleware, files, or
+replay logs. No RPC service, generated stub, or transport implementation is
+defined here.
 
 ## Contract boundaries
 

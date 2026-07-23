@@ -85,7 +85,7 @@ class ResourceClass(str, enum.Enum):
 class PlacementConstraints:
     """Declarative placement contract independent of business task labels.
 
-    ``TaskClass`` remains useful for reporting and legacy inputs. New scheduling
+    ``TaskClass`` remains available for reporting and legacy inputs. New scheduling
     decisions are governed by this contract so that adding a business category
     does not require another scheduler branch.
     """
