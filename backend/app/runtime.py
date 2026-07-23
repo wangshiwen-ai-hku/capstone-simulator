@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Lock
 from uuid import uuid4
 
-from mars.agents import SimulatedAgent
 from mars.coordinator import CentralCoordinator, CoordinatorReport
+from mars.runtime import InProcessRuntime
 
 from .mars_adapter import build_node_snapshots, build_node_specs, build_workflow
 from .scene_generator import build_deterministic_scene
@@ -26,7 +27,7 @@ class RuntimeRun:
 
 
 class LocalRuntimeService:
-    """Own one central scheduler and process-local simulated agent sessions."""
+    """Own one central scheduler and its process-local runtime adapter."""
 
     def __init__(self) -> None:
         self._lock = Lock()
@@ -45,7 +46,9 @@ class LocalRuntimeService:
                         seed=7,
                     )
                 )
-                self._coordinator = CentralCoordinator(_agents_for_scene(scene))
+                coordinator = CentralCoordinator(_runtime_for_scene(scene))
+                asyncio.run(coordinator.initialize_async())
+                self._coordinator = coordinator
             return self._runtime_view_locked()
 
     def status(self) -> dict[str, object]:
@@ -56,8 +59,7 @@ class LocalRuntimeService:
 
     def submit(self, request: RuntimeWorkflowRequest) -> dict[str, object]:
         _validate_demo_topology(request)
-        agents = _agents_for_scene(request.scene)
-        coordinator = CentralCoordinator(agents)
+        coordinator = CentralCoordinator(_runtime_for_scene(request.scene))
         workflow = build_workflow(request.scene)
         failure_ids: tuple[str, ...] = ()
         if request.inject_first_failure:
@@ -163,21 +165,16 @@ class LocalRuntimeService:
         return view
 
 
-def _agents_for_scene(scene) -> list[SimulatedAgent]:
+def _runtime_for_scene(scene) -> InProcessRuntime:
     specs = build_node_specs(scene)
-    snapshots = {item.node_id: item for item in build_node_snapshots(scene)}
-    agents = [
-        SimulatedAgent(
-            spec,
-            snapshots[spec.node_id],
-            max_concurrency=2 if spec.kind.value == "robot" else 4,
-        )
-        for spec in specs
-    ]
-    for agent in agents:
-        agent.register(0.0)
-        agent.heartbeat(0.0)
-    return agents
+    return InProcessRuntime(
+        specs,
+        build_node_snapshots(scene),
+        max_concurrency={
+            spec.node_id: 2 if spec.kind.value == "robot" else 4
+            for spec in specs
+        },
+    )
 
 
 def _validate_demo_topology(request: RuntimeWorkflowRequest) -> None:

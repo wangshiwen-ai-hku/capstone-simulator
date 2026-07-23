@@ -31,7 +31,7 @@ synthetic_workloads = load_default_synthetic_workloads()
 app = FastAPI(
     title="MARS Simulator API",
     description="Web adapter for DAG-aware MARS scheduling and benchmark simulation.",
-    version="0.3.0",
+    version=mars_version,
 )
 
 app.add_middleware(
@@ -78,8 +78,9 @@ def architecture():
         "system": "MARS",
         "core_version": mars_version,
         "workflow": "validated DAG with blocked/ready/running/terminal lifecycle",
-        "runtime": "central_scheduler_with_process_local_agents",
-        "transport_interfaces": ["in_memory"],
+        "runtime": "central_scheduler_with_async_runtime_port",
+        "runtime_adapters": ["in_process"],
+        "network_adapters": [],
         "task_classes": [
             {"id": task_class.value, "label": TASK_CLASS_LABELS[task_class]}
             for task_class in TaskClass

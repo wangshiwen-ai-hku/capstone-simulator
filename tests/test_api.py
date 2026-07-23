@@ -82,6 +82,18 @@ class ApiTests(unittest.TestCase):
             }.issubset(task_types)
         )
 
+    def test_architecture_exposes_one_runtime_boundary(self):
+        response = self.client.get("/api/architecture")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            payload["runtime"],
+            "central_scheduler_with_async_runtime_port",
+        )
+        self.assertEqual(payload["runtime_adapters"], ["in_process"])
+        self.assertEqual(payload["network_adapters"], [])
+        self.assertNotIn("transport_interfaces", payload)
+
     def test_local_runtime_bootstrap_submit_retry_and_result_flow(self):
         bootstrapped = self.client.post("/api/runtime/bootstrap")
         self.assertEqual(bootstrapped.status_code, 200)

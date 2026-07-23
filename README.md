@@ -1,16 +1,18 @@
 # MARS
 
-MARS is a transport-neutral central scheduler for multi-robot edge workflows.
-It contains the DAG model and placement policies, a process-local Agent runtime,
-a deterministic benchmark engine, a FastAPI adapter, and a React interface.
+MARS is a runtime-neutral central scheduler for multi-robot edge workflows.
+It contains the DAG model and placement policies, one asynchronous runtime
+contract, an in-process simulation adapter, a deterministic benchmark engine,
+a FastAPI adapter, and a React interface.
 
 The runnable architecture is:
 
 ```text
-React UI ──► FastAPI adapter ──► CentralCoordinator
-                                    ├── Simulated Orin Agent 1
-                                    ├── Simulated Orin Agent 2
-                                    └── Simulated edge Agent
+React UI ──► FastAPI adapter ──► CentralCoordinator ──► RuntimePort
+                                                        └── InProcessRuntime
+                                                            ├── Simulated Orin 1
+                                                            ├── Simulated Orin 2
+                                                            └── Simulated edge
 
                          └────► deterministic benchmark engine
 ```
@@ -21,8 +23,9 @@ resource reservation, assignment, typed Artifact transfer costing, completion,
 resource release, and retry. The same seed produces a repeatable run.
 
 Dependency direction is one way: `backend` imports `mars`; MARS does not import
-the web application. `AgentSession` isolates runtime operations from transport
-implementations.
+the web application. `CentralCoordinator` depends only on the aggregate,
+asynchronous `RuntimePort`. The in-process simulator is one implementation of
+that port.
 
 ## Implemented capabilities
 
@@ -124,12 +127,12 @@ mars/
   models.py                    tasks, ports, data edges, artifacts, nodes, assignments
   dag.py                       validation, readiness, results, failure propagation
   scheduler.py                 placement constraints, costing, locality, critical path
-  coordinator.py               central Agent orchestration, attempts, retry, report
-  agents/simulated.py          AgentSession and process-local simulated executor
+  coordinator.py               central runtime orchestration, attempts, retry, report
+  runtime/base.py              sole asynchronous control-plane runtime contract
+  runtime/inprocess.py         process-local simulated runtime adapter
   engine.py                    deterministic algorithm benchmark engine
   synthetic_workloads.py       replaceable fake workload registry and sampler
   profiling.py                 compact execution-profile catalog
-  transports/                  transport protocol and in-memory adapter
 backend/app/
   main.py                      FastAPI endpoints
   runtime.py                   background local-runtime service and run store
@@ -137,7 +140,7 @@ backend/app/
   scene_generator.py           deterministic typed-DAG generation
 frontend/                      React benchmark and Agent runtime UI
 configs/mars/                  synthetic workload and profile configuration
-tests/                         core, runtime, transport, adapter, and API tests
+tests/                         core, runtime contract, adapter, and API tests
 ```
 
 ## API
@@ -151,7 +154,7 @@ Benchmark path:
 - `POST /api/generate-scene`
 - `POST /api/simulate`
 
-Central Agent runtime:
+Central runtime:
 
 - `POST /api/runtime/bootstrap`
 - `GET /api/runtime`
@@ -162,8 +165,9 @@ Central Agent runtime:
 
 ## Runtime boundary
 
-`AgentSession` is the coordinator-facing contract for registration, heartbeat,
-capability checks, reservation, execution, completion, and release.
-`SimulatedAgent` implements the contract in the API process. No network
-middleware is assumed. Network adapters must implement the same contract and
-provide task invocation, telemetry, and data transport behavior.
+`RuntimePort` is the only coordinator-facing contract. It supplies global node
+inventory and heartbeats, accepts attempt-scoped dispatch commands, returns
+dispatch-correlated completions, supports cancellation, and reports runtime
+state. `InProcessRuntime` implements the contract with virtual time. Future
+gRPC, DDS, or partner adapters implement the same contract; the coordinator
+does not depend on their communication mechanism.

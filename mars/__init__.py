@@ -1,4 +1,4 @@
-"""MARS scheduling core used by the API, simulator, and transports."""
+"""MARS scheduling core used by the API and runtime adapters."""
 
 from .dag import DagValidationError, TaskManager, validate_workflow
 from .coordinator import CentralCoordinator, CoordinatorReport
@@ -18,6 +18,7 @@ from .models import (
     WorkflowSpec,
     WorkflowState,
 )
+from .runtime import InProcessRuntime, RuntimePort
 
 __all__ = [
     "ArtifactRef",
@@ -28,9 +29,11 @@ __all__ = [
     "DagValidationError",
     "ExecutionMode",
     "FailurePolicy",
+    "InProcessRuntime",
     "NodeKind",
     "NodeSnapshot",
     "NodeSpec",
+    "RuntimePort",
     "TaskClass",
     "TaskInstance",
     "TaskManager",
@@ -41,4 +44,4 @@ __all__ = [
     "validate_workflow",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

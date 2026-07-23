@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
+from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from typing import Iterable
 
-from .agents import AgentSession
 from .dag import TaskManager
 from .models import (
     ArtifactRef,
@@ -18,6 +19,13 @@ from .models import (
     WorkflowSpec,
 )
 from .profiling import ExecutionProfile, ProfileCatalog
+from .runtime import (
+    AttemptCompletion,
+    DispatchAck,
+    DispatchCommand,
+    RuntimeInventory,
+    RuntimePort,
+)
 from .scheduler import choose_assignment, critical_path
 from .synthetic_workloads import (
     ExecutionTarget,
@@ -80,37 +88,48 @@ class CoordinatorReport:
 
 
 class CentralCoordinator:
-    """Register agents and execute one DAG through the central control plane.
-
-    The implementation advances a virtual clock rather than sleeping. Agent
-    sessions still receive explicit reservations, inputs, completions, and
-    resource-release calls. The session contract is independent of its process
-    or network implementation.
-    """
+    """Execute one DAG through a single asynchronous runtime boundary."""
 
     def __init__(
         self,
-        agents: Iterable[AgentSession],
+        runtime: RuntimePort,
         *,
         workload_catalog: SyntheticWorkloadCatalog | None = None,
     ) -> None:
-        self.agents = tuple(agents)
-        self.agent_by_id = {agent.node_spec.node_id: agent for agent in self.agents}
-        if not self.agents:
-            raise ValueError("at least one agent is required")
-        if len(self.agent_by_id) != len(self.agents):
-            raise ValueError("agent node ids must be unique")
+        if not isinstance(runtime, RuntimePort):
+            raise TypeError("runtime must implement RuntimePort")
+        self.runtime = runtime
         self.workload_catalog = workload_catalog or load_default_synthetic_workloads()
         self._events: list[RuntimeEvent] = []
         self._sequence = 0
+        self._started = False
+        self._run_started = False
+        self._runtime_loop: asyncio.AbstractEventLoop | None = None
+        self._runtime_view: dict[str, object] = {
+            "scheduler_id": "mars-central",
+            "status": "initializing",
+            "agent_count": 0,
+            "agents": [],
+        }
 
     def describe(self) -> dict[str, object]:
-        return {
-            "scheduler_id": "mars-central",
-            "status": "online",
-            "agent_count": len(self.agents),
-            "agents": [agent.describe(0.0) for agent in self.agents],
-        }
+        """Return the latest cached view without touching the runtime adapter."""
+
+        return deepcopy(self._runtime_view)
+
+    async def describe_async(self) -> dict[str, object]:
+        return self.describe()
+
+    async def initialize_async(self) -> dict[str, object]:
+        self._bind_runtime_loop()
+        if not self._started:
+            inventory = await self.runtime.start(0.0)
+            self._started = True
+            self._update_runtime_view(
+                inventory,
+                await self.runtime.describe(0.0),
+            )
+        return self.describe()
 
     def run(
         self,
@@ -122,29 +141,68 @@ class CentralCoordinator:
         fail_first_task_ids: Iterable[str] = (),
         deterministic: bool = True,
     ) -> CoordinatorReport:
+        """Synchronous adapter used by the background worker and tests."""
+
+        return asyncio.run(
+            self.run_async(
+                workflow,
+                algorithm=algorithm,
+                seed=seed,
+                max_attempts=max_attempts,
+                fail_first_task_ids=fail_first_task_ids,
+                deterministic=deterministic,
+            )
+        )
+
+    async def run_async(
+        self,
+        workflow: WorkflowSpec,
+        *,
+        algorithm: str = "dag_deadline",
+        seed: int = 7,
+        max_attempts: int = 2,
+        fail_first_task_ids: Iterable[str] = (),
+        deterministic: bool = True,
+    ) -> CoordinatorReport:
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least one")
+        if self._run_started:
+            raise RuntimeError(
+                "CentralCoordinator is one-shot; create a new instance per workflow run"
+            )
+        self._bind_runtime_loop()
+        self._run_started = True
         self._events = []
         self._sequence = 0
         current_time_ms = 0.0
         failed_once = frozenset(fail_first_task_ids)
 
-        for agent in self.agents:
-            agent.reset()
-            agent.register(current_time_ms)
-            heartbeat = agent.heartbeat(current_time_ms)
+        if self._started:
+            inventory = await self.runtime.inventory(current_time_ms)
+        else:
+            inventory = await self.runtime.start(current_time_ms)
+            self._started = True
+        self._update_runtime_view(
+            inventory,
+            await self.runtime.describe(current_time_ms),
+        )
+        heartbeat_by_id = {
+            heartbeat.agent_id: heartbeat for heartbeat in inventory.heartbeats
+        }
+        for node in inventory.nodes:
+            heartbeat = heartbeat_by_id[node.node_id]
             self._emit(
                 current_time_ms,
                 "agent_registered",
-                f"{agent.node_spec.node_id} registered and heartbeat {heartbeat.sequence} received",
+                f"{node.node_id} registered and heartbeat {heartbeat.sequence} received",
                 workflow.workflow_id,
-                agent_id=agent.node_spec.node_id,
+                agent_id=node.node_id,
             )
 
         manager = TaskManager()
         index = manager.submit(workflow)
         critical_ids, critical_path_ms, critical_tail = critical_path(workflow.tasks, index)
-        node_specs = {agent.node_spec.node_id: agent.node_spec for agent in self.agents}
+        node_specs = {node.node_id: node for node in inventory.nodes}
         profiles = _profile_catalog(self.workload_catalog)
         sampler = SyntheticSampler(
             self.workload_catalog,
@@ -197,12 +255,13 @@ class CentralCoordinator:
 
             for attempt_no in range(1, max_attempts + 1):
                 attempt_id = f"{workflow.workflow_id}:{task.task_id}:attempt:{attempt_no}"
+                inventory = await self.runtime.inventory(current_time_ms)
+                node_specs = {node.node_id: node for node in inventory.nodes}
+                snapshots = inventory.snapshots
                 node_available = {node_id: current_time_ms for node_id in node_specs}
                 for node_id in failed_nodes:
-                    node_available[node_id] = current_time_ms + 1_000_000_000.0
-                snapshots = {
-                    agent.node_spec.node_id: agent.snapshot for agent in self.agents
-                }
+                    if node_id in node_available:
+                        node_available[node_id] = current_time_ms + 1_000_000_000.0
                 assignment = choose_assignment(
                     task,
                     algorithm=algorithm,
@@ -265,45 +324,12 @@ class CentralCoordinator:
                     task_finished = True
                     break
 
-                agent = self.agent_by_id[assignment.target_node_id]
-                can_execute, reject_reason = agent.can_execute(task)
-                reservation = agent.reserve(
-                    task,
-                    attempt_id,
-                    assignment.estimated_start_ms,
-                ) if can_execute else None
-                if reservation is None:
-                    failed_nodes.add(assignment.target_node_id)
-                    self._emit(
-                        current_time_ms,
-                        "dispatch_rejected",
-                        f"{assignment.target_node_id} rejected {task.task_id}: {reject_reason or 'resources_unavailable'}",
-                        workflow.workflow_id,
-                        task_id=task.task_id,
-                        attempt_id=attempt_id,
-                        agent_id=assignment.target_node_id,
-                    )
-                    if (
-                        len(failed_nodes) < len(self.agents)
-                        and attempt_no < max_attempts
-                    ):
-                        continue
-                    manager.complete(
-                        task.task_id,
-                        ok=False,
-                        finished_time_ms=current_time_ms,
-                        dropped=True,
-                        error_code=reject_reason or "resources_unavailable",
-                    )
-                    task_finished = True
-                    break
-
                 sampled_failure = False
                 error_code = ""
                 try:
                     target = (
                         ExecutionTarget.EDGE
-                        if agent.node_spec.kind is NodeKind.EDGE
+                        if node_specs[assignment.target_node_id].kind is NodeKind.EDGE
                         else ExecutionTarget.ORIN
                     )
                     sample = sampler.sample(task.spec.task_type, target)
@@ -333,50 +359,110 @@ class CentralCoordinator:
                 injected_failure = attempt_no == 1 and task.task_id in failed_once
                 if injected_failure:
                     error_code = "injected_first_attempt_failure"
+                try:
+                    ack = await self.runtime.dispatch(
+                        DispatchCommand(
+                            attempt_id=attempt_id,
+                            attempt_no=attempt_no,
+                            task=task,
+                            assignment=assignment,
+                            input_artifacts=input_artifacts,
+                            seed=seed,
+                            inject_failure=injected_failure or sampled_failure,
+                        )
+                    )
+                except BaseException:
+                    await _best_effort_cancel(
+                        self.runtime,
+                        attempt_id,
+                        "dispatch_failed",
+                        current_time_ms,
+                    )
+                    raise
+                if not ack.accepted:
+                    failed_nodes.add(assignment.target_node_id)
+                    reject_reason = ack.error_code or "dispatch_rejected"
+                    self._emit(
+                        current_time_ms,
+                        "dispatch_rejected",
+                        f"{assignment.target_node_id} rejected {task.task_id}: {reject_reason}",
+                        workflow.workflow_id,
+                        task_id=task.task_id,
+                        attempt_id=attempt_id,
+                        agent_id=assignment.target_node_id,
+                    )
+                    if (
+                        len(failed_nodes) < len(node_specs)
+                        and attempt_no < max_attempts
+                    ):
+                        continue
+                    manager.complete(
+                        task.task_id,
+                        ok=False,
+                        finished_time_ms=current_time_ms,
+                        dropped=True,
+                        error_code=reject_reason,
+                    )
+                    task_finished = True
+                    break
+
+                try:
+                    _validate_dispatch_ack(
+                        ack,
+                        attempt_id=attempt_id,
+                        task_id=task.task_id,
+                        agent_id=assignment.target_node_id,
+                    )
+                except BaseException:
+                    await _best_effort_cancel(
+                        self.runtime,
+                        attempt_id,
+                        "dispatch_ack_mismatch",
+                        current_time_ms,
+                    )
+                    raise
                 self._emit(
                     current_time_ms,
                     "attempt_dispatched",
-                    f"{task.task_id} attempt {attempt_no} dispatched to {agent.node_spec.node_id}",
+                    f"{task.task_id} attempt {attempt_no} dispatched to {ack.agent_id}",
                     workflow.workflow_id,
                     task_id=task.task_id,
                     attempt_id=attempt_id,
-                    agent_id=agent.node_spec.node_id,
+                    agent_id=ack.agent_id,
                 )
-                execution = agent.execute(
-                    task,
-                    assignment,
-                    reservation,
-                    input_artifacts,
-                    seed=seed,
-                    attempt_no=attempt_no,
-                    inject_failure=injected_failure or sampled_failure,
-                )
-                finish_time_ms = (
-                    current_time_ms
-                    + assignment.communication_ms
-                    + execution.compute_time_ms
-                )
-                agent.release(
-                    reservation.reservation_id,
-                    finish_time_ms,
-                    ok=execution.ok,
-                )
-                agent.heartbeat(finish_time_ms)
+                try:
+                    execution = await self.runtime.receive_completion(ack.dispatch_id)
+                    _validate_completion(
+                        execution,
+                        dispatch_id=ack.dispatch_id,
+                        attempt_id=attempt_id,
+                        task_id=task.task_id,
+                        agent_id=ack.agent_id,
+                    )
+                except BaseException:
+                    await _best_effort_cancel(
+                        self.runtime,
+                        attempt_id,
+                        "completion_receive_failed",
+                        current_time_ms,
+                    )
+                    raise
+                finish_time_ms = execution.finished_time_ms
                 attempt_transfer_mb = sum(
                     artifact.size_mb
                     for artifact in input_artifacts
-                    if artifact.node_id != agent.node_spec.node_id
+                    if artifact.node_id != execution.agent_id
                 )
                 if (
                     not input_artifacts
-                    and agent.node_spec.node_id != task.source_node_id
+                    and execution.agent_id != task.source_node_id
                 ):
                     attempt_transfer_mb = task.spec.input_size_mb
                 attempt = AttemptRecord(
                     attempt_id=attempt_id,
                     attempt_no=attempt_no,
                     state=(TaskState.SUCCEEDED.value if execution.ok else TaskState.FAILED.value),
-                    target_node_id=agent.node_spec.node_id,
+                    target_node_id=execution.agent_id,
                     mode=assignment.execution_mode.value,
                     start_time_ms=round(current_time_ms, 4),
                     finish_time_ms=round(finish_time_ms, 4),
@@ -394,7 +480,7 @@ class CentralCoordinator:
                 transfer_time_ms += assignment.communication_ms
                 total_energy_j += execution.energy_j
                 current_time_ms = finish_time_ms
-                target_by_task[task.task_id] = agent.node_spec.node_id
+                target_by_task[task.task_id] = execution.agent_id
                 mode_by_task[task.task_id] = assignment.execution_mode.value
 
                 if execution.ok:
@@ -410,11 +496,11 @@ class CentralCoordinator:
                     self._emit(
                         finish_time_ms,
                         "attempt_succeeded",
-                        f"{task.task_id} attempt {attempt_no} completed on {agent.node_spec.node_id}",
+                        f"{task.task_id} attempt {attempt_no} completed on {execution.agent_id}",
                         workflow.workflow_id,
                         task_id=task.task_id,
                         attempt_id=attempt_id,
-                        agent_id=agent.node_spec.node_id,
+                        agent_id=execution.agent_id,
                     )
                     for output in execution.outputs:
                         self._emit(
@@ -424,7 +510,7 @@ class CentralCoordinator:
                             workflow.workflow_id,
                             task_id=task.task_id,
                             attempt_id=attempt_id,
-                            agent_id=agent.node_spec.node_id,
+                            agent_id=execution.agent_id,
                         )
                     task_finished = True
                     break
@@ -432,13 +518,13 @@ class CentralCoordinator:
                 self._emit(
                     finish_time_ms,
                     "attempt_failed",
-                    f"{task.task_id} attempt {attempt_no} failed on {agent.node_spec.node_id}",
+                    f"{task.task_id} attempt {attempt_no} failed on {execution.agent_id}",
                     workflow.workflow_id,
                     task_id=task.task_id,
                     attempt_id=attempt_id,
-                    agent_id=agent.node_spec.node_id,
+                    agent_id=execution.agent_id,
                 )
-                failed_nodes.add(agent.node_spec.node_id)
+                failed_nodes.add(execution.agent_id)
                 if attempt_no < max_attempts:
                     self._emit(
                         finish_time_ms,
@@ -513,6 +599,12 @@ class CentralCoordinator:
             "safety_violation_count": safety_violations,
             "critical_path_ms": round(critical_path_ms, 4),
         }
+        final_inventory = await self.runtime.inventory(makespan_ms)
+        agent_report = await self.runtime.describe(makespan_ms)
+        self._update_runtime_view(
+            final_inventory,
+            agent_report,
+        )
         return CoordinatorReport(
             workflow={
                 "workflow_id": workflow.workflow_id,
@@ -525,11 +617,33 @@ class CentralCoordinator:
             },
             metrics=metrics,
             task_results=tuple(task_results),
-            agents=tuple(agent.describe(makespan_ms) for agent in self.agents),
+            agents=agent_report,
             data_edges=tuple(asdict(edge) for edge in workflow.data_edges),
             events=tuple(self._events),
             logs=tuple(event.message for event in self._events),
         )
+
+    def _update_runtime_view(
+        self,
+        inventory: RuntimeInventory,
+        agents: tuple[dict[str, object], ...],
+    ) -> None:
+        self._runtime_view = {
+            "scheduler_id": "mars-central",
+            "status": "online",
+            "agent_count": len(inventory.nodes),
+            "agents": list(agents),
+        }
+
+    def _bind_runtime_loop(self) -> None:
+        current_loop = asyncio.get_running_loop()
+        if self._runtime_loop is None:
+            self._runtime_loop = current_loop
+            return
+        if self._runtime_loop is not current_loop:
+            raise RuntimeError(
+                "CentralCoordinator and its RuntimePort must remain on one event loop"
+            )
 
     def _emit(
         self,
@@ -555,6 +669,52 @@ class CentralCoordinator:
                 agent_id=agent_id,
             )
         )
+
+
+async def _best_effort_cancel(
+    runtime: RuntimePort,
+    attempt_id: str,
+    reason: str,
+    now_ms: float,
+) -> None:
+    try:
+        await runtime.cancel(attempt_id, reason, now_ms)
+    except BaseException:
+        pass
+
+
+def _validate_dispatch_ack(
+    ack: DispatchAck,
+    *,
+    attempt_id: str,
+    task_id: str,
+    agent_id: str,
+) -> None:
+    expected = (attempt_id, task_id, agent_id)
+    actual = (ack.attempt_id, ack.task_id, ack.agent_id)
+    if not ack.dispatch_id or actual != expected:
+        raise RuntimeError(
+            f"runtime returned mismatched dispatch acknowledgement: {actual!r}"
+        )
+
+
+def _validate_completion(
+    completion: AttemptCompletion,
+    *,
+    dispatch_id: str,
+    attempt_id: str,
+    task_id: str,
+    agent_id: str,
+) -> None:
+    expected = (dispatch_id, attempt_id, task_id, agent_id)
+    actual = (
+        completion.dispatch_id,
+        completion.attempt_id,
+        completion.task_id,
+        completion.agent_id,
+    )
+    if actual != expected:
+        raise RuntimeError(f"runtime returned mismatched completion: {actual!r}")
 
 
 def _input_artifacts(manager: TaskManager, task_id: str) -> tuple[ArtifactRef, ...]:
