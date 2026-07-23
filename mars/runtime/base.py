@@ -11,7 +11,9 @@ from ..models import (
     NodeSnapshot,
     NodeSpec,
     TaskInstance,
+    TransferReservation,
 )
+from ..optimizers.base import PlannedResourceReservation
 
 
 @dataclass(frozen=True)
@@ -72,9 +74,101 @@ class DispatchCommand:
     attempt_no: int
     task: TaskInstance
     assignment: Assignment
+    resource_reservation: PlannedResourceReservation
+    transfer_reservations: tuple[TransferReservation, ...]
     input_artifacts: tuple[ArtifactRef, ...]
     seed: int
     inject_failure: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate the exact, already-approved plan fragment being committed."""
+
+        assignment = self.assignment
+        resource = self.resource_reservation
+        if not assignment.epoch_id or not assignment.optimizer_id:
+            raise ValueError(
+                "dispatch assignment must come from a validated scheduling plan"
+            )
+        if assignment.task_id != self.task.task_id:
+            raise ValueError("dispatch task and assignment must match")
+        if (
+            resource.task_id != assignment.task_id
+            or resource.node_id != assignment.target_node_id
+            or resource.epoch_id != assignment.epoch_id
+        ):
+            raise ValueError(
+                "dispatch resource reservation must match its assignment"
+            )
+        if abs(
+            resource.finish_ms
+            - resource.start_ms
+            - assignment.compute_ms
+        ) > 1e-6:
+            raise ValueError(
+                "dispatch resource reservation must match planned compute time"
+            )
+        if abs(
+            resource.finish_ms - assignment.estimated_finish_ms
+        ) > 1e-6:
+            raise ValueError(
+                "dispatch resource reservation must match assignment finish"
+            )
+
+        transfer_ids = tuple(
+            reservation.reservation_id
+            for reservation in self.transfer_reservations
+        )
+        if len(transfer_ids) != len(set(transfer_ids)):
+            raise ValueError(
+                "dispatch transfer reservation ids must be unique"
+            )
+        if any(
+            reservation.task_id != assignment.task_id
+            or reservation.epoch_id != assignment.epoch_id
+            for reservation in self.transfer_reservations
+        ):
+            raise ValueError(
+                "dispatch transfer reservations must match their assignment"
+            )
+        planned_links = tuple(
+            dict.fromkeys(
+                link_id
+                for reservation in self.transfer_reservations
+                for link_id in reservation.path_link_ids
+            )
+        )
+        if assignment.transfer_link_ids != planned_links:
+            raise ValueError(
+                "dispatch transfer reservations must match assignment links"
+            )
+        communication_ms = sum(
+            reservation.finish_ms - reservation.start_ms
+            for reservation in self.transfer_reservations
+        )
+        if abs(communication_ms - assignment.communication_ms) > 1e-6:
+            raise ValueError(
+                "dispatch transfer reservations must match planned communication"
+            )
+        if self.transfer_reservations and resource.start_ms + 1e-9 < max(
+            reservation.finish_ms
+            for reservation in self.transfer_reservations
+        ):
+            raise ValueError(
+                "dispatch compute reservation starts before transfers finish"
+            )
+        expected_start = min(
+            (
+                resource.start_ms,
+                *(
+                    reservation.start_ms
+                    for reservation in self.transfer_reservations
+                ),
+            )
+        )
+        if abs(expected_start - assignment.estimated_start_ms) > 1e-6:
+            raise ValueError(
+                "dispatch reservations must match assignment start"
+            )
 
 
 @dataclass(frozen=True)

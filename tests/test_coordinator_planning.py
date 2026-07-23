@@ -19,6 +19,7 @@ from mars.optimizers import (
     SchedulingPlan,
 )
 from mars.runtime import InProcessRuntime
+from mars.synthetic_workloads import load_default_synthetic_workloads
 
 
 def _inventory() -> tuple[list[NodeSpec], list[NodeSnapshot]]:
@@ -84,6 +85,7 @@ class _TrackingOptimizer:
     def __init__(self) -> None:
         self.epochs: list[tuple[str, ...]] = []
         self.link_inventories: list[tuple[str, ...]] = []
+        self.plans: list[SchedulingPlan] = []
 
     def solve(self, problem):
         self.epochs.append(
@@ -93,7 +95,7 @@ class _TrackingOptimizer:
             tuple(link.link_id for link in problem.link_specs)
         )
         baseline = HeuristicOptimizer("greedy_cost").solve(problem)
-        return replace(
+        plan = replace(
             baseline,
             optimizer_id=self.optimizer_id,
             assignments=tuple(
@@ -105,6 +107,8 @@ class _TrackingOptimizer:
                 for assignment in baseline.assignments
             ),
         )
+        self.plans.append(plan)
+        return plan
 
 
 class _DeferredOptimizer:
@@ -119,6 +123,16 @@ class _DeferredOptimizer:
                 task.task_id for task in problem.epoch.ready_tasks
             ),
         )
+
+
+class _RecordingRuntime(InProcessRuntime):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.dispatched_commands = []
+
+    async def dispatch(self, command):
+        self.dispatched_commands.append(command)
+        return await super().dispatch(command)
 
 
 def test_coordinator_plans_the_whole_ready_batch_before_commit() -> None:
@@ -149,6 +163,64 @@ def test_coordinator_plans_the_whole_ready_batch_before_commit() -> None:
         event.event_type == "scheduling_epoch_planned"
         for event in report.events
     )
+
+
+def test_coordinator_dispatches_the_exact_validated_assignment() -> None:
+    nodes, snapshots = _inventory()
+    runtime = _RecordingRuntime(nodes, snapshots)
+    optimizer = _TrackingOptimizer()
+    registry = OptimizerRegistry()
+    registry.register(optimizer)
+    workload = load_default_synthetic_workloads().get(
+        "object_detection"
+    )
+    spec = replace(
+        workload.to_task_spec(),
+        placement_constraints=PlacementConstraints(
+            pinned_node_id="edge",
+            allowed_node_kinds=(NodeKind.EDGE,),
+        ),
+    )
+    task = TaskInstance(
+        "detect",
+        "wf",
+        "detect",
+        "robot",
+        spec,
+        deadline_time_ms=10_000,
+    )
+
+    report = CentralCoordinator(
+        runtime,
+        optimizer_registry=registry,
+    ).run(
+        WorkflowSpec("wf", (task,)),
+        algorithm="tracking",
+    )
+
+    assert report.workflow["state"] == "succeeded"
+    validated_assignment = optimizer.plans[0].assignments[0]
+    validated_resource_reservation = (
+        optimizer.plans[0].node_reservations[0]
+    )
+    validated_transfer_reservations = (
+        optimizer.plans[0].transfer_reservations
+    )
+    dispatch = runtime.dispatched_commands[0]
+    dispatched_assignment = dispatch.assignment
+    assert dispatched_assignment is validated_assignment
+    assert dispatch.resource_reservation is validated_resource_reservation
+    assert validated_transfer_reservations
+    assert dispatch.transfer_reservations == validated_transfer_reservations
+    assert all(
+        dispatched is validated
+        for dispatched, validated in zip(
+            dispatch.transfer_reservations,
+            validated_transfer_reservations,
+        )
+    )
+    assert dispatched_assignment.compute_ms == 22
+    assert dispatched_assignment.estimated_finish_ms > 22
 
 
 def test_explicit_empty_topology_is_respected_by_runtime_path() -> None:

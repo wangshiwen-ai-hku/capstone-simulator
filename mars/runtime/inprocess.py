@@ -500,13 +500,28 @@ class InProcessRuntime:
         can_execute, reason = agent.can_execute(task)
         if not can_execute:
             return self._rejected_ack(command, node_id, reason)
+        planned_demand = command.resource_reservation.demand
+        expected_demand = task_resource_demand(task, agent.node_spec)
+        if any(
+            abs(planned - expected) > 1e-9
+            for planned, expected in zip(
+                (
+                    planned_demand.cpu_units,
+                    planned_demand.gpu_units,
+                    planned_demand.memory_gb,
+                ),
+                expected_demand,
+            )
+        ):
+            return self._rejected_ack(
+                command,
+                node_id,
+                "resource_reservation_mismatch",
+            )
         reservation = agent.reserve(
             task,
             command.attempt_id,
-            (
-                assignment.estimated_start_ms
-                + assignment.communication_ms
-            ),
+            command.resource_reservation.start_ms,
         )
         if reservation is None:
             return self._rejected_ack(
@@ -540,8 +555,7 @@ class InProcessRuntime:
             agent_id=node_id,
             ok=execution.ok,
             finished_time_ms=(
-                assignment.estimated_start_ms
-                + assignment.communication_ms
+                command.resource_reservation.start_ms
                 + execution.compute_time_ms
             ),
             compute_time_ms=execution.compute_time_ms,

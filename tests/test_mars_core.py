@@ -17,6 +17,7 @@ from mars.models import (
     TaskSpec,
     TaskState,
     WorkflowSpec,
+    infer_task_class,
 )
 from mars.scheduler import allowed_nodes, estimate_candidate
 from mars.profiling import ExecutionProfile, ProfileCatalog, load_default_catalog
@@ -431,6 +432,20 @@ class TaskManagerTests(unittest.TestCase):
 
 
 class PlacementTests(unittest.TestCase):
+    def test_documented_realtime_task_names_infer_offloadable_class(self):
+        task_types = (
+            "localization",
+            "environment_understanding",
+            "semantic_segmentation",
+            "local_planning",
+        )
+        for task_type in task_types:
+            with self.subTest(task_type=task_type):
+                self.assertIs(
+                    infer_task_class(task_type),
+                    TaskClass.REALTIME_OFFLOADABLE,
+                )
+
     def test_local_safety_can_only_run_on_source_robot(self):
         candidates = allowed_nodes(
             task("avoid", TaskClass.LOCAL_SAFETY),

@@ -147,6 +147,28 @@ class ApiTests(unittest.TestCase):
         self.assertIn("attempt_dispatched", event_types)
         self.assertIn("retry_scheduled", event_types)
 
+    def test_incompatible_scene_is_rejected_only_by_local_runtime_demo(self):
+        scene = self.client.post(
+            "/api/generate-scene",
+            json={"robot_count": 3, "edge_count": 2, "use_llm": False, "seed": 31},
+        ).json()
+
+        simulated = self.client.post(
+            "/api/simulate",
+            json={"scene": scene, "algorithm": "dag_deadline", "seed": 31},
+        )
+        self.assertEqual(simulated.status_code, 200)
+
+        runtime = self.client.post(
+            "/api/runtime/workflows",
+            json={"scene": scene, "algorithm": "dag_deadline", "seed": 31},
+        )
+        self.assertEqual(runtime.status_code, 422)
+        self.assertEqual(
+            runtime.json()["detail"],
+            "the local runtime demo requires exactly two Orin robot nodes and one edge node",
+        )
+
 
 class LlmFallbackTests(unittest.TestCase):
     def test_invalid_llm_dag_falls_back_to_valid_deterministic_scene(self):

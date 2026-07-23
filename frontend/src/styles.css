@@ -111,6 +111,9 @@ h1 {
   position: sticky;
   top: 32px;
   height: fit-content;
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .controls h2 {
@@ -263,6 +266,10 @@ button.runtime-run { margin-top: 12px; }
   color: var(--text-tertiary);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.control-note.warning {
+  color: var(--yellow);
 }
 
 button:disabled {
@@ -696,7 +703,12 @@ tr:hover td {
 
 @media (max-width: 1024px) {
   .layout { grid-template-columns: 1fr; gap: 24px; }
-  .controls { position: static; padding: 24px; }
+  .controls {
+    position: static;
+    max-height: none;
+    overflow-y: visible;
+    padding: 24px;
+  }
   .hero { flex-direction: column; gap: 16px; margin-bottom: 32px; }
   .app-shell { padding: 20px; }
   .runtime-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }

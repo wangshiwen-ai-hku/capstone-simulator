@@ -97,7 +97,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
     factor = DIFFICULTY_FACTOR[req.difficulty]
     scene_id = f"scene_{req.scenario_type.value}_{req.seed:04d}"
     scene_name = req.custom_scene or SCENE_TEXT[req.scenario_type.value]
-    
+
     logger.info(f"Building deterministic scene '{scene_id}' (type={req.scenario_type.value}, difficulty={req.difficulty.value}, robots={req.robot_count}, edges={req.edge_count})")
 
     nodes: List[NodeSpec] = []

@@ -543,10 +543,14 @@ def infer_task_class(task_type: str) -> TaskClass:
     if normalized in {"obstacle_avoidance", "emergency_stop", "local_control"}:
         return TaskClass.LOCAL_SAFETY
     if normalized in {
+        "localization",
+        "environment_understanding",
         "object_detection",
         "image_classification",
         "segmentation",
+        "semantic_segmentation",
         "path_planning",
+        "local_planning",
         "result_verification",
         "yolo_inference",
     }:

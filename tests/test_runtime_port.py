@@ -17,19 +17,19 @@ from mars.models import (
     WorkflowSpec,
     task_resource_demand,
 )
-from mars.optimizers import SchedulingEpoch
+from mars.optimizers import (
+    PlannedResourceReservation,
+    ResourceDemand,
+    SchedulingEpoch,
+)
 from mars.runtime import DispatchCommand, InProcessRuntime, RuntimePort
 from mars.scheduler import build_scheduling_problem, plan_scheduling_epoch
 
 from tests.test_mars_core import task
 
 
-def _runtime(
-    *,
-    online: bool = True,
-    runtime_type: type[InProcessRuntime] = InProcessRuntime,
-) -> InProcessRuntime:
-    spec = NodeSpec(
+def _node_spec() -> NodeSpec:
+    return NodeSpec(
         "robot_1",
         NodeKind.ROBOT,
         1,
@@ -40,6 +40,14 @@ def _runtime(
         architecture="jetson-orin",
         capabilities=("gpu",),
     )
+
+
+def _runtime(
+    *,
+    online: bool = True,
+    runtime_type: type[InProcessRuntime] = InProcessRuntime,
+) -> InProcessRuntime:
+    spec = _node_spec()
     return runtime_type(
         (spec,),
         (NodeSnapshot("robot_1", online=online),),
@@ -98,17 +106,30 @@ def _command(
         "robot_1",
         ExecutionMode.LOCAL,
         0,
-        10,
+        5,
         5,
         0,
         1,
         "test",
+        optimizer_id="test",
+        epoch_id="test-epoch",
     )
+    demand = ResourceDemand(*task_resource_demand(item, _node_spec()))
     return DispatchCommand(
         attempt_id=attempt_id,
         attempt_no=attempt_no,
         task=item,
         assignment=assignment,
+        resource_reservation=PlannedResourceReservation(
+            reservation_id=f"plan:test-epoch:yolo:{attempt_id}",
+            epoch_id="test-epoch",
+            task_id="yolo",
+            node_id="robot_1",
+            start_ms=0,
+            finish_ms=5,
+            demand=demand,
+        ),
+        transfer_reservations=(),
         input_artifacts=(),
         seed=7,
     )
@@ -189,6 +210,8 @@ class RuntimePortTests(unittest.IsolatedAsyncioTestCase):
                 attempt_no=1,
                 task=item,
                 assignment=plan.assignments[0],
+                resource_reservation=plan.node_reservations[0],
+                transfer_reservations=plan.transfer_reservations,
                 input_artifacts=(),
                 seed=7,
             )
@@ -209,6 +232,48 @@ class RuntimePortTests(unittest.IsolatedAsyncioTestCase):
             node.memory_gb - expected[2],
         )
         await runtime.receive_completion(ack.dispatch_id)
+
+    async def test_dispatch_command_rejects_a_modified_plan_fragment(self):
+        command = _command()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "planned compute time",
+        ):
+            replace(
+                command,
+                assignment=replace(
+                    command.assignment,
+                    compute_ms=command.assignment.compute_ms + 1,
+                ),
+            )
+
+    async def test_runtime_rejects_a_forged_resource_demand(self):
+        runtime = _runtime()
+        await runtime.start(0.0)
+        command = _command()
+        forged = replace(
+            command,
+            resource_reservation=replace(
+                command.resource_reservation,
+                demand=replace(
+                    command.resource_reservation.demand,
+                    cpu_units=0.9,
+                ),
+            ),
+        )
+
+        ack = await runtime.dispatch(forged)
+
+        self.assertFalse(ack.accepted)
+        self.assertEqual(
+            ack.error_code,
+            "resource_reservation_mismatch",
+        )
+        self.assertEqual(
+            (await runtime.describe(0.0))[0]["active_reservations"],
+            0,
+        )
 
     async def test_concurrency_override_is_advertised_consistently(self):
         node = NodeSpec(

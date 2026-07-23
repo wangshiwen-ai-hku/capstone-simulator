@@ -64,6 +64,30 @@ function formatMetric(key: string, value: number) {
   return `${value}`;
 }
 
+function runtimeDemoCompatibilityIssue(
+  scene: BenchmarkScene | null,
+  runtimeStatus: RuntimeStatus | null,
+) {
+  if (!scene) return null;
+  if (!runtimeStatus) {
+    return '本地 Agent 运行时尚未就绪；当前 Scene 仍可运行 benchmark 仿真。';
+  }
+
+  const robotCount = scene.nodes.filter((node) => node.kind === 'robot').length;
+  const edgeCount = scene.nodes.filter((node) => node.kind === 'edge').length;
+  const unsupportedCount = scene.nodes.length - robotCount - edgeCount;
+  const requiredRobots = runtimeStatus.topology.orin_agents;
+  const requiredEdges = runtimeStatus.topology.edge_agents;
+  if (
+    robotCount !== requiredRobots
+    || edgeCount !== requiredEdges
+    || unsupportedCount > 0
+  ) {
+    return `Agent 演示仅支持 ${requiredRobots} 个 Orin + ${requiredEdges} 个 Edge；当前 Scene 为 ${robotCount} 个 Orin + ${edgeCount} 个 Edge${unsupportedCount ? `，另有 ${unsupportedCount} 个不支持的节点` : ''}。仍可运行 benchmark 仿真。`;
+  }
+  return null;
+}
+
 export default function App() {
   const [providerInfo, setProviderInfo] = useState<string>('checking backend...');
   const [scenarioType, setScenarioType] = useState<ScenarioType>('warehouse');
@@ -114,6 +138,13 @@ export default function App() {
     seed,
     use_llm: useLlm,
   }), [scenarioType, customScene, robotCount, edgeCount, taskCategories, difficulty, seed, useLlm]);
+  const runtimeDemoIssue = useMemo(
+    () => runtimeDemoCompatibilityIssue(scene, runtimeStatus),
+    [scene, runtimeStatus],
+  );
+  const runtimeDemoTopology = runtimeStatus
+    ? `${runtimeStatus.topology.orin_agents} Orin + ${runtimeStatus.topology.edge_agents} Edge`
+    : '本地 Agent';
 
   function toggleTaskCategory(cat: TaskCategory) {
     setTaskCategories((prev) => {
@@ -154,7 +185,7 @@ export default function App() {
   }
 
   async function onRuntimeRun() {
-    if (!scene) return;
+    if (!scene || runtimeDemoIssue) return;
     setRuntimeLoading(true);
     setError(null);
     setRuntimeRun(null);
@@ -252,10 +283,16 @@ export default function App() {
             {algorithmOptions.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
           <button className="secondary" onClick={onSimulate} disabled={!scene || loading}>运行仿真 / 评估</button>
-          <button className="primary runtime-run" onClick={onRuntimeRun} disabled={!scene || runtimeLoading}>
-            {runtimeLoading ? 'Agent 运行中...' : '运行 2 Orin + 1 Edge 演示'}
+          <button
+            className="primary runtime-run"
+            onClick={onRuntimeRun}
+            disabled={!scene || Boolean(runtimeDemoIssue) || runtimeLoading}
+          >
+            {runtimeLoading ? 'Agent 运行中...' : `运行 ${runtimeDemoTopology} 演示`}
           </button>
-          <p className="control-note">中央 Scheduler 动态分配任务，并注入一次可恢复失败来展示 retry。</p>
+          <p className={runtimeDemoIssue ? 'control-note warning' : 'control-note'}>
+            {runtimeDemoIssue ?? '中央 Scheduler 动态分配任务，并注入一次可恢复失败来展示 retry。'}
+          </p>
         </aside>
 
         <section className="panel workspace">

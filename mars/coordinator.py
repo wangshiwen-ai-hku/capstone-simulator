@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from copy import deepcopy
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from typing import Iterable
 
 from .dag import TaskManager, resolve_task_inputs
@@ -331,6 +331,10 @@ class CentralCoordinator:
                     item.task_id,
                 ),
             )
+            # The live path uses rolling dispatch: the batch reservations prove
+            # that the optimizer's plan is feasible, while this epoch commits
+            # only the selected assignment and its matching reservation
+            # fragment.
             task = manager.get(initial_assignment.task_id)
             manager.mark_running(task.task_id)
             input_artifacts = artifacts_by_task[task.task_id]
@@ -340,7 +344,8 @@ class CentralCoordinator:
                 "scheduling_epoch_planned",
                 (
                     f"{epoch.epoch_id} considered {len(epoch_tasks)} ready "
-                    f"tasks with {batch_plan.optimizer_id}"
+                    f"tasks with {batch_plan.optimizer_id}; selected "
+                    f"{task.task_id} for rolling dispatch"
                 ),
                 workflow.workflow_id,
                 task_id=task.task_id,
@@ -355,6 +360,7 @@ class CentralCoordinator:
                 snapshots = inventory.snapshots
                 if attempt_no == 1:
                     assignment = initial_assignment
+                    assignment_plan = batch_plan
                 else:
                     retry_epoch = SchedulingEpoch(
                         epoch_id=(
@@ -391,6 +397,7 @@ class CentralCoordinator:
                         registry=self.optimizer_registry,
                     )
                     assignment = retry_plan.assignments[0]
+                    assignment_plan = retry_plan
                 if not assignment.target_node_id and failed_nodes:
                     fallback_epoch = SchedulingEpoch(
                         epoch_id=(
@@ -424,6 +431,7 @@ class CentralCoordinator:
                         registry=self.optimizer_registry,
                     )
                     assignment = fallback_plan.assignments[0]
+                    assignment_plan = fallback_plan
                 if not assignment.target_node_id:
                     attempts_by_task[task.task_id].append(
                         AttemptRecord(
@@ -470,32 +478,25 @@ class CentralCoordinator:
                         else ExecutionTarget.ORIN
                     )
                     sample = sampler.sample(task.spec.task_type, target)
-                    assignment = replace(
-                        assignment,
-                        estimated_start_ms=current_time_ms,
-                        estimated_finish_ms=(
-                            current_time_ms + assignment.communication_ms + sample.latency_ms
-                        ),
-                        compute_ms=sample.latency_ms,
-                        energy_j=sample.energy_j,
-                    )
                     sampled_failure = sample.failed
                     if sampled_failure:
                         error_code = "synthetic_profile_failure"
                 except (KeyError, UnsupportedTargetError):
-                    assignment = replace(
-                        assignment,
-                        estimated_start_ms=current_time_ms,
-                        estimated_finish_ms=(
-                            current_time_ms
-                            + assignment.communication_ms
-                            + assignment.compute_ms
-                        ),
-                    )
+                    pass
 
                 injected_failure = attempt_no == 1 and task.task_id in failed_once
                 if injected_failure:
                     error_code = "injected_first_attempt_failure"
+                resource_reservation = next(
+                    reservation
+                    for reservation in assignment_plan.node_reservations
+                    if reservation.task_id == task.task_id
+                )
+                transfer_reservations = tuple(
+                    reservation
+                    for reservation in assignment_plan.transfer_reservations
+                    if reservation.task_id == task.task_id
+                )
                 try:
                     ack = await self.runtime.dispatch(
                         DispatchCommand(
@@ -503,6 +504,8 @@ class CentralCoordinator:
                             attempt_no=attempt_no,
                             task=task,
                             assignment=assignment,
+                            resource_reservation=resource_reservation,
+                            transfer_reservations=transfer_reservations,
                             input_artifacts=input_artifacts,
                             seed=seed,
                             inject_failure=injected_failure or sampled_failure,

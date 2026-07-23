@@ -39,7 +39,10 @@ that port.
 - Directed `LinkSpec` and `LinkSnapshot` topology with multi-hop transfer estimates.
 - Ready-task batches are represented by one canonical `SchedulingProblem`.
 - Replaceable optimizers consume the same problem and return a `SchedulingPlan`.
-- Plans are validated against candidates, node capacity, concurrency, and link reservations before commit.
+- Plans are validated against candidates, node capacity, concurrency, and link
+  reservations before commit.
+- Runtime dispatch carries the exact validated Assignment and its matching node
+  and link reservation fragment.
 - Invalid plug-in plans are rejected and may be re-solved by a configured safe fallback.
 - Critical-path, deadline, load, locality, bandwidth, and energy-aware built-in policies.
 - Central scheduler with two simulated Orin Agents and one simulated edge Agent.
@@ -205,6 +208,9 @@ Central runtime:
 `RuntimePort` is the only coordinator-facing contract. It supplies global node
 inventory and heartbeats, accepts attempt-scoped dispatch commands, returns
 dispatch-correlated completions, supports cancellation, and reports runtime
-state. `InProcessRuntime` implements the contract with virtual time. Future
-gRPC, DDS, or partner adapters implement the same contract; the coordinator
-does not depend on their communication mechanism.
+state. Each dispatch contains the unmodified validated Assignment plus its
+matching resource and transfer reservations. Command validation rejects an
+inconsistent plan fragment before an adapter receives it. `InProcessRuntime`
+implements the contract with virtual time. Future gRPC, DDS, or partner
+adapters implement the same contract; the coordinator does not depend on their
+communication mechanism.
