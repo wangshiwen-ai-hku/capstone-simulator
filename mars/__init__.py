@@ -8,15 +8,27 @@ from .models import (
     DataPort,
     ExecutionMode,
     FailurePolicy,
+    LinkSnapshot,
+    LinkSpec,
     NodeKind,
     NodeSnapshot,
     NodeSpec,
+    PlacementConstraints,
     TaskClass,
     TaskInstance,
     TaskSpec,
     TaskState,
     WorkflowSpec,
     WorkflowState,
+)
+from .network import NetworkTopology
+from .optimizers import (
+    Optimizer,
+    OptimizerRegistry,
+    PlanValidationError,
+    SchedulingEpoch,
+    SchedulingPlan,
+    SchedulingProblem,
 )
 from .runtime import InProcessRuntime, RuntimePort
 
@@ -30,10 +42,20 @@ __all__ = [
     "ExecutionMode",
     "FailurePolicy",
     "InProcessRuntime",
+    "LinkSnapshot",
+    "LinkSpec",
+    "NetworkTopology",
     "NodeKind",
     "NodeSnapshot",
     "NodeSpec",
+    "Optimizer",
+    "OptimizerRegistry",
+    "PlacementConstraints",
+    "PlanValidationError",
     "RuntimePort",
+    "SchedulingEpoch",
+    "SchedulingPlan",
+    "SchedulingProblem",
     "TaskClass",
     "TaskInstance",
     "TaskManager",
@@ -44,4 +66,4 @@ __all__ = [
     "validate_workflow",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

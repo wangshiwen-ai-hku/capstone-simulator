@@ -11,7 +11,13 @@ from uuid import uuid4
 from mars.coordinator import CentralCoordinator, CoordinatorReport
 from mars.runtime import InProcessRuntime
 
-from .mars_adapter import build_node_snapshots, build_node_specs, build_workflow
+from .mars_adapter import (
+    build_link_snapshots,
+    build_link_specs,
+    build_node_snapshots,
+    build_node_specs,
+    build_workflow,
+)
 from .scene_generator import build_deterministic_scene
 from .schemas import GenerateSceneRequest, RuntimeWorkflowRequest
 
@@ -46,7 +52,7 @@ class LocalRuntimeService:
                         seed=7,
                     )
                 )
-                coordinator = CentralCoordinator(_runtime_for_scene(scene))
+                coordinator = _coordinator_for_scene(scene)
                 asyncio.run(coordinator.initialize_async())
                 self._coordinator = coordinator
             return self._runtime_view_locked()
@@ -59,7 +65,7 @@ class LocalRuntimeService:
 
     def submit(self, request: RuntimeWorkflowRequest) -> dict[str, object]:
         _validate_demo_topology(request)
-        coordinator = CentralCoordinator(_runtime_for_scene(request.scene))
+        coordinator = _coordinator_for_scene(request.scene)
         workflow = build_workflow(request.scene)
         failure_ids: tuple[str, ...] = ()
         if request.inject_first_failure:
@@ -170,10 +176,14 @@ def _runtime_for_scene(scene) -> InProcessRuntime:
     return InProcessRuntime(
         specs,
         build_node_snapshots(scene),
-        max_concurrency={
-            spec.node_id: 2 if spec.kind.value == "robot" else 4
-            for spec in specs
-        },
+    )
+
+
+def _coordinator_for_scene(scene) -> CentralCoordinator:
+    return CentralCoordinator(
+        _runtime_for_scene(scene),
+        link_specs=build_link_specs(scene),
+        link_snapshots=build_link_snapshots(scene),
     )
 
 

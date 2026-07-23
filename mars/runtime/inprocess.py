@@ -13,8 +13,9 @@ from ..models import (
     NodeKind,
     NodeSnapshot,
     NodeSpec,
-    TaskClass,
     TaskInstance,
+    resolved_placement_constraints,
+    task_resource_demand,
 )
 from .base import (
     AgentHeartbeat,
@@ -151,12 +152,36 @@ class _SimulatedAgent:
             return False, "agent_not_registered"
         if not self._base_snapshot.online:
             return False, "agent_offline"
-        if task.spec.task_class is TaskClass.LOCAL_SAFETY and (
-            self.node_spec.node_id != task.source_node_id
-            or self.node_spec.kind is not NodeKind.ROBOT
-            or not self.node_spec.safety_capable
+        constraints = resolved_placement_constraints(task)
+        if constraints.pinned_node_id:
+            if self.node_spec.node_id != constraints.pinned_node_id:
+                return False, "placement_constraints_reject_agent"
+            if (
+                constraints.allowed_node_kinds
+                and self.node_spec.kind
+                not in constraints.allowed_node_kinds
+            ):
+                return False, "placement_constraints_reject_agent"
+        elif self.node_spec.node_id == task.source_node_id:
+            if not constraints.allow_source_node:
+                return False, "placement_constraints_reject_agent"
+        else:
+            if (
+                self.node_spec.kind is NodeKind.ROBOT
+                and not constraints.allow_other_robots
+            ):
+                return False, "placement_constraints_reject_agent"
+            if self.node_spec.kind not in constraints.allowed_node_kinds:
+                return False, "placement_constraints_reject_agent"
+        if constraints.safety_required and not self.node_spec.safety_capable:
+            return False, "safety_capability_required"
+        capabilities = set(self.node_spec.capabilities)
+        if self.node_spec.safety_capable:
+            capabilities.add("local_safety")
+        if not set(constraints.required_capabilities).issubset(
+            capabilities
         ):
-            return False, "local_safety_requires_source_robot"
+            return False, "required_capability_unavailable"
         if self.supported_task_types and task.spec.task_type not in self.supported_task_types:
             return False, "task_capability_not_declared"
         if task.spec.gpu_demand > 0 and self.node_spec.gpu_capacity <= 0:
@@ -295,16 +320,7 @@ class _SimulatedAgent:
         }
 
     def _resource_demand(self, task: TaskInstance) -> tuple[float, float, float]:
-        # compute_demand is a relative duration/complexity signal, not a
-        # literal number of CPU cores. Reservations scale it into the target's
-        # declared capacity while preserving pressure differences.
-        cpu = min(
-            self.node_spec.cpu_capacity,
-            max(0.05, task.spec.compute_demand * 0.15),
-        )
-        gpu = max(0.0, task.spec.gpu_demand)
-        memory = max(0.05, min(16.0, task.spec.compute_demand * 0.08))
-        return cpu, gpu, memory
+        return task_resource_demand(task, self.node_spec)
 
     def _reserved_totals(self) -> tuple[float, float, float]:
         return (
@@ -399,20 +415,27 @@ class InProcessRuntime:
                 f"{sorted(unknown_configuration)}"
             )
 
+        effective_specs = tuple(
+            replace(
+                spec,
+                max_concurrency=concurrency.get(
+                    spec.node_id,
+                    spec.max_concurrency,
+                ),
+            )
+            for spec in specs
+        )
         failure_ids = tuple(fail_first_task_ids)
         self._node_order = node_ids
         self._agents = {
             spec.node_id: _SimulatedAgent(
                 spec,
                 snapshot_by_id.get(spec.node_id),
-                max_concurrency=concurrency.get(
-                    spec.node_id,
-                    getattr(spec, "max_concurrency", 1),
-                ),
+                max_concurrency=spec.max_concurrency,
                 supported_task_types=task_types.get(spec.node_id, ()),
                 fail_first_task_ids=failure_ids,
             )
-            for spec in specs
+            for spec in effective_specs
         }
         self._pending: dict[
             str,
@@ -480,7 +503,10 @@ class InProcessRuntime:
         reservation = agent.reserve(
             task,
             command.attempt_id,
-            assignment.estimated_start_ms,
+            (
+                assignment.estimated_start_ms
+                + assignment.communication_ms
+            ),
         )
         if reservation is None:
             return self._rejected_ack(
@@ -502,7 +528,7 @@ class InProcessRuntime:
         except Exception:
             agent.release(
                 reservation.reservation_id,
-                assignment.estimated_start_ms,
+                reservation.scheduled_start_ms,
                 ok=False,
             )
             raise

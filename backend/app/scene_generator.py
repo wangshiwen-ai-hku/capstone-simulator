@@ -14,7 +14,10 @@ from .schemas import (
     DataEdgeSpec,
     Difficulty,
     GenerateSceneRequest,
+    LinkSnapshot,
+    LinkSpec,
     NodeSpec,
+    PlacementConstraintsSpec,
     PortSpec,
     ResourceSnapshot,
     TaskCategory,
@@ -115,6 +118,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             battery_wh=rng.uniform(50, 120),
             safety_capable=True,
             capabilities=["cpu", "cuda", "tensorrt", "local_safety"],
+            max_concurrency=1,
         ))
         resources.append(ResourceSnapshot(
             node_id=rid,
@@ -141,6 +145,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             battery_wh=None,
             safety_capable=False,
             capabilities=["cpu", "cuda", "high_memory"],
+            max_concurrency=2,
         ))
         resources.append(ResourceSnapshot(
             node_id=eid,
@@ -219,6 +224,10 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             ),
             energy_budget_j=round(20 + compute * 90 + data_size * 2.0, 1),
             allow_local_fallback=d["local_fallback"],
+            placement_constraints=_placement_contract(
+                d["task_class"],
+                d["local_fallback"],
+            ),
             result_verification="Check returned result, latency budget, deadline and task-specific success flag.",
             arrival_time_ms=round(arrival, 1),
             deadline_ms=round(deadline, 1),
@@ -239,6 +248,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
 
     logger.info(f"Generated {len(tasks)} tasks and {len(nodes)} nodes for scene '{scene_id}'")
 
+    links, link_snapshots = _directed_links(nodes, resources)
     return BenchmarkScene(
         id=scene_id,
         title=f"{req.scenario_type.value.title()} multi-robot scheduling benchmark",
@@ -247,6 +257,8 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
         difficulty=req.difficulty,
         nodes=nodes,
         initial_resources=resources,
+        links=links,
+        link_snapshots=link_snapshots,
         tasks=tasks,
         data_edges=data_edges,
         workflow_id=f"workflow_{scene_id}",
@@ -259,3 +271,79 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             "deadline, latency, energy and placement metrics are reported for the run",
         ],
     )
+
+
+def _placement_contract(
+    task_class: TaskClass,
+    allow_local_fallback: bool,
+) -> PlacementConstraintsSpec:
+    if task_class is TaskClass.LOCAL_SAFETY:
+        return PlacementConstraintsSpec(
+            pin_to_source=True,
+            allowed_node_kinds=["robot"],
+            preferred_node_kinds=["robot"],
+            required_capabilities=["local_safety"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            safety_required=True,
+            allow_fallback=False,
+            stateful=True,
+            idempotent=False,
+        )
+    if task_class is TaskClass.REALTIME_OFFLOADABLE:
+        return PlacementConstraintsSpec(
+            allowed_node_kinds=["edge"],
+            allow_source_node=True,
+            allow_other_robots=False,
+            allow_fallback=allow_local_fallback,
+        )
+    return PlacementConstraintsSpec(
+        allowed_node_kinds=["edge"],
+        preferred_node_kinds=["edge"],
+        allow_source_node=allow_local_fallback,
+        allow_other_robots=False,
+        allow_fallback=allow_local_fallback,
+    )
+
+
+def _directed_links(
+    nodes: List[NodeSpec],
+    resources: List[ResourceSnapshot],
+) -> tuple[List[LinkSpec], List[LinkSnapshot]]:
+    resource_by_id = {item.node_id: item for item in resources}
+    links: List[LinkSpec] = []
+    snapshots: List[LinkSnapshot] = []
+    for source in nodes:
+        source_state = resource_by_id[source.id]
+        for target in nodes:
+            if source.id == target.id:
+                continue
+            target_state = resource_by_id[target.id]
+            link_id = f"link:{source.id}->{target.id}"
+            bandwidth = min(
+                source.bandwidth_mbps,
+                target.bandwidth_mbps,
+            )
+            links.append(
+                LinkSpec(
+                    id=link_id,
+                    source_node_id=source.id,
+                    target_node_id=target.id,
+                    bandwidth_mbps=bandwidth,
+                    base_latency_ms=(
+                        source.base_latency_ms + target.base_latency_ms
+                    ),
+                )
+            )
+            snapshots.append(
+                LinkSnapshot(
+                    link_id=link_id,
+                    available_bandwidth_mbps=bandwidth,
+                    latency_ms=(
+                        source_state.network_latency_ms
+                        + target_state.network_latency_ms
+                    ),
+                    online=source_state.online and target_state.online,
+                )
+            )
+    return links, snapshots

@@ -418,7 +418,6 @@ class TaskManager:
             seen.add(child)
             queue.extend(self.index.children[child])
         return [candidate for candidate in self.index.topological_order if candidate in seen]
-
     def _normalize_outputs(
         self,
         task_id: str,
@@ -469,3 +468,64 @@ class TaskManager:
                 f"{', '.join(missing)}"
             )
         return normalized
+
+
+def resolve_task_inputs(
+    manager: TaskManager,
+    task_id: str,
+) -> tuple[ArtifactRef, ...]:
+    """Resolve every materialized and external input for one ready task.
+
+    Typed ``DataEdge`` bindings select the producer artifact for a consumer
+    port. Legacy dependency-only edges contribute all producer artifacts.
+    Unbound declared input ports represent source data and receive a
+    proportional share of ``input_size_mb``.
+    """
+
+    task = manager.get(task_id)
+    artifacts = list(manager.input_artifacts_for(task_id))
+    typed_parents = {
+        edge.producer_task
+        for edge in manager.index.incoming_edges[task_id]
+    }
+    for parent in manager.index.parents[task_id]:
+        if parent not in typed_parents:
+            artifacts.extend(manager.artifacts_for(parent))
+
+    bound_ports = {
+        edge.consumer_port
+        for edge in manager.index.incoming_edges[task_id]
+    }
+    if task.spec.input_ports:
+        unbound_count = sum(
+            port.name not in bound_ports
+            for port in task.spec.input_ports
+        )
+        external_size_mb = (
+            task.spec.input_size_mb
+            * unbound_count
+            / len(task.spec.input_ports)
+        )
+    else:
+        external_size_mb = (
+            task.spec.input_size_mb if not artifacts else 0.0
+        )
+
+    if external_size_mb > 0:
+        artifacts.append(
+            ArtifactRef(
+                artifact_id=(
+                    f"input:{task.workflow_id}:{task.task_id}"
+                ),
+                producer_task_id="",
+                node_id=task.source_node_id,
+                size_mb=external_size_mb,
+                uri=(
+                    f"source://{task.source_node_id}/"
+                    f"{task.workflow_id}/{task.task_id}"
+                ),
+                producer_port="external_input",
+                message_type="external_input_batch",
+            )
+        )
+    return tuple(artifacts)

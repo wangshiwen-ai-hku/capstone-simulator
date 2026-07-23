@@ -5,6 +5,7 @@ from dataclasses import asdict
 
 from mars import __version__ as mars_version
 from mars.models import TASK_CLASS_LABELS, TaskClass
+from mars.optimizers import built_in_registry
 from mars.synthetic_workloads import load_default_synthetic_workloads
 
 logging.basicConfig(
@@ -81,6 +82,16 @@ def architecture():
         "runtime": "central_scheduler_with_async_runtime_port",
         "runtime_adapters": ["in_process"],
         "network_adapters": [],
+        "network_model": "directed_link_topology",
+        "planning_pipeline": [
+            "hard_constraint_filtering",
+            "candidate_estimation",
+            "scheduling_problem",
+            "optimizer",
+            "plan_validation_or_repair",
+            "reservation_commit",
+        ],
+        "optimizers": list(built_in_registry().ids()),
         "task_classes": [
             {"id": task_class.value, "label": TASK_CLASS_LABELS[task_class]}
             for task_class in TaskClass

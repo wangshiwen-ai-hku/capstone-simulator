@@ -17,10 +17,10 @@ React UI ──► FastAPI adapter ──► CentralCoordinator ──► Runtim
                          └────► deterministic benchmark engine
 ```
 
-The central runtime uses virtual time, so it does not wait for wall-clock model
-execution. It still performs agent registration, heartbeats, capability checks,
-resource reservation, assignment, typed Artifact transfer costing, completion,
-resource release, and retry. The same seed produces a repeatable run.
+The central runtime uses virtual time rather than wall-clock model execution.
+It performs agent registration, heartbeats, capability checks, resource
+reservation, assignment, typed Artifact transfer costing, completion, resource
+release, and retry. The same seed produces a repeatable run.
 
 Dependency direction is one way: `backend` imports `mars`; MARS does not import
 the web application. `CentralCoordinator` depends only on the aggregate,
@@ -35,8 +35,13 @@ that port.
 - One output may fan out to multiple consumers without duplicating its Artifact.
 - One task may publish multiple typed output Artifacts.
 - Transfer cost includes only the output ports selected by downstream DataEdges.
-- Critical-path, deadline, load, locality, bandwidth, and energy-aware placement.
-- Three workload classes enforced as hard placement rules.
+- `TaskClass` business labels are separate from declarative placement constraints.
+- Directed `LinkSpec` and `LinkSnapshot` topology with multi-hop transfer estimates.
+- Ready-task batches are represented by one canonical `SchedulingProblem`.
+- Replaceable optimizers consume the same problem and return a `SchedulingPlan`.
+- Plans are validated against candidates, node capacity, concurrency, and link reservations before commit.
+- Invalid plug-in plans are rejected and may be re-solved by a configured safe fallback.
+- Critical-path, deadline, load, locality, bandwidth, and energy-aware built-in policies.
 - Central scheduler with two simulated Orin Agents and one simulated edge Agent.
 - Explicit registration, heartbeat, reservation/release, attempts, and retry.
 - Replaceable synthetic workload profiles for local development without business code.
@@ -44,14 +49,43 @@ that port.
 
 ## The three task classes
 
-| Class | Typical work | Placement contract |
+| Class | Typical work | Legacy default placement |
 |---|---|---|
 | `local_safety` | obstacle avoidance, emergency stop, local control | Must run on its safety-capable source robot |
 | `realtime_offloadable` | localization, environment understanding, detection, segmentation, local planning | May run on its source robot or edge |
 | `edge_heavy` | 7B/10B local models and map fusion | Prefer edge; local fallback only when enabled |
 
-Task types describe business capabilities. `task_class` is the stable placement
-contract used by the scheduler.
+Task types and `task_class` describe business capabilities and reporting
+categories. New workloads use `PlacementConstraints` for pinning, allowed node
+kinds, required capabilities, source/peer permissions, safety requirements,
+and ordered node-kind preferences. Preferences guide optimizer scoring;
+setting `allow_fallback=false` makes the preferred kinds exclusive. Scenes
+without explicit constraints are mapped from the three legacy labels for
+backward compatibility.
+
+## Scheduling pipeline
+
+```text
+READY task batch
+  → hard placement filtering
+  → compute and directed-link candidate estimates
+  → SchedulingProblem
+  → Optimizer
+  → SchedulingPlan validation / fallback repair
+  → node and link reservations
+  → runtime commit
+```
+
+The deterministic engine commits the validated batch plan. For `FAIL_FAST`
+workflows it uses a single rolling commit so that a failure cannot leave sibling
+work in flight. The central runtime also uses rolling-horizon control: its
+optimizer sees the complete ready batch, then the coordinator commits the
+earliest assignment through `RuntimePort` and replans after completion or retry.
+
+Built-in optimizer IDs are `dag_deadline`, `rule_based`, `local_first`,
+`edge_first`, and `greedy_cost`. Additional solvers implement the `Optimizer`
+protocol and are registered through `OptimizerRegistry`; they do not change the
+coordinator, task model, or runtime interface.
 
 ## Quick start
 
@@ -124,9 +158,12 @@ profiles for older task labels.
 
 ```text
 mars/
-  models.py                    tasks, ports, data edges, artifacts, nodes, assignments
+  models.py                    tasks, constraints, artifacts, nodes, links, assignments
   dag.py                       validation, readiness, results, failure propagation
-  scheduler.py                 placement constraints, costing, locality, critical path
+  network.py                   directed topology and transfer estimation
+  scheduler.py                 candidate generation and planning orchestration
+  optimizers/base.py           canonical problem, plan, registry, validation
+  optimizers/heuristics.py     built-in ready-batch policies
   coordinator.py               central runtime orchestration, attempts, retry, report
   runtime/base.py              sole asynchronous control-plane runtime contract
   runtime/inprocess.py         process-local simulated runtime adapter

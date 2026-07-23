@@ -82,6 +82,7 @@ class NodeSpec(BaseModel):
     safety_capable: bool = True
     capabilities: List[str] = Field(default_factory=list)
     supported_models: List[str] = Field(default_factory=list)
+    max_concurrency: int = Field(default=1, ge=1)
 
 
 class ResourceSnapshot(BaseModel):
@@ -92,6 +93,89 @@ class ResourceSnapshot(BaseModel):
     temperature_c: float
     power_w: float
     network_latency_ms: float
+    online: bool = True
+
+
+class PlacementConstraintsSpec(BaseModel):
+    """Web-facing declarative placement contract.
+
+    ``pin_to_source`` is resolved to a concrete node id by the MARS adapter so
+    reusable workload templates do not need to know a robot id in advance.
+    """
+
+    pinned_node_id: str = ""
+    pin_to_source: bool = False
+    allowed_node_kinds: List[Literal["robot", "edge", "cloud"]] = Field(
+        default_factory=list
+    )
+    preferred_node_kinds: List[Literal["robot", "edge", "cloud"]] = Field(
+        default_factory=list
+    )
+    required_capabilities: List[str] = Field(default_factory=list)
+    allow_source_node: bool = True
+    allow_other_robots: bool = False
+    safety_required: bool = False
+    allow_fallback: bool = True
+    stateful: bool = False
+    idempotent: bool = True
+    splittable: bool = False
+    replicable: bool = False
+
+    @model_validator(mode="after")
+    def validate_contract(self):
+        if self.pinned_node_id and self.pin_to_source:
+            raise ValueError(
+                "pinned_node_id and pin_to_source are mutually exclusive"
+            )
+        if len(self.allowed_node_kinds) != len(set(self.allowed_node_kinds)):
+            raise ValueError("allowed_node_kinds must not contain duplicates")
+        if len(self.preferred_node_kinds) != len(
+            set(self.preferred_node_kinds)
+        ):
+            raise ValueError(
+                "preferred_node_kinds must not contain duplicates"
+            )
+        if not set(self.preferred_node_kinds).issubset(
+            self.allowed_node_kinds
+        ):
+            raise ValueError(
+                "preferred_node_kinds must be a subset of allowed_node_kinds"
+            )
+        normalized = [item.strip() for item in self.required_capabilities]
+        if any(not item for item in normalized):
+            raise ValueError("required_capabilities must be non-blank")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError(
+                "required_capabilities must not contain duplicates"
+            )
+        self.required_capabilities = normalized
+        if self.replicable and (self.stateful or not self.idempotent):
+            raise ValueError(
+                "replicable tasks must be stateless and idempotent"
+            )
+        return self
+
+
+class LinkSpec(BaseModel):
+    id: str = Field(min_length=1)
+    source_node_id: str = Field(min_length=1)
+    target_node_id: str = Field(min_length=1)
+    bandwidth_mbps: float = Field(gt=0)
+    base_latency_ms: float = Field(default=0.0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_endpoints(self):
+        if self.source_node_id == self.target_node_id:
+            raise ValueError("network links must connect different nodes")
+        return self
+
+
+class LinkSnapshot(BaseModel):
+    link_id: str = Field(min_length=1)
+    available_bandwidth_mbps: float = Field(ge=0)
+    latency_ms: float = Field(default=0.0, ge=0)
+    jitter_ms: float = Field(default=0.0, ge=0)
+    packet_loss_rate: float = Field(default=0.0, ge=0, lt=1)
     online: bool = True
 
 
@@ -124,7 +208,8 @@ class Workload(BaseModel):
     output_size_mb: float = Field(default=0.1, ge=0)
     bandwidth_requirement_mbps: float = Field(ge=0)
     energy_budget_j: float = Field(gt=0)
-    allow_local_fallback: bool = True
+    allow_local_fallback: Optional[bool] = None
+    placement_constraints: Optional[PlacementConstraintsSpec] = None
     result_verification: str
     arrival_time_ms: float = Field(default=0, ge=0)
     deadline_ms: float = Field(gt=0)
@@ -138,9 +223,14 @@ class Workload(BaseModel):
     def apply_task_class_defaults(self):
         if self.task_class is None:
             self.task_class = infer_task_class(self.task_type)
+        if self.allow_local_fallback is None:
+            self.allow_local_fallback = (
+                self.task_class is not TaskClass.LOCAL_SAFETY
+            )
         if self.task_class is TaskClass.LOCAL_SAFETY:
-            self.allow_local_fallback = False
             self.safety_level = 5
+            if self.placement_constraints is None:
+                self.allow_local_fallback = False
         return self
 
 
@@ -152,6 +242,8 @@ class BenchmarkScene(BaseModel):
     difficulty: Difficulty
     nodes: List[NodeSpec]
     initial_resources: List[ResourceSnapshot]
+    links: Optional[List[LinkSpec]] = None
+    link_snapshots: Optional[List[LinkSnapshot]] = None
     tasks: List[Workload]
     data_edges: List[DataEdgeSpec] = Field(default_factory=list)
     workflow_id: str = ""
@@ -174,6 +266,54 @@ class BenchmarkScene(BaseModel):
             self.workflow_id = f"workflow_{self.id}"
         if self.workflow_deadline_ms <= 0:
             self.workflow_deadline_ms = max((task.deadline_ms for task in self.tasks), default=0.0)
+        if (self.links is None) != (self.link_snapshots is None):
+            raise ValueError(
+                "links and link_snapshots must both be provided or omitted"
+            )
+        node_ids = {node.id for node in self.nodes}
+        if self.links is not None and self.link_snapshots is not None:
+            link_ids = [link.id for link in self.links]
+            snapshot_ids = [
+                snapshot.link_id for snapshot in self.link_snapshots
+            ]
+            if len(link_ids) != len(set(link_ids)):
+                raise ValueError("link ids must be unique")
+            if len(snapshot_ids) != len(set(snapshot_ids)):
+                raise ValueError("link snapshot ids must be unique")
+            if set(link_ids) != set(snapshot_ids):
+                raise ValueError(
+                    "every link requires exactly one link snapshot"
+                )
+            endpoints: set[tuple[str, str]] = set()
+            for link in self.links:
+                if (
+                    link.source_node_id not in node_ids
+                    or link.target_node_id not in node_ids
+                ):
+                    raise ValueError(
+                        f"link {link.id} references an unknown node"
+                    )
+                endpoint = (
+                    link.source_node_id,
+                    link.target_node_id,
+                )
+                if endpoint in endpoints:
+                    raise ValueError(
+                        "parallel links for the same directed endpoints are "
+                        "not supported"
+                    )
+                endpoints.add(endpoint)
+        for task in self.tasks:
+            constraints = task.placement_constraints
+            if (
+                constraints is not None
+                and constraints.pinned_node_id
+                and constraints.pinned_node_id not in node_ids
+            ):
+                raise ValueError(
+                    f"task {task.id} pins to unknown node "
+                    f"{constraints.pinned_node_id}"
+                )
         return self
 
 

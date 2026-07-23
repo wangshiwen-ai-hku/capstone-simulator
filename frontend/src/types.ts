@@ -50,6 +50,7 @@ export interface NodeSpec {
   safety_capable: boolean;
   capabilities: string[];
   supported_models: string[];
+  max_concurrency: number;
 }
 
 export interface ResourceSnapshot {
@@ -60,6 +61,39 @@ export interface ResourceSnapshot {
   temperature_c: number;
   power_w: number;
   network_latency_ms: number;
+  online: boolean;
+}
+
+export interface PlacementConstraintsSpec {
+  pinned_node_id: string;
+  pin_to_source: boolean;
+  allowed_node_kinds: Array<'robot' | 'edge' | 'cloud'>;
+  preferred_node_kinds: Array<'robot' | 'edge' | 'cloud'>;
+  required_capabilities: string[];
+  allow_source_node: boolean;
+  allow_other_robots: boolean;
+  safety_required: boolean;
+  allow_fallback: boolean;
+  stateful: boolean;
+  idempotent: boolean;
+  splittable: boolean;
+  replicable: boolean;
+}
+
+export interface LinkSpec {
+  id: string;
+  source_node_id: string;
+  target_node_id: string;
+  bandwidth_mbps: number;
+  base_latency_ms: number;
+}
+
+export interface LinkSnapshot {
+  link_id: string;
+  available_bandwidth_mbps: number;
+  latency_ms: number;
+  jitter_ms: number;
+  packet_loss_rate: number;
   online: boolean;
 }
 
@@ -80,6 +114,7 @@ export interface Workload {
   bandwidth_requirement_mbps: number;
   energy_budget_j: number;
   allow_local_fallback: boolean;
+  placement_constraints?: PlacementConstraintsSpec | null;
   result_verification: string;
   arrival_time_ms: number;
   deadline_ms: number;
@@ -111,6 +146,8 @@ export interface BenchmarkScene {
   difficulty: Difficulty;
   nodes: NodeSpec[];
   initial_resources: ResourceSnapshot[];
+  links?: LinkSpec[] | null;
+  link_snapshots?: LinkSnapshot[] | null;
   tasks: Workload[];
   data_edges: DataEdgeSpec[];
   workflow_id: string;

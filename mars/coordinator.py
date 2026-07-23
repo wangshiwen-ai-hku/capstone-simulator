@@ -8,15 +8,23 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from typing import Iterable
 
-from .dag import TaskManager
+from .dag import TaskManager, resolve_task_inputs
 from .models import (
-    ArtifactRef,
     Assignment,
     ExecutionMode,
+    LinkSnapshot,
+    LinkSpec,
     NodeKind,
+    NodeSpec,
     TaskInstance,
     TaskState,
     WorkflowSpec,
+    resolved_placement_constraints,
+)
+from .network import synthesize_legacy_full_mesh
+from .optimizers import (
+    OptimizerRegistry,
+    SchedulingEpoch,
 )
 from .profiling import ExecutionProfile, ProfileCatalog
 from .runtime import (
@@ -26,7 +34,7 @@ from .runtime import (
     RuntimeInventory,
     RuntimePort,
 )
-from .scheduler import choose_assignment, critical_path
+from .scheduler import critical_path, plan_scheduling_epoch
 from .synthetic_workloads import (
     ExecutionTarget,
     SyntheticSampler,
@@ -95,11 +103,25 @@ class CentralCoordinator:
         runtime: RuntimePort,
         *,
         workload_catalog: SyntheticWorkloadCatalog | None = None,
+        link_specs: Iterable[LinkSpec] | None = None,
+        link_snapshots: Iterable[LinkSnapshot] | None = None,
+        optimizer_registry: OptimizerRegistry | None = None,
     ) -> None:
         if not isinstance(runtime, RuntimePort):
             raise TypeError("runtime must implement RuntimePort")
         self.runtime = runtime
         self.workload_catalog = workload_catalog or load_default_synthetic_workloads()
+        if (link_specs is None) != (link_snapshots is None):
+            raise ValueError(
+                "link_specs and link_snapshots must both be provided or omitted"
+            )
+        self._configured_link_specs = (
+            None if link_specs is None else tuple(link_specs)
+        )
+        self._configured_link_snapshots = (
+            None if link_snapshots is None else tuple(link_snapshots)
+        )
+        self.optimizer_registry = optimizer_registry
         self._events: list[RuntimeEvent] = []
         self._sequence = 0
         self._started = False
@@ -203,6 +225,18 @@ class CentralCoordinator:
         index = manager.submit(workflow)
         critical_ids, critical_path_ms, critical_tail = critical_path(workflow.tasks, index)
         node_specs = {node.node_id: node for node in inventory.nodes}
+        if self._configured_link_specs is None:
+            resolved_link_specs, resolved_link_snapshots = (
+                synthesize_legacy_full_mesh(
+                    inventory.nodes,
+                    inventory.snapshots.values(),
+                )
+            )
+        else:
+            resolved_link_specs = self._configured_link_specs
+            resolved_link_snapshots = (
+                self._configured_link_snapshots or ()
+            )
         profiles = _profile_catalog(self.workload_catalog)
         sampler = SyntheticSampler(
             self.workload_catalog,
@@ -219,6 +253,7 @@ class CentralCoordinator:
         transfer_time_ms = 0.0
         total_energy_j = 0.0
         retry_successes = 0
+        epoch_sequence = 0
 
         self._emit(
             current_time_ms,
@@ -235,21 +270,81 @@ class CentralCoordinator:
             if not arrived:
                 current_time_ms = min(task.arrival_time_ms for task in ready)
                 arrived = [task for task in ready if task.arrival_time_ms <= current_time_ms]
-            task = min(
-                arrived,
+            inventory = await self.runtime.inventory(current_time_ms)
+            node_specs = {node.node_id: node for node in inventory.nodes}
+            snapshots = inventory.snapshots
+            epoch_sequence += 1
+            epoch_tasks = tuple(
+                sorted(arrived, key=lambda item: item.task_id)
+            )
+            artifacts_by_task = {
+                item.task_id: resolve_task_inputs(manager, item.task_id)
+                for item in epoch_tasks
+            }
+            ready_times = {
+                item.task_id: max(
+                    current_time_ms,
+                    item.arrival_time_ms,
+                    max(
+                        (
+                            completion_time.get(parent, 0.0)
+                            for parent in index.parents[item.task_id]
+                        ),
+                        default=0.0,
+                    ),
+                )
+                for item in epoch_tasks
+            }
+            epoch = SchedulingEpoch(
+                epoch_id=(
+                    f"{workflow.workflow_id}:runtime-epoch:{epoch_sequence}"
+                ),
+                now_ms=current_time_ms,
+                ready_tasks=epoch_tasks,
+            )
+            batch_plan = plan_scheduling_epoch(
+                epoch,
+                optimizer=algorithm,
+                node_specs=node_specs,
+                node_snapshots=snapshots,
+                parent_artifacts=artifacts_by_task,
+                ready_time_ms=ready_times,
+                node_available_ms={
+                    node_id: current_time_ms for node_id in node_specs
+                },
+                link_specs=resolved_link_specs,
+                link_snapshots=resolved_link_snapshots,
+                critical_tail_ms=critical_tail,
+                profiles=profiles,
+                registry=self.optimizer_registry,
+            )
+            if not batch_plan.assignments:
+                raise RuntimeError(
+                    "optimizer deferred every ready task; the runtime "
+                    "requires at least one committable assignment per epoch"
+                )
+            initial_assignment = min(
+                batch_plan.assignments,
                 key=lambda item: (
-                    item.deadline_time_ms - critical_tail[item.task_id],
-                    -item.priority,
+                    item.estimated_start_ms,
+                    item.estimated_finish_ms,
                     item.task_id,
                 ),
             )
+            task = manager.get(initial_assignment.task_id)
             manager.mark_running(task.task_id)
-            input_artifacts = _input_artifacts(manager, task.task_id)
-            parent_finished = max(
-                (completion_time.get(parent, 0.0) for parent in index.parents[task.task_id]),
-                default=0.0,
+            input_artifacts = artifacts_by_task[task.task_id]
+            current_time_ms = ready_times[task.task_id]
+            self._emit(
+                current_time_ms,
+                "scheduling_epoch_planned",
+                (
+                    f"{epoch.epoch_id} considered {len(epoch_tasks)} ready "
+                    f"tasks with {batch_plan.optimizer_id}"
+                ),
+                workflow.workflow_id,
+                task_id=task.task_id,
             )
-            current_time_ms = max(current_time_ms, task.arrival_time_ms, parent_finished)
             failed_nodes: set[str] = set()
             task_finished = False
 
@@ -258,36 +353,77 @@ class CentralCoordinator:
                 inventory = await self.runtime.inventory(current_time_ms)
                 node_specs = {node.node_id: node for node in inventory.nodes}
                 snapshots = inventory.snapshots
-                node_available = {node_id: current_time_ms for node_id in node_specs}
-                for node_id in failed_nodes:
-                    if node_id in node_available:
-                        node_available[node_id] = current_time_ms + 1_000_000_000.0
-                assignment = choose_assignment(
-                    task,
-                    algorithm=algorithm,
-                    ready_time_ms=current_time_ms,
-                    node_available=node_available,
-                    node_specs=node_specs,
-                    node_snapshots=snapshots,
-                    parent_artifacts=input_artifacts,
-                    critical_tail_ms=critical_tail[task.task_id],
-                    profiles=profiles,
-                    excluded_node_ids=frozenset(failed_nodes),
-                )
-                if not assignment.target_node_id and failed_nodes:
-                    assignment = choose_assignment(
-                        task,
-                        algorithm=algorithm,
-                        ready_time_ms=current_time_ms,
-                        node_available={
-                            node_id: current_time_ms for node_id in node_specs
-                        },
+                if attempt_no == 1:
+                    assignment = initial_assignment
+                else:
+                    retry_epoch = SchedulingEpoch(
+                        epoch_id=(
+                            f"{workflow.workflow_id}:"
+                            f"{task.task_id}:retry:{attempt_no}"
+                        ),
+                        now_ms=current_time_ms,
+                        ready_tasks=(task,),
+                    )
+                    retry_plan = plan_scheduling_epoch(
+                        retry_epoch,
+                        optimizer=algorithm,
                         node_specs=node_specs,
                         node_snapshots=snapshots,
-                        parent_artifacts=input_artifacts,
-                        critical_tail_ms=critical_tail[task.task_id],
+                        parent_artifacts={
+                            task.task_id: input_artifacts
+                        },
+                        ready_time_ms={
+                            task.task_id: current_time_ms
+                        },
+                        node_available_ms={
+                            node_id: current_time_ms
+                            for node_id in node_specs
+                        },
+                        link_specs=resolved_link_specs,
+                        link_snapshots=resolved_link_snapshots,
+                        critical_tail_ms={
+                            task.task_id: critical_tail[task.task_id]
+                        },
                         profiles=profiles,
+                        excluded_node_ids={
+                            task.task_id: frozenset(failed_nodes)
+                        },
+                        registry=self.optimizer_registry,
                     )
+                    assignment = retry_plan.assignments[0]
+                if not assignment.target_node_id and failed_nodes:
+                    fallback_epoch = SchedulingEpoch(
+                        epoch_id=(
+                            f"{workflow.workflow_id}:"
+                            f"{task.task_id}:retry-fallback:{attempt_no}"
+                        ),
+                        now_ms=current_time_ms,
+                        ready_tasks=(task,),
+                    )
+                    fallback_plan = plan_scheduling_epoch(
+                        fallback_epoch,
+                        optimizer=algorithm,
+                        node_specs=node_specs,
+                        node_snapshots=snapshots,
+                        parent_artifacts={
+                            task.task_id: input_artifacts
+                        },
+                        ready_time_ms={
+                            task.task_id: current_time_ms
+                        },
+                        node_available_ms={
+                            node_id: current_time_ms
+                            for node_id in node_specs
+                        },
+                        link_specs=resolved_link_specs,
+                        link_snapshots=resolved_link_snapshots,
+                        critical_tail_ms={
+                            task.task_id: critical_tail[task.task_id]
+                        },
+                        profiles=profiles,
+                        registry=self.optimizer_registry,
+                    )
+                    assignment = fallback_plan.assignments[0]
                 if not assignment.target_node_id:
                     attempts_by_task[task.task_id].append(
                         AttemptRecord(
@@ -313,6 +449,7 @@ class CentralCoordinator:
                         dropped=True,
                         error_code="no_feasible_agent",
                     )
+                    completion_time[task.task_id] = current_time_ms
                     self._emit(
                         current_time_ms,
                         "task_dropped",
@@ -382,6 +519,32 @@ class CentralCoordinator:
                 if not ack.accepted:
                     failed_nodes.add(assignment.target_node_id)
                     reject_reason = ack.error_code or "dispatch_rejected"
+                    attempts_by_task[task.task_id].append(
+                        AttemptRecord(
+                            attempt_id=attempt_id,
+                            attempt_no=attempt_no,
+                            state=TaskState.FAILED.value,
+                            target_node_id=assignment.target_node_id,
+                            mode=assignment.execution_mode.value,
+                            start_time_ms=current_time_ms,
+                            finish_time_ms=current_time_ms,
+                            compute_time_ms=0.0,
+                            communication_time_ms=0.0,
+                            transferred_mb=0.0,
+                            energy_j=0.0,
+                            input_artifact_ids=tuple(
+                                item.artifact_id
+                                for item in input_artifacts
+                            ),
+                            error_code=reject_reason,
+                        )
+                    )
+                    target_by_task[task.task_id] = (
+                        assignment.target_node_id
+                    )
+                    mode_by_task[task.task_id] = (
+                        assignment.execution_mode.value
+                    )
                     self._emit(
                         current_time_ms,
                         "dispatch_rejected",
@@ -403,6 +566,7 @@ class CentralCoordinator:
                         dropped=True,
                         error_code=reject_reason,
                     )
+                    completion_time[task.task_id] = current_time_ms
                     task_finished = True
                     break
 
@@ -578,9 +742,11 @@ class CentralCoordinator:
         succeeded = states[TaskState.SUCCEEDED.value]
         offloaded = sum(item["mode"] == ExecutionMode.EDGE.value for item in task_results)
         safety_violations = sum(
-            item["task_class"] == "local_safety"
-            and bool(item["target_node_id"])
-            and item["target_node_id"] != item["source_node_id"]
+            _violates_safety_contract(
+                manager.get(str(item["task_id"])),
+                str(item["target_node_id"]),
+                node_specs,
+            )
             for item in task_results
         )
         metrics: dict[str, float | int] = {
@@ -717,42 +883,21 @@ def _validate_completion(
         raise RuntimeError(f"runtime returned mismatched completion: {actual!r}")
 
 
-def _input_artifacts(manager: TaskManager, task_id: str) -> tuple[ArtifactRef, ...]:
-    task = manager.get(task_id)
-    artifacts = list(manager.input_artifacts_for(task_id))
-    typed_parents = {
-        edge.producer_task for edge in manager.index.incoming_edges[task_id]
-    }
-    for parent in manager.index.parents[task_id]:
-        if parent not in typed_parents:
-            artifacts.extend(manager.artifacts_for(parent))
-    bound_ports = {
-        edge.consumer_port for edge in manager.index.incoming_edges[task_id]
-    }
-    if task.spec.input_ports:
-        unbound_count = sum(
-            port.name not in bound_ports for port in task.spec.input_ports
-        )
-        external_size_mb = (
-            task.spec.input_size_mb
-            * unbound_count
-            / len(task.spec.input_ports)
-        )
-    else:
-        external_size_mb = task.spec.input_size_mb if not artifacts else 0.0
-    if external_size_mb > 0:
-        artifacts.append(
-            ArtifactRef(
-                artifact_id=f"input:{task.workflow_id}:{task.task_id}",
-                producer_task_id="",
-                node_id=task.source_node_id,
-                size_mb=external_size_mb,
-                uri=f"source://{task.source_node_id}/{task.workflow_id}/{task.task_id}",
-                producer_port="external_input",
-                message_type="external_input_batch",
-            )
-        )
-    return tuple(artifacts)
+def _violates_safety_contract(
+    task: TaskInstance,
+    target_node_id: str,
+    node_specs: dict[str, NodeSpec],
+) -> bool:
+    constraints = resolved_placement_constraints(task)
+    if not constraints.safety_required or not target_node_id:
+        return False
+    target = node_specs.get(target_node_id)
+    return (
+        target is None
+        or not target.safety_capable
+        or bool(constraints.pinned_node_id)
+        and target_node_id != constraints.pinned_node_id
+    )
 
 
 def _profile_catalog(catalog: SyntheticWorkloadCatalog) -> ProfileCatalog:

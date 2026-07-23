@@ -11,9 +11,15 @@ from mars.models import (
     NodeKind,
     NodeSnapshot,
     NodeSpec,
+    TaskClass,
+    TaskInstance,
+    TaskSpec,
     WorkflowSpec,
+    task_resource_demand,
 )
+from mars.optimizers import SchedulingEpoch
 from mars.runtime import DispatchCommand, InProcessRuntime, RuntimePort
+from mars.scheduler import build_scheduling_problem, plan_scheduling_epoch
 
 from tests.test_mars_core import task
 
@@ -121,6 +127,111 @@ class RuntimePortTests(unittest.IsolatedAsyncioTestCase):
         refreshed = await runtime.inventory(5.0)
         self.assertEqual(refreshed.heartbeats[0].sequence, 2)
         self.assertEqual(refreshed.heartbeats[0].sampled_at_ms, 5.0)
+
+    async def test_resource_demand_matches_planner_and_runtime(self):
+        node = NodeSpec(
+            "small-memory-robot",
+            NodeKind.ROBOT,
+            4,
+            2,
+            0.01,
+            100,
+            2,
+        )
+        snapshot = NodeSnapshot(node.node_id)
+        item = TaskInstance(
+            "resource-contract",
+            "wf",
+            "resource-contract",
+            node.node_id,
+            TaskSpec(
+                "resource-contract",
+                TaskClass.REALTIME_OFFLOADABLE,
+                compute_demand=4,
+                gpu_demand=0.5,
+            ),
+        )
+        expected = task_resource_demand(item, node)
+        problem = build_scheduling_problem(
+            SchedulingEpoch("resource-contract", 0, (item,)),
+            node_specs={node.node_id: node},
+            node_snapshots={node.node_id: snapshot},
+            parent_artifacts={},
+            ready_time_ms={item.task_id: 0},
+            link_specs=(),
+            link_snapshots=(),
+        )
+        candidate = problem.candidates[item.task_id][0]
+        self.assertEqual(
+            (
+                candidate.resource_demand.cpu_units,
+                candidate.resource_demand.gpu_units,
+                candidate.resource_demand.memory_gb,
+            ),
+            expected,
+        )
+
+        plan = plan_scheduling_epoch(
+            problem.epoch,
+            optimizer="greedy_cost",
+            node_specs={node.node_id: node},
+            node_snapshots={node.node_id: snapshot},
+            parent_artifacts={},
+            ready_time_ms={item.task_id: 0},
+            link_specs=(),
+            link_snapshots=(),
+        )
+        runtime = InProcessRuntime((node,), (snapshot,))
+        await runtime.start(0)
+        ack = await runtime.dispatch(
+            DispatchCommand(
+                attempt_id="wf:resource-contract:attempt:1",
+                attempt_no=1,
+                task=item,
+                assignment=plan.assignments[0],
+                input_artifacts=(),
+                seed=7,
+            )
+        )
+        self.assertTrue(ack.accepted)
+        description = (await runtime.describe(1))[0]
+        resources = description["resources"]
+        self.assertAlmostEqual(
+            resources["available_cpu"],
+            node.cpu_capacity - expected[0],
+        )
+        self.assertAlmostEqual(
+            resources["available_gpu"],
+            node.gpu_capacity - expected[1],
+        )
+        self.assertAlmostEqual(
+            resources["available_memory_gb"],
+            node.memory_gb - expected[2],
+        )
+        await runtime.receive_completion(ack.dispatch_id)
+
+    async def test_concurrency_override_is_advertised_consistently(self):
+        node = NodeSpec(
+            "robot_1",
+            NodeKind.ROBOT,
+            4,
+            2,
+            16,
+            100,
+            2,
+            max_concurrency=1,
+        )
+        runtime = InProcessRuntime(
+            (node,),
+            (NodeSnapshot(node.node_id),),
+            max_concurrency={node.node_id: 3},
+        )
+
+        inventory = await runtime.start(0)
+        description = (await runtime.describe(0))[0]
+
+        self.assertEqual(inventory.nodes[0].max_concurrency, 3)
+        self.assertEqual(description["max_concurrency"], 3)
 
     async def test_coordinator_runs_directly_on_the_async_runtime_port(self):
         runtime = _runtime()
