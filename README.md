@@ -20,14 +20,14 @@ execution. It still performs agent registration, heartbeats, capability checks,
 resource reservation, assignment, typed Artifact transfer costing, completion,
 resource release, and retry. The same seed produces a repeatable run.
 
-The dependency direction remains one way: `backend` imports `mars`; MARS does
-not depend on the web application. Agent sessions implement a small runtime
-boundary that can later be carried by the partner's actual transport.
+Dependency direction is one way: `backend` imports `mars`; MARS does not import
+the web application. `AgentSession` isolates runtime operations from transport
+implementations.
 
-## Current scope
+## Implemented capabilities
 
 - Atomic DAG validation with cycle, reference, port, and message-type checks.
-- Authoritative `BLOCKED → READY → RUNNING → terminal` lifecycle.
+- `BLOCKED → READY → RUNNING → terminal` task lifecycle.
 - Named `DataPort` and `DataEdge` contracts separate data flow from ordering.
 - One output may fan out to multiple consumers without duplicating its Artifact.
 - One task may publish multiple typed output Artifacts.
@@ -90,8 +90,8 @@ cd frontend && npm run build
 
 ## Synthetic workloads
 
-`configs/mars/workloads.synthetic.json` is the primary fake workload catalog.
-It contains Orin and edge profiles for:
+`configs/mars/workloads.synthetic.json` defines synthetic Orin and edge profiles
+for:
 
 - obstacle avoidance, emergency stop, and local control;
 - localization, environment understanding, object detection, semantic segmentation, and local planning;
@@ -114,8 +114,8 @@ available, request and record:
 - average/peak power or joules per task;
 - failure rate and output quality for each hardware target.
 
-`configs/mars/profiles.synthetic.json` remains the compact legacy profile table
-used by the benchmark engine for older task labels.
+`configs/mars/profiles.synthetic.json` contains compact benchmark-engine
+profiles for older task labels.
 
 ## Project layout
 
@@ -164,7 +164,6 @@ Central Agent runtime:
 
 `AgentSession` is the coordinator-facing contract for registration, heartbeat,
 capability checks, reservation, execution, completion, and release.
-`SimulatedAgent` implements it in the current process. No network middleware is
-assumed in this version. A future adapter can implement the same session
-contract once the partner supplies its task invocation, telemetry, and data
-transport details.
+`SimulatedAgent` implements the contract in the API process. No network
+middleware is assumed. Network adapters must implement the same contract and
+provide task invocation, telemetry, and data transport behavior.

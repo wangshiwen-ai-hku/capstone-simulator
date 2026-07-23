@@ -1,7 +1,7 @@
 """Transport-neutral domain model for MARS.
 
-Framework-specific request and wire objects are adapted into these types so
-that task constraints and DAG semantics have one authoritative definition.
+Framework-specific request and wire objects are converted into these domain
+types. Task constraints and DAG semantics are defined in this module.
 """
 
 from __future__ import annotations

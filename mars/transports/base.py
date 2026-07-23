@@ -19,7 +19,7 @@ class TransportCapabilities:
 
 
 class SchedulerTransport(Protocol):
-    """The only I/O surface the live control plane is allowed to call."""
+    """I/O protocol used by the live control plane."""
 
     capabilities: TransportCapabilities
 

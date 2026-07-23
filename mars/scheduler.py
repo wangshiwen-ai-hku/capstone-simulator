@@ -63,8 +63,8 @@ def allowed_nodes(
     edges = [node for node in online if node.kind is NodeKind.EDGE]
     if task.spec.task_class is TaskClass.REALTIME_OFFLOADABLE:
         return ([source_candidate] if source_candidate is not None else []) + edges
-    # The current data plane contains source robots and on-premise edge nodes.
-    # Cloud nodes are excluded from placement candidates.
+    # Placement candidates are source robots and on-premise edge nodes.
+    # Cloud nodes are outside the configured data plane.
     return [*edges, *([source_candidate] if source_candidate is not None else [])] if task.spec.allow_local_fallback else edges
 
 
@@ -277,7 +277,7 @@ def critical_path(
     while cursor is not None:
         path.append(cursor)
         cursor = successor[cursor]
-    # Scheduler wants the cost after the current task, not including it.
+    # Candidate scoring uses successor cost and excludes the task's own cost.
     critical_tail = {task_id: tail[task_id] - own_cost[task_id] for task_id in tail}
     return tuple(path), tail[root], critical_tail
 

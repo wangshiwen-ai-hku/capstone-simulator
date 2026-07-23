@@ -83,8 +83,9 @@ class CentralCoordinator:
     """Register agents and execute one DAG through the central control plane.
 
     The implementation advances a virtual clock rather than sleeping. Agent
-    sessions still receive explicit reservations, inputs and completions, so
-    the same lifecycle can later be carried by a process or network adapter.
+    sessions still receive explicit reservations, inputs, completions, and
+    resource-release calls. The session contract is independent of its process
+    or network implementation.
     """
 
     def __init__(

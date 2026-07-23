@@ -1,4 +1,4 @@
-"""DAG validation and authoritative MARS workflow lifecycle management."""
+"""DAG validation and MARS workflow lifecycle state management."""
 
 from __future__ import annotations
 
@@ -208,7 +208,7 @@ def _validate_data_edge(
 
 
 class TaskManager:
-    """Single source of truth for DAG readiness, results and failure propagation."""
+    """Store DAG readiness, results, artifacts, and failure propagation state."""
 
     def __init__(self) -> None:
         self._workflow: WorkflowSpec | None = None

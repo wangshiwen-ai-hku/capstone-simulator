@@ -1,8 +1,8 @@
-"""Synthetic business workloads for local agent and scheduler experiments.
+"""Synthetic workload definitions for scheduler and local-agent experiments.
 
-The catalog deliberately models business capabilities rather than a transport
-or execution framework. The same definitions drive the deterministic engine
-and process-local agents without coupling workloads to a middleware.
+Definitions contain task capabilities and target profiles without transport or
+execution-framework dependencies. The deterministic engine and process-local
+agents consume the same definitions.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class ExecutionTarget(str, enum.Enum):
 
 
 class UnsupportedTargetError(ValueError):
-    """Raised when a workload is deliberately unavailable on a target."""
+    """Raised when a workload target profile has ``supported=false``."""
 
 
 @dataclass(frozen=True)
@@ -108,7 +108,7 @@ class SyntheticRuntimeProfile:
 
 @dataclass(frozen=True)
 class SyntheticWorkload:
-    """One quickly replaceable fake business component and its target profiles."""
+    """Task definition with target-specific execution profiles."""
 
     task_type: str
     display_name: str
@@ -145,7 +145,7 @@ class SyntheticWorkload:
         latency_budget_ms: float | None = None,
         allow_local_fallback: bool | None = None,
     ) -> TaskSpec:
-        """Create the existing scheduler-facing TaskSpec from this fake module."""
+        """Convert the workload definition into a scheduler-facing TaskSpec."""
         profile = self.profile_for(target)
         dominant = (
             ResourceClass.GPU
@@ -261,7 +261,7 @@ class SyntheticSampler:
 
 @dataclass(frozen=True)
 class FakeComponent:
-    """Small facade fake agents can create directly from a catalog entry."""
+    """Catalog-backed execution facade for simulated agents."""
 
     workload: SyntheticWorkload
     target: ExecutionTarget
@@ -279,7 +279,7 @@ class FakeComponent:
 
 
 class SyntheticWorkloadCatalog:
-    """Mutable registry designed for quick addition of partner-like workloads."""
+    """Registry for workload definitions loaded from code or JSON."""
 
     def __init__(self, workloads: Iterable[SyntheticWorkload] = ()) -> None:
         self._workloads: dict[str, SyntheticWorkload] = {}

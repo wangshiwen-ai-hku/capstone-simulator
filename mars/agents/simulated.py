@@ -61,7 +61,7 @@ class AgentExecutionResult:
 
 @runtime_checkable
 class AgentSession(Protocol):
-    """Coordinator-facing contract implemented by local or future sessions."""
+    """Coordinator-facing execution contract."""
 
     @property
     def node_spec(self) -> NodeSpec: ...

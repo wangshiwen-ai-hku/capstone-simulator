@@ -21,11 +21,11 @@ from .schemas import BenchmarkScene
 
 
 class SceneValidationError(ValueError):
-    """The web scene cannot be represented safely in the MARS domain."""
+    """The web scene cannot be converted into the MARS domain."""
 
 
 def validate_scene(scene: BenchmarkScene) -> DagIndex:
-    """Validate scene references and return the authoritative MARS DAG index."""
+    """Validate scene references and return the MARS DAG index."""
     _validated_resource_map(scene)
     node_by_id = {node.id: node for node in scene.nodes}
     for task in scene.tasks:
@@ -45,7 +45,7 @@ def validate_scene(scene: BenchmarkScene) -> DagIndex:
 
 
 def build_workflow(scene: BenchmarkScene) -> WorkflowSpec:
-    """Convert a web scene into the authoritative MARS workflow model."""
+    """Convert a web scene into the MARS workflow model."""
     tasks: list[TaskInstance] = []
     for task in scene.tasks:
         task_class = TaskClass(task.task_class.value)
