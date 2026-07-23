@@ -8,10 +8,12 @@ from typing import Protocol, runtime_checkable
 from ..models import (
     ArtifactRef,
     Assignment,
+    InputArtifactBinding,
     NodeSnapshot,
     NodeSpec,
     TaskInstance,
     TransferReservation,
+    artifacts_from_bindings,
 )
 from ..optimizers.base import PlannedResourceReservation
 
@@ -45,6 +47,12 @@ class RuntimeInventory:
     heartbeats: tuple[AgentHeartbeat, ...]
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "nodes", tuple(self.nodes))
+        object.__setattr__(
+            self,
+            "heartbeats",
+            tuple(self.heartbeats),
+        )
         node_ids = tuple(node.node_id for node in self.nodes)
         heartbeat_ids = tuple(item.agent_id for item in self.heartbeats)
         if not node_ids:
@@ -76,21 +84,69 @@ class DispatchCommand:
     assignment: Assignment
     resource_reservation: PlannedResourceReservation
     transfer_reservations: tuple[TransferReservation, ...]
-    input_artifacts: tuple[ArtifactRef, ...]
+    input_artifact_bindings: tuple[InputArtifactBinding, ...]
+    problem_id: str
+    snapshot_id: str
+    policy_id: str
+    policy_version: str
     seed: int
     inject_failure: bool = False
 
     def __post_init__(self) -> None:
         """Validate the exact, already-approved plan fragment being committed."""
 
+        object.__setattr__(
+            self,
+            "transfer_reservations",
+            tuple(self.transfer_reservations),
+        )
+        object.__setattr__(
+            self,
+            "input_artifact_bindings",
+            tuple(self.input_artifact_bindings),
+        )
         assignment = self.assignment
         resource = self.resource_reservation
+        if not all(
+            value.strip()
+            for value in (
+                self.problem_id,
+                self.snapshot_id,
+                self.policy_id,
+                self.policy_version,
+            )
+        ):
+            raise ValueError(
+                "dispatch requires problem, snapshot, and policy correlation"
+            )
         if not assignment.epoch_id or not assignment.optimizer_id:
             raise ValueError(
                 "dispatch assignment must come from a validated scheduling plan"
             )
         if assignment.task_id != self.task.task_id:
             raise ValueError("dispatch task and assignment must match")
+        if any(
+            binding.consumer_task_id != self.task.task_id
+            for binding in self.input_artifact_bindings
+        ):
+            raise ValueError(
+                "dispatch input bindings must target the dispatched task"
+            )
+        consumer_ports = tuple(
+            binding.consumer_port
+            for binding in self.input_artifact_bindings
+        )
+        if len(consumer_ports) != len(set(consumer_ports)):
+            raise ValueError(
+                "dispatch input bindings must use unique consumer ports"
+            )
+        input_locations = tuple(
+            artifact.node_id for artifact in self.input_artifacts
+        )
+        if assignment.input_locations != input_locations:
+            raise ValueError(
+                "dispatch input bindings must match assignment inputs"
+            )
         if (
             resource.task_id != assignment.task_id
             or resource.node_id != assignment.target_node_id
@@ -170,6 +226,12 @@ class DispatchCommand:
                 "dispatch reservations must match assignment start"
             )
 
+    @property
+    def input_artifacts(self) -> tuple[ArtifactRef, ...]:
+        """Read-only compatibility view of unique input payloads."""
+
+        return artifacts_from_bindings(self.input_artifact_bindings)
+
 
 @dataclass(frozen=True)
 class DispatchAck:
@@ -195,6 +257,9 @@ class AttemptCompletion:
     energy_j: float
     outputs: tuple[ArtifactRef, ...]
     error_code: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "outputs", tuple(self.outputs))
 
 
 @runtime_checkable

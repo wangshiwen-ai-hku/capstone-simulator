@@ -277,8 +277,8 @@ export default function App() {
           <button className="primary" onClick={onGenerate} disabled={loading}>{loading ? '处理中...' : '生成 Scene / Benchmark'}</button>
 
           <hr />
-          <h2>算法测试</h2>
-          <label>调度算法</label>
+          <h2>调度策略评估</h2>
+          <label>调度策略预设</label>
           <select value={algorithm} onChange={(e) => setAlgorithm(e.target.value as Algorithm)}>
             {algorithmOptions.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
@@ -351,7 +351,7 @@ function Overview({ scene, result }: { scene: BenchmarkScene; result: Simulation
 
       {result && (
         <>
-          <h3>仿真指标 · {result.algorithm}</h3>
+          <h3>策略仿真指标 · {result.algorithm}</h3>
           <div className="metrics-grid">
             {Object.entries(result.metrics).map(([key, value]) => (
               <div className="metric" key={key}>

@@ -10,10 +10,12 @@ from typing import Iterable, Mapping
 from ..models import (
     ArtifactRef,
     Assignment,
+    InputArtifactBinding,
     NodeKind,
     NodeSnapshot,
     NodeSpec,
     TaskInstance,
+    artifacts_from_bindings,
     resolved_placement_constraints,
     task_resource_demand,
 )
@@ -44,8 +46,12 @@ class ExecutionInvocation:
     attempt_id: str
     task_id: str
     attempt_no: int
-    input_artifacts: tuple[ArtifactRef, ...]
+    input_artifact_bindings: tuple[InputArtifactBinding, ...]
     injected_failure: bool
+
+    @property
+    def input_artifacts(self) -> tuple[ArtifactRef, ...]:
+        return artifacts_from_bindings(self.input_artifact_bindings)
 
 
 @dataclass(frozen=True)
@@ -232,7 +238,7 @@ class _SimulatedAgent:
         task: TaskInstance,
         assignment: Assignment,
         reservation: _ResourceReservation,
-        input_artifacts: tuple[ArtifactRef, ...],
+        input_artifact_bindings: tuple[InputArtifactBinding, ...],
         *,
         seed: int,
         attempt_no: int,
@@ -257,7 +263,7 @@ class _SimulatedAgent:
                 attempt_id=reservation.attempt_id,
                 task_id=task.task_id,
                 attempt_no=attempt_no,
-                input_artifacts=input_artifacts,
+                input_artifact_bindings=input_artifact_bindings,
                 injected_failure=forced_failure,
             )
         )
@@ -535,7 +541,7 @@ class InProcessRuntime:
                 task,
                 assignment,
                 reservation,
-                command.input_artifacts,
+                command.input_artifact_bindings,
                 seed=command.seed,
                 attempt_no=command.attempt_no,
                 inject_failure=command.inject_failure,

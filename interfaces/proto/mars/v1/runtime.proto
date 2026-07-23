@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+package mars.v1;
+
+import "interfaces/proto/mars/v1/optimization.proto";
+import "interfaces/proto/mars/v1/topology.proto";
+import "interfaces/proto/mars/v1/workflow.proto";
+
+// Behavior exposed by a runtime adapter or agent integration.
+message RuntimeCapabilities {
+  bool discovery = 1;
+  bool reliable_control = 2;
+  bool feedback = 3;
+  bool cancellation = 4;
+  bool liveliness = 5;
+  bool virtual_time = 6;
+}
+
+message AgentHeartbeat {
+  // In mars.v1, agent_id is the execution node identifier and must equal
+  // node_snapshot.node_id.
+  string agent_id = 1;
+  uint64 sequence = 2;
+  double sampled_at_ms = 3;
+  NodeSnapshot node_snapshot = 4;
+  uint32 active_reservation_count = 5;
+  repeated PlannedResourceReservation active_resource_reservations = 6;
+}
+
+message RuntimeInventory {
+  string inventory_id = 1;
+  double captured_at_ms = 2;
+  repeated NodeSpec nodes = 3;
+  repeated AgentHeartbeat heartbeats = 4;
+  repeated TransferReservation active_transfer_reservations = 5;
+}
+
+message RegisterAgentRequest {
+  string schema_version = 1;
+
+  // The v1 runtime has one Agent per schedulable node. This value must equal
+  // node.node_id; agent_instance_id distinguishes process restarts.
+  string agent_id = 2;
+
+  // Distinguishes successive processes that register the same logical agent.
+  string agent_instance_id = 3;
+  NodeSpec node = 4;
+  RuntimeCapabilities capabilities = 5;
+  double sent_at_ms = 6;
+}
+
+message RegisterAgentResponse {
+  bool accepted = 1;
+  string registration_id = 2;
+  double control_plane_time_ms = 3;
+  double heartbeat_interval_ms = 4;
+  string error_code = 5;
+  string error_message = 6;
+}
+
+message HeartbeatRequest {
+  string schema_version = 1;
+  string registration_id = 2;
+  string agent_instance_id = 3;
+  AgentHeartbeat heartbeat = 4;
+}
+
+message HeartbeatResponse {
+  bool accepted = 1;
+  double control_plane_time_ms = 2;
+  double next_heartbeat_due_ms = 3;
+  string error_code = 4;
+  string error_message = 5;
+}
+
+// Exact, already-validated plan fragment committed to one agent attempt.
+message DispatchCommand {
+  string schema_version = 1;
+  string attempt_id = 2;
+  uint32 attempt_number = 3;
+  TaskInstance task = 4;
+  Assignment assignment = 5;
+  PlannedResourceReservation resource_reservation = 6;
+  repeated TransferReservation transfer_reservations = 7;
+  // Every binding's consumer_task_id must equal task.task_id.
+  repeated InputArtifactBinding input_artifact_bindings = 8;
+  uint64 random_seed = 9;
+  bool inject_failure = 10;
+  string problem_id = 11;
+  string snapshot_id = 12;
+  string policy_id = 13;
+  string policy_version = 14;
+}
+
+message DispatchAck {
+  string dispatch_id = 1;
+  string attempt_id = 2;
+  string task_id = 3;
+  string agent_id = 4;
+  bool accepted = 5;
+  string error_code = 6;
+  string error_message = 7;
+}
+
+// Terminal result correlated to one exact dispatch and retry attempt.
+message AttemptCompletion {
+  string dispatch_id = 1;
+  string attempt_id = 2;
+  string task_id = 3;
+  string agent_id = 4;
+  bool ok = 5;
+  double finished_time_ms = 6;
+  double compute_time_ms = 7;
+  double energy_j = 8;
+  repeated ArtifactRef outputs = 9;
+  string error_code = 10;
+  string error_message = 11;
+}
+
+message CancelAttemptRequest {
+  string attempt_id = 1;
+  string reason = 2;
+  double requested_at_ms = 3;
+}
+
+message CancelAttemptResponse {
+  string attempt_id = 1;
+  bool cancelled = 2;
+  string error_code = 3;
+  string error_message = 4;
+}

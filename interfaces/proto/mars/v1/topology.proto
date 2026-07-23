@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package mars.v1;
+
+import "interfaces/proto/mars/v1/common.proto";
+
+// Static identity and declared capacity of one compute node.
+message NodeSpec {
+  string node_id = 1;
+  NodeKind kind = 2;
+  double cpu_capacity_units = 3;
+  double gpu_capacity_units = 4;
+  double memory_capacity_gb = 5;
+  double network_bandwidth_mbps = 6;
+  double base_latency_ms = 7;
+  optional string architecture = 8;
+  optional double battery_capacity_wh = 9;
+  optional bool safety_capable = 10;
+  repeated string capabilities = 11;
+  repeated string supported_models = 12;
+  optional uint32 max_concurrency = 13;
+}
+
+// Dynamic node state reported by an agent. Utilization values are fractions in
+// [0, 1]. sampled_at_ms uses the control-plane timeline associated with the
+// enclosing snapshot or heartbeat.
+message NodeSnapshot {
+  string node_id = 1;
+  double cpu_utilization_ratio = 2;
+  double gpu_utilization_ratio = 3;
+  double memory_utilization_ratio = 4;
+  double temperature_celsius = 5;
+  double power_watts = 6;
+  double network_latency_ms = 7;
+  optional bool online = 8;
+  double sampled_at_ms = 9;
+  uint64 snapshot_sequence = 10;
+  uint32 queue_depth = 11;
+  uint32 active_task_count = 12;
+}
+
+// Static declaration for one directed network link.
+message LinkSpec {
+  string link_id = 1;
+  string source_node_id = 2;
+  string target_node_id = 3;
+  double bandwidth_capacity_mbps = 4;
+  double base_latency_ms = 5;
+}
+
+// Dynamic state for one directed link.
+message LinkSnapshot {
+  string link_id = 1;
+  double available_bandwidth_mbps = 2;
+  double latency_ms = 3;
+  double jitter_ms = 4;
+  double packet_loss_ratio = 5;
+  optional bool online = 6;
+  double sampled_at_ms = 7;
+  uint64 snapshot_sequence = 8;
+}
+
+message ResourceDemand {
+  double cpu_units = 1;
+  double gpu_units = 2;
+  double memory_gb = 3;
+}
+
+// Estimated movement of one artifact over a directed path.
+message TransferEstimate {
+  string transfer_id = 1;
+  string artifact_id = 2;
+  string source_node_id = 3;
+  string target_node_id = 4;
+  double size_mb = 5;
+  repeated string path_link_ids = 6;
+  double bottleneck_bandwidth_mbps = 7;
+  double transfer_time_ms = 8;
+  optional bool feasible = 9;
+  string rejection_reason = 10;
+}
+
+// Planned interval during which one task owns a transfer path.
+message TransferReservation {
+  string reservation_id = 1;
+  string epoch_id = 2;
+  string task_id = 3;
+  string transfer_id = 4;
+  repeated string path_link_ids = 5;
+  double start_time_ms = 6;
+  double finish_time_ms = 7;
+  double size_mb = 8;
+}
+
+// Planned compute-capacity interval for one task on one node.
+message PlannedResourceReservation {
+  string reservation_id = 1;
+  string epoch_id = 2;
+  string task_id = 3;
+  string node_id = 4;
+  double start_time_ms = 5;
+  double finish_time_ms = 6;
+  ResourceDemand demand = 7;
+}

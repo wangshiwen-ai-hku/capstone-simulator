@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import enum
 import math
+from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 from ..models import (
     Assignment,
     ExecutionMode,
+    InputArtifactBinding,
     LinkSnapshot,
     LinkSpec,
     NodeKind,
@@ -19,6 +22,15 @@ from ..models import (
     TaskInstance,
     TransferEstimate,
     TransferReservation,
+    artifacts_from_bindings,
+)
+from .policy import (
+    ConstraintEvaluation,
+    ObjectiveAggregation,
+    ObjectiveEvaluation,
+    SchedulingPolicy,
+    SolveLimits,
+    algorithm_aliases,
 )
 
 
@@ -63,6 +75,12 @@ class CandidateEstimate:
     reason: str = ""
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "input_locations",
+            tuple(self.input_locations),
+        )
+        object.__setattr__(self, "transfers", tuple(self.transfers))
         if not math.isfinite(self.ready_time_ms):
             raise ValueError("candidate ready_time_ms must be finite")
         if self.ready_time_ms < 0:
@@ -109,6 +127,7 @@ class SchedulingEpoch:
     ready_tasks: tuple[TaskInstance, ...]
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "ready_tasks", tuple(self.ready_tasks))
         if not self.epoch_id.strip():
             raise ValueError("epoch_id must be non-blank")
         if not math.isfinite(self.now_ms) or self.now_ms < 0:
@@ -143,52 +162,114 @@ class PlannedResourceReservation:
 
 
 @dataclass(frozen=True)
-class SchedulingProblem:
-    """Transport-neutral input consumed by every MARS optimizer."""
+class SchedulingSnapshot:
+    """Deeply immutable facts captured for one optimization run."""
 
+    schema_version: str
+    snapshot_id: str
+    captured_at_ms: float
     epoch: SchedulingEpoch
     node_specs: tuple[NodeSpec, ...]
     node_snapshots: tuple[NodeSnapshot, ...]
     link_specs: tuple[LinkSpec, ...]
     link_snapshots: tuple[LinkSnapshot, ...]
     candidates: Mapping[str, tuple[CandidateEstimate, ...]]
+    input_artifact_bindings: Mapping[
+        str, tuple[InputArtifactBinding, ...]
+    ]
     node_available_ms: Mapping[str, float]
     link_available_ms: Mapping[str, float]
     existing_node_reservations: tuple[
         PlannedResourceReservation, ...
     ] = ()
     critical_tail_ms: Mapping[str, float] = field(default_factory=dict)
-    solve_budget_ms: float = 50.0
 
     def __post_init__(self) -> None:
+        if not self.schema_version.strip():
+            raise ValueError("snapshot schema_version must be non-blank")
+        if not self.snapshot_id.strip():
+            raise ValueError("snapshot_id must be non-blank")
         if (
-            not math.isfinite(self.solve_budget_ms)
-            or self.solve_budget_ms <= 0
+            not math.isfinite(self.captured_at_ms)
+            or self.captured_at_ms < 0
         ):
-            raise ValueError("solve_budget_ms must be positive")
+            raise ValueError("captured_at_ms must be non-negative")
+        object.__setattr__(self, "node_specs", tuple(self.node_specs))
+        object.__setattr__(
+            self,
+            "node_snapshots",
+            tuple(self.node_snapshots),
+        )
+        object.__setattr__(self, "link_specs", tuple(self.link_specs))
+        object.__setattr__(
+            self,
+            "link_snapshots",
+            tuple(self.link_snapshots),
+        )
+        object.__setattr__(
+            self,
+            "candidates",
+            MappingProxyType(
+                {
+                    task_id: tuple(estimates)
+                    for task_id, estimates in self.candidates.items()
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "input_artifact_bindings",
+            MappingProxyType(
+                {
+                    task_id: tuple(bindings)
+                    for task_id, bindings
+                    in self.input_artifact_bindings.items()
+                }
+            ),
+        )
+        object.__setattr__(
+            self,
+            "node_available_ms",
+            MappingProxyType(dict(self.node_available_ms)),
+        )
+        object.__setattr__(
+            self,
+            "link_available_ms",
+            MappingProxyType(dict(self.link_available_ms)),
+        )
+        object.__setattr__(
+            self,
+            "existing_node_reservations",
+            tuple(self.existing_node_reservations),
+        )
+        object.__setattr__(
+            self,
+            "critical_tail_ms",
+            MappingProxyType(dict(self.critical_tail_ms)),
+        )
         node_ids = tuple(item.node_id for item in self.node_specs)
         snapshot_ids = tuple(item.node_id for item in self.node_snapshots)
         if len(node_ids) != len(set(node_ids)):
-            raise ValueError("SchedulingProblem node ids must be unique")
+            raise ValueError("SchedulingSnapshot node ids must be unique")
         if len(snapshot_ids) != len(set(snapshot_ids)):
-            raise ValueError("SchedulingProblem snapshot ids must be unique")
+            raise ValueError("node snapshot ids must be unique")
         if set(node_ids) != set(snapshot_ids):
             raise ValueError(
-                "SchedulingProblem requires one snapshot for every node"
+                "SchedulingSnapshot requires one state for every node"
             )
         link_ids = tuple(item.link_id for item in self.link_specs)
         link_snapshot_ids = tuple(
             item.link_id for item in self.link_snapshots
         )
         if len(link_ids) != len(set(link_ids)):
-            raise ValueError("SchedulingProblem link ids must be unique")
+            raise ValueError("SchedulingSnapshot link ids must be unique")
         if len(link_snapshot_ids) != len(set(link_snapshot_ids)):
             raise ValueError(
-                "SchedulingProblem link snapshot ids must be unique"
+                "SchedulingSnapshot link state ids must be unique"
             )
         if set(link_ids) != set(link_snapshot_ids):
             raise ValueError(
-                "SchedulingProblem requires one snapshot for every link"
+                "SchedulingSnapshot requires one state for every link"
             )
         for link in self.link_specs:
             if (
@@ -206,13 +287,45 @@ class SchedulingProblem:
         }
         if unknown_sources:
             raise ValueError(
-                "SchedulingProblem tasks reference unknown source nodes: "
+                "SchedulingSnapshot tasks reference unknown source nodes: "
                 f"{sorted(unknown_sources)}"
             )
         if set(self.candidates) != set(task_ids):
             raise ValueError(
-                "SchedulingProblem candidates must cover every epoch task"
+                "SchedulingSnapshot candidates must cover every epoch task"
             )
+        if set(self.input_artifact_bindings) != set(task_ids):
+            raise ValueError(
+                "input artifact bindings must cover every epoch task"
+            )
+        input_artifacts_by_task = {}
+        for task_id, bindings in self.input_artifact_bindings.items():
+            if any(
+                binding.consumer_task_id != task_id
+                for binding in bindings
+            ):
+                raise ValueError(
+                    f"input binding consumer mismatch for task {task_id}"
+                )
+            consumer_ports = tuple(
+                binding.consumer_port for binding in bindings
+            )
+            if len(consumer_ports) != len(set(consumer_ports)):
+                raise ValueError(
+                    f"task {task_id} has duplicate input port bindings"
+                )
+            artifacts = artifacts_from_bindings(bindings)
+            unknown_input_nodes = {
+                artifact.node_id
+                for artifact in artifacts
+                if artifact.node_id not in node_ids
+            }
+            if unknown_input_nodes:
+                raise ValueError(
+                    f"task {task_id} input artifacts reference unknown "
+                    f"nodes {sorted(unknown_input_nodes)}"
+                )
+            input_artifacts_by_task[task_id] = artifacts
         for task_id, estimates in self.candidates.items():
             if any(item.task_id != task_id for item in estimates):
                 raise ValueError(
@@ -237,6 +350,18 @@ class SchedulingProblem:
                 if estimate.node_kind is not node.kind:
                     raise ValueError(
                         f"candidate node kind mismatch for {estimate.node_id}"
+                    )
+                expected_locations = tuple(
+                    artifact.node_id
+                    for artifact in input_artifacts_by_task[task_id]
+                )
+                if (
+                    estimate.feasible
+                    and estimate.input_locations != expected_locations
+                ):
+                    raise ValueError(
+                        f"candidate input locations do not match bindings "
+                        f"for task {task_id}"
                     )
                 for transfer in estimate.transfers:
                     unknown_links = (
@@ -292,6 +417,83 @@ class SchedulingProblem:
                 "critical-tail estimates must be non-negative"
             )
 
+
+@dataclass(frozen=True)
+class SchedulingProblem:
+    """Canonical optimizer input: captured facts, intent, and solve limits."""
+
+    problem_id: str
+    snapshot: SchedulingSnapshot
+    policy: SchedulingPolicy
+    solve_limits: SolveLimits
+    schema_version: str = "mars.scheduling-problem.v1"
+
+    def __post_init__(self) -> None:
+        if not self.schema_version.strip():
+            raise ValueError("problem schema_version must be non-blank")
+        if not self.problem_id.strip():
+            raise ValueError("problem_id must be non-blank")
+        if not isinstance(self.snapshot, SchedulingSnapshot):
+            raise TypeError("snapshot must be a SchedulingSnapshot")
+        if not isinstance(self.policy, SchedulingPolicy):
+            raise TypeError("policy must be a SchedulingPolicy")
+        if not isinstance(self.solve_limits, SolveLimits):
+            raise TypeError("solve_limits must be SolveLimits")
+
+    @property
+    def epoch(self) -> SchedulingEpoch:
+        return self.snapshot.epoch
+
+    @property
+    def node_specs(self) -> tuple[NodeSpec, ...]:
+        return self.snapshot.node_specs
+
+    @property
+    def node_snapshots(self) -> tuple[NodeSnapshot, ...]:
+        return self.snapshot.node_snapshots
+
+    @property
+    def link_specs(self) -> tuple[LinkSpec, ...]:
+        return self.snapshot.link_specs
+
+    @property
+    def link_snapshots(self) -> tuple[LinkSnapshot, ...]:
+        return self.snapshot.link_snapshots
+
+    @property
+    def candidates(self) -> Mapping[str, tuple[CandidateEstimate, ...]]:
+        return self.snapshot.candidates
+
+    @property
+    def input_artifact_bindings(
+        self,
+    ) -> Mapping[str, tuple[InputArtifactBinding, ...]]:
+        return self.snapshot.input_artifact_bindings
+
+    @property
+    def node_available_ms(self) -> Mapping[str, float]:
+        return self.snapshot.node_available_ms
+
+    @property
+    def link_available_ms(self) -> Mapping[str, float]:
+        return self.snapshot.link_available_ms
+
+    @property
+    def existing_node_reservations(
+        self,
+    ) -> tuple[PlannedResourceReservation, ...]:
+        return self.snapshot.existing_node_reservations
+
+    @property
+    def critical_tail_ms(self) -> Mapping[str, float]:
+        return self.snapshot.critical_tail_ms
+
+    @property
+    def solve_budget_ms(self) -> float:
+        """Compatibility view for existing optimizers."""
+
+        return self.solve_limits.solve_budget_ms
+
     @property
     def task_by_id(self) -> dict[str, TaskInstance]:
         return {task.task_id: task for task in self.epoch.ready_tasks}
@@ -313,18 +515,89 @@ class SchedulingProblem:
         return {item.link_id: item for item in self.link_snapshots}
 
 
+class SolveStatus(str, enum.Enum):
+    FEASIBLE = "feasible"
+    OPTIMAL = "optimal"
+    INFEASIBLE = "infeasible"
+    TIME_LIMIT = "time_limit"
+    ITERATION_LIMIT = "iteration_limit"
+    ERROR = "error"
+
+
 @dataclass(frozen=True)
 class SchedulingPlan:
-    """Validated multi-task result returned by an optimizer."""
+    """Correlated multi-task result returned by an optimizer for validation."""
 
+    problem_id: str
+    snapshot_id: str
+    policy_id: str
+    policy_version: str
     epoch_id: str
     optimizer_id: str
     assignments: tuple[Assignment, ...]
+    schema_version: str = "mars.scheduling-plan.v1"
+    optimizer_version: str = ""
+    solve_status: SolveStatus = SolveStatus.FEASIBLE
+    solve_elapsed_ms: float = 0.0
+    iteration_count: int = 0
+    termination_reason: str = ""
     node_reservations: tuple[PlannedResourceReservation, ...] = ()
     transfer_reservations: tuple[TransferReservation, ...] = ()
     deferred_task_ids: tuple[str, ...] = ()
     objective_value: float = 0.0
+    objective_key: tuple[float, ...] = ()
+    objective_evaluations: tuple[ObjectiveEvaluation, ...] = ()
+    constraint_evaluations: tuple[ConstraintEvaluation, ...] = ()
     diagnostics: Mapping[str, float | int | str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.schema_version.strip():
+            raise ValueError("plan schema_version must be non-blank")
+        if not isinstance(self.solve_status, SolveStatus):
+            raise TypeError("solve_status must be a SolveStatus")
+        if (
+            not math.isfinite(self.solve_elapsed_ms)
+            or self.solve_elapsed_ms < 0
+        ):
+            raise ValueError("solve_elapsed_ms must be non-negative")
+        if self.iteration_count < 0:
+            raise ValueError("iteration_count must be non-negative")
+        object.__setattr__(self, "assignments", tuple(self.assignments))
+        object.__setattr__(
+            self,
+            "node_reservations",
+            tuple(self.node_reservations),
+        )
+        object.__setattr__(
+            self,
+            "transfer_reservations",
+            tuple(self.transfer_reservations),
+        )
+        object.__setattr__(
+            self,
+            "deferred_task_ids",
+            tuple(self.deferred_task_ids),
+        )
+        object.__setattr__(
+            self,
+            "objective_key",
+            tuple(self.objective_key),
+        )
+        object.__setattr__(
+            self,
+            "objective_evaluations",
+            tuple(self.objective_evaluations),
+        )
+        object.__setattr__(
+            self,
+            "constraint_evaluations",
+            tuple(self.constraint_evaluations),
+        )
+        object.__setattr__(
+            self,
+            "diagnostics",
+            MappingProxyType(dict(self.diagnostics)),
+        )
 
     @property
     def assignment_by_task(self) -> dict[str, Assignment]:
@@ -356,6 +629,12 @@ class OptimizerRegistry:
         names = (optimizer.optimizer_id, *aliases)
         if any(not name.strip() for name in names):
             raise ValueError("optimizer ids and aliases must be non-blank")
+        reserved = set(names) & set(algorithm_aliases())
+        if reserved:
+            raise ValueError(
+                "legacy algorithm aliases are reserved for policy "
+                f"selection: {sorted(reserved)}"
+            )
         if len(names) != len(set(names)):
             raise ValueError(
                 "optimizer id and aliases must be unique"
@@ -407,18 +686,35 @@ def validate_plan(
     problem: SchedulingProblem,
     plan: SchedulingPlan,
 ) -> SchedulingPlan:
-    """Prove task coverage, candidate feasibility, and reservation safety."""
+    """Validate invariants, policy bounds, and recompute reported objectives."""
 
+    if plan.problem_id != problem.problem_id:
+        raise PlanValidationError("plan problem_id does not match the problem")
+    if plan.snapshot_id != problem.snapshot.snapshot_id:
+        raise PlanValidationError(
+            "plan snapshot_id does not match the problem"
+        )
+    if plan.policy_id != problem.policy.policy_id:
+        raise PlanValidationError("plan policy_id does not match the problem")
+    if plan.policy_version != problem.policy.version:
+        raise PlanValidationError(
+            "plan policy_version does not match the problem"
+        )
     if plan.epoch_id != problem.epoch.epoch_id:
         raise PlanValidationError("plan epoch_id does not match the problem")
     if not plan.optimizer_id.strip():
         raise PlanValidationError("plan optimizer_id must be non-blank")
+    if plan.solve_status in {SolveStatus.INFEASIBLE, SolveStatus.ERROR}:
+        raise PlanValidationError(
+            f"plan solve_status {plan.solve_status.value!r} is not "
+            "committable"
+        )
     if (
-        not math.isfinite(plan.objective_value)
-        or plan.objective_value < 0
+        problem.solve_limits.max_iterations
+        and plan.iteration_count > problem.solve_limits.max_iterations
     ):
         raise PlanValidationError(
-            "plan objective_value must be finite and non-negative"
+            "plan iteration_count exceeds the problem solve limit"
         )
 
     expected = {task.task_id for task in problem.epoch.ready_tasks}
@@ -524,6 +820,11 @@ def validate_plan(
         if abs(assignment.energy_j - candidate.energy_j) > 1e-6:
             raise PlanValidationError(
                 f"task {assignment.task_id} energy estimate does not "
+                "match its candidate"
+            )
+        if assignment.input_locations != candidate.input_locations:
+            raise PlanValidationError(
+                f"task {assignment.task_id} input locations do not "
                 "match its candidate"
             )
         allowed_modes = (
@@ -639,7 +940,64 @@ def validate_plan(
         selected_candidates,
         non_drop_ids,
     )
-    return plan
+    from .evaluation import (
+        evaluate_constraints,
+        evaluate_objectives,
+        objective_key,
+    )
+
+    objective_evaluations = evaluate_objectives(problem, plan)
+    constraint_evaluations = evaluate_constraints(problem, plan)
+    violated_hard_constraints = tuple(
+        item.constraint_id
+        for item in constraint_evaluations
+        if item.hard and not item.satisfied
+    )
+    if violated_hard_constraints:
+        raise PlanValidationError(
+            "plan violates hard policy constraints: "
+            f"{list(violated_hard_constraints)}"
+        )
+    evaluated_objective_key = objective_key(
+        problem.policy,
+        objective_evaluations,
+        constraint_evaluations,
+    )
+    if any(
+        not math.isfinite(value)
+        for value in evaluated_objective_key
+    ):
+        raise PlanValidationError(
+            "evaluated plan objective key must be finite"
+        )
+    objective_value = (
+        evaluated_objective_key[0]
+        if evaluated_objective_key
+        else 0.0
+    )
+    return replace(
+        plan,
+        objective_value=objective_value,
+        objective_key=evaluated_objective_key,
+        objective_evaluations=objective_evaluations,
+        constraint_evaluations=constraint_evaluations,
+        diagnostics={
+            **plan.diagnostics,
+            "problem_id": problem.problem_id,
+            "snapshot_id": problem.snapshot.snapshot_id,
+            "policy_id": problem.policy.policy_id,
+            "policy_version": problem.policy.version,
+            "objective_aggregation": (
+                problem.policy.objective_aggregation.value
+            ),
+            "objective_value_semantics": (
+                "complete_weighted_sum"
+                if problem.policy.objective_aggregation
+                is ObjectiveAggregation.WEIGHTED_SUM
+                else "lexicographic_primary_only"
+            ),
+        },
+    )
 
 
 def _validate_node_capacity(

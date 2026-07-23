@@ -20,6 +20,8 @@ jobs:
           cache-dependency-path: |
             backend/requirements.txt
             backend/requirements-dev.txt
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y protobuf-compiler
       - run: python -m pip install -r backend/requirements-dev.txt
       - run: python -m pytest -q
 

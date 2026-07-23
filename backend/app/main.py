@@ -5,7 +5,11 @@ from dataclasses import asdict
 
 from mars import __version__ as mars_version
 from mars.models import TASK_CLASS_LABELS, TaskClass
-from mars.optimizers import built_in_registry
+from mars.optimizers import (
+    algorithm_aliases,
+    built_in_policy_ids,
+    built_in_registry,
+)
 from mars.synthetic_workloads import load_default_synthetic_workloads
 
 logging.basicConfig(
@@ -86,12 +90,18 @@ def architecture():
         "planning_pipeline": [
             "hard_constraint_filtering",
             "candidate_estimation",
+            "immutable_scheduling_snapshot",
+            "scheduling_policy",
+            "solve_limits",
             "scheduling_problem",
             "optimizer",
-            "plan_validation_or_repair",
+            "shared_objective_constraint_evaluation",
+            "plan_validation_or_fallback",
             "reservation_commit",
         ],
         "optimizers": list(built_in_registry().ids()),
+        "policies": list(built_in_policy_ids()),
+        "algorithm_aliases": algorithm_aliases(),
         "task_classes": [
             {"id": task_class.value, "label": TASK_CLASS_LABELS[task_class]}
             for task_class in TaskClass
@@ -177,6 +187,6 @@ def generate_scene(req: GenerateSceneRequest):
 
 @app.post("/api/simulate")
 async def simulate(req: SimulateRequest):
-    logger.info(f"Received request to run simulation with algorithm: {req.algorithm}")
+    logger.info(f"Received request to run simulation with policy preset: {req.algorithm}")
     _validate_scene_request(req.scene)
     return await run_simulation(req)

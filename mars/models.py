@@ -9,7 +9,8 @@ from __future__ import annotations
 import enum
 import math
 from dataclasses import dataclass, field
-from typing import Mapping
+from types import MappingProxyType
+from typing import Iterable, Mapping
 
 
 class TaskClass(str, enum.Enum):
@@ -103,6 +104,21 @@ class PlacementConstraints:
     replicable: bool = False
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "allowed_node_kinds",
+            tuple(self.allowed_node_kinds),
+        )
+        object.__setattr__(
+            self,
+            "preferred_node_kinds",
+            tuple(self.preferred_node_kinds),
+        )
+        object.__setattr__(
+            self,
+            "required_capabilities",
+            tuple(self.required_capabilities),
+        )
         if self.pinned_node_id and not self.pinned_node_id.strip():
             raise ValueError("pinned_node_id must be empty or non-blank")
         if len(self.allowed_node_kinds) != len(set(self.allowed_node_kinds)):
@@ -157,6 +173,10 @@ class TaskSpec:
     output_ports: tuple[DataPort, ...] = ()
     placement_constraints: PlacementConstraints | None = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "input_ports", tuple(self.input_ports))
+        object.__setattr__(self, "output_ports", tuple(self.output_ports))
+
 
 @dataclass(frozen=True)
 class TaskInstance:
@@ -172,6 +192,13 @@ class TaskInstance:
     deadline_time_ms: float = 1000.0
     expected_accuracy: float = 0.95
     input_ref: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "dependency_task_ids",
+            tuple(self.dependency_task_ids),
+        )
 
 
 @dataclass(frozen=True)
@@ -194,6 +221,15 @@ class WorkflowSpec:
     metadata: Mapping[str, str] = field(default_factory=dict)
     data_edges: tuple[DataEdge, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "tasks", tuple(self.tasks))
+        object.__setattr__(self, "data_edges", tuple(self.data_edges))
+        object.__setattr__(
+            self,
+            "metadata",
+            MappingProxyType(dict(self.metadata)),
+        )
+
 
 @dataclass(frozen=True)
 class ArtifactRef:
@@ -205,6 +241,44 @@ class ArtifactRef:
     checksum: str = ""
     producer_port: str = "result"
     message_type: str = ""
+
+
+@dataclass(frozen=True)
+class InputArtifactBinding:
+    """Bind one reusable Artifact to an exact consumer task input port."""
+
+    consumer_task_id: str
+    consumer_port: str
+    artifact: ArtifactRef
+
+    def __post_init__(self) -> None:
+        if not self.consumer_task_id.strip():
+            raise ValueError("consumer_task_id must be non-blank")
+        if not self.consumer_port.strip():
+            raise ValueError("consumer_port must be non-blank")
+        if not isinstance(self.artifact, ArtifactRef):
+            raise TypeError("artifact must be an ArtifactRef")
+
+
+def artifacts_from_bindings(
+    bindings: Iterable[InputArtifactBinding],
+) -> tuple[ArtifactRef, ...]:
+    """Project port bindings to unique payload transfers in stable order."""
+
+    artifacts_by_id: dict[str, ArtifactRef] = {}
+    ordered: list[ArtifactRef] = []
+    for binding in bindings:
+        artifact = binding.artifact
+        existing = artifacts_by_id.get(artifact.artifact_id)
+        if existing is not None:
+            if existing != artifact:
+                raise ValueError(
+                    "one artifact_id cannot describe different artifacts"
+                )
+            continue
+        artifacts_by_id[artifact.artifact_id] = artifact
+        ordered.append(artifact)
+    return tuple(ordered)
 
 
 @dataclass(frozen=True)
@@ -226,6 +300,16 @@ class NodeSpec:
     max_concurrency: int = 1
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "capabilities",
+            tuple(self.capabilities),
+        )
+        object.__setattr__(
+            self,
+            "supported_models",
+            tuple(self.supported_models),
+        )
         if not self.node_id.strip():
             raise ValueError("node_id must be non-blank")
         capacities = (
@@ -391,6 +475,11 @@ class TransferEstimate:
     reason: str = ""
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "path_link_ids",
+            tuple(self.path_link_ids),
+        )
         if not all(
             math.isfinite(value)
             for value in (
@@ -430,6 +519,11 @@ class TransferReservation:
     size_mb: float
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "path_link_ids",
+            tuple(self.path_link_ids),
+        )
         if not all(
             math.isfinite(value)
             for value in (
@@ -463,6 +557,18 @@ class Assignment:
     optimizer_id: str = ""
     epoch_id: str = ""
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "input_locations",
+            tuple(self.input_locations),
+        )
+        object.__setattr__(
+            self,
+            "transfer_link_ids",
+            tuple(self.transfer_link_ids),
+        )
+
 
 @dataclass(frozen=True)
 class TaskCompletion:
@@ -476,6 +582,7 @@ class TaskCompletion:
 
     def __post_init__(self) -> None:
         """Normalize the legacy singular artifact into the multi-output form."""
+        object.__setattr__(self, "outputs", tuple(self.outputs))
         if self.artifact is not None and self.outputs:
             if len(self.outputs) != 1 or self.outputs[0] != self.artifact:
                 raise ValueError("artifact and outputs describe different task outputs")
@@ -493,6 +600,23 @@ class WorkflowProgress:
     state_counts: Mapping[str, int]
     ready_task_ids: tuple[str, ...]
     critical_path: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "state_counts",
+            MappingProxyType(dict(self.state_counts)),
+        )
+        object.__setattr__(
+            self,
+            "ready_task_ids",
+            tuple(self.ready_task_ids),
+        )
+        object.__setattr__(
+            self,
+            "critical_path",
+            tuple(self.critical_path),
+        )
 
 
 TASK_CLASS_LABELS: dict[TaskClass, str] = {

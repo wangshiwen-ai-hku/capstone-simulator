@@ -8,7 +8,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from statistics import mean
 
-from .dag import TaskManager, resolve_task_inputs
+from .dag import TaskManager, resolve_task_input_bindings
 from .models import (
     ArtifactRef,
     Assignment,
@@ -22,6 +22,7 @@ from .models import (
     TaskState,
     TransferReservation,
     WorkflowSpec,
+    artifacts_from_bindings,
     resolved_placement_constraints,
 )
 from .network import synthesize_legacy_full_mesh
@@ -156,11 +157,14 @@ def run_workflow_simulation(
             epoch_tasks = tuple(
                 sorted(arrived, key=lambda task: task.task_id)
             )
-            artifacts_by_task: dict[str, tuple[ArtifactRef, ...]] = {}
+            input_bindings_by_task = {}
             ready_times: dict[str, float] = {}
             for task in epoch_tasks:
-                artifacts_by_task[task.task_id] = (
-                    resolve_task_inputs(manager, task.task_id)
+                input_bindings_by_task[task.task_id] = (
+                    resolve_task_input_bindings(
+                        manager,
+                        task.task_id,
+                    )
                 )
                 ready_times[task.task_id] = ready_at(task)
             carry_in_reservations = tuple(
@@ -181,7 +185,7 @@ def run_workflow_simulation(
                 optimizer=algorithm,
                 node_specs=node_by_id,
                 node_snapshots=snapshot_by_id,
-                parent_artifacts=artifacts_by_task,
+                input_artifact_bindings=input_bindings_by_task,
                 ready_time_ms=ready_times,
                 node_available_ms={
                     node_id: current_time_ms for node_id in node_by_id
@@ -242,7 +246,9 @@ def run_workflow_simulation(
             for assignment in ordered_assignments:
                 task = task_by_id[assignment.task_id]
                 released_at = ready_times[task.task_id]
-                artifacts = artifacts_by_task[task.task_id]
+                artifacts = artifacts_from_bindings(
+                    input_bindings_by_task[task.task_id]
+                )
                 manager.mark_running(task.task_id)
                 if not assignment.target_node_id:
                     sequence += 1

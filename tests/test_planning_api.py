@@ -12,7 +12,11 @@ from backend.app.mars_adapter import (
 from backend.app.runtime import _runtime_for_scene
 from backend.app.scene_generator import build_deterministic_scene
 from backend.app.schemas import BenchmarkScene, GenerateSceneRequest
-from mars.optimizers import built_in_registry
+from mars.optimizers import (
+    algorithm_aliases,
+    built_in_policy_ids,
+    built_in_registry,
+)
 
 
 def _scene():
@@ -119,10 +123,16 @@ def test_architecture_reports_the_pluggable_optimizer_pipeline() -> None:
     assert set(payload["optimizers"]) == set(
         built_in_registry().ids()
     )
-    assert payload["planning_pipeline"][2:5] == [
+    assert payload["policies"] == list(built_in_policy_ids())
+    assert payload["algorithm_aliases"] == algorithm_aliases()
+    assert payload["planning_pipeline"][2:9] == [
+        "immutable_scheduling_snapshot",
+        "scheduling_policy",
+        "solve_limits",
         "scheduling_problem",
         "optimizer",
-        "plan_validation_or_repair",
+        "shared_objective_constraint_evaluation",
+        "plan_validation_or_fallback",
     ]
 
 

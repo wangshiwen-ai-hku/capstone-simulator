@@ -130,7 +130,11 @@ def _command(
             demand=demand,
         ),
         transfer_reservations=(),
-        input_artifacts=(),
+        input_artifact_bindings=(),
+        problem_id="test-problem",
+        snapshot_id="test-snapshot",
+        policy_id="test-policy",
+        policy_version="1",
         seed=7,
     )
 
@@ -212,7 +216,13 @@ class RuntimePortTests(unittest.IsolatedAsyncioTestCase):
                 assignment=plan.assignments[0],
                 resource_reservation=plan.node_reservations[0],
                 transfer_reservations=plan.transfer_reservations,
-                input_artifacts=(),
+                input_artifact_bindings=(
+                    problem.input_artifact_bindings[item.task_id]
+                ),
+                problem_id=plan.problem_id,
+                snapshot_id=plan.snapshot_id,
+                policy_id=plan.policy_id,
+                policy_version=plan.policy_version,
                 seed=7,
             )
         )

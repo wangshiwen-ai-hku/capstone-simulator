@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package mars.v1;
+
+import "interfaces/proto/mars/v1/common.proto";
+
+enum ProfileSourceKind {
+  PROFILE_SOURCE_KIND_UNSPECIFIED = 0;
+  PROFILE_SOURCE_KIND_MEASURED = 1;
+  PROFILE_SOURCE_KIND_SYNTHETIC = 2;
+  PROFILE_SOURCE_KIND_PARTNER_SUPPLIED = 3;
+  PROFILE_SOURCE_KIND_DERIVED = 4;
+}
+
+// Dimensions that select an execution profile.
+message ProfileKey {
+  string task_type = 1;
+  NodeKind node_kind = 2;
+  string architecture = 3;
+  string model_variant = 4;
+  string input_shape = 5;
+  string precision = 6;
+  uint32 batch_size = 7;
+}
+
+message ProfileProvenance {
+  ProfileSourceKind source_kind = 1;
+  string source_name = 2;
+  string dataset_id = 3;
+  string generator_version = 4;
+  double generated_at_ms = 5;
+  double observation_window_start_ms = 6;
+  double observation_window_end_ms = 7;
+}
+
+// Raw record emitted after one real or simulated attempt.
+message ExecutionObservation {
+  string observation_id = 1;
+  string workflow_id = 2;
+  string task_id = 3;
+  string attempt_id = 4;
+  string node_id = 5;
+  ProfileKey profile_key = 6;
+  double input_size_mb = 7;
+  double output_size_mb = 8;
+  double queue_time_ms = 9;
+  double compute_time_ms = 10;
+  double communication_time_ms = 11;
+  double end_to_end_time_ms = 12;
+  double energy_j = 13;
+  double peak_memory_mb = 14;
+  optional double achieved_accuracy_ratio = 15;
+  bool success = 16;
+  string error_code = 17;
+  double sampled_at_ms = 18;
+  ProfileProvenance provenance = 19;
+}
+
+// Aggregated distribution used by candidate estimation.
+message ExecutionProfile {
+  ProfileKey profile_key = 1;
+  TaskClass task_class = 2;
+  double p50_compute_time_ms = 3;
+  double p95_compute_time_ms = 4;
+  double p99_compute_time_ms = 5;
+  double throughput_per_second = 6;
+  double peak_memory_mb = 7;
+  double expected_energy_j = 8;
+  double expected_output_size_mb = 9;
+  double failure_probability_ratio = 10;
+  optional double expected_accuracy_ratio = 11;
+  optional bool supported = 12;
+  uint64 sample_count = 13;
+  ProfileProvenance provenance = 14;
+}
+
+// Immutable catalog used to build one or more SchedulingSnapshot values.
+message ProfileSnapshot {
+  string schema_version = 1;
+  string profile_snapshot_id = 2;
+  double captured_at_ms = 3;
+  repeated ExecutionProfile profiles = 4;
+}

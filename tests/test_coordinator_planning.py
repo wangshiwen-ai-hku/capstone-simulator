@@ -85,16 +85,18 @@ class _TrackingOptimizer:
     def __init__(self) -> None:
         self.epochs: list[tuple[str, ...]] = []
         self.link_inventories: list[tuple[str, ...]] = []
+        self.problems = []
         self.plans: list[SchedulingPlan] = []
 
     def solve(self, problem):
+        self.problems.append(problem)
         self.epochs.append(
             tuple(task.task_id for task in problem.epoch.ready_tasks)
         )
         self.link_inventories.append(
             tuple(link.link_id for link in problem.link_specs)
         )
-        baseline = HeuristicOptimizer("greedy_cost").solve(problem)
+        baseline = HeuristicOptimizer().solve(problem)
         plan = replace(
             baseline,
             optimizer_id=self.optimizer_id,
@@ -116,6 +118,10 @@ class _DeferredOptimizer:
 
     def solve(self, problem):
         return SchedulingPlan(
+            problem_id=problem.problem_id,
+            snapshot_id=problem.snapshot.snapshot_id,
+            policy_id=problem.policy.policy_id,
+            policy_version=problem.policy.version,
             epoch_id=problem.epoch.epoch_id,
             optimizer_id=self.optimizer_id,
             assignments=(),
@@ -212,6 +218,15 @@ def test_coordinator_dispatches_the_exact_validated_assignment() -> None:
     assert dispatch.resource_reservation is validated_resource_reservation
     assert validated_transfer_reservations
     assert dispatch.transfer_reservations == validated_transfer_reservations
+    solved_problem = optimizer.problems[0]
+    assert dispatch.problem_id == optimizer.plans[0].problem_id
+    assert dispatch.snapshot_id == optimizer.plans[0].snapshot_id
+    assert dispatch.policy_id == optimizer.plans[0].policy_id
+    assert dispatch.policy_version == optimizer.plans[0].policy_version
+    assert (
+        dispatch.input_artifact_bindings
+        == solved_problem.input_artifact_bindings["detect"]
+    )
     assert all(
         dispatched is validated
         for dispatched, validated in zip(

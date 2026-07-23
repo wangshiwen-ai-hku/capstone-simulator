@@ -8,7 +8,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Iterable
 
-from .dag import TaskManager, resolve_task_inputs
+from .dag import TaskManager, resolve_task_input_bindings
 from .models import (
     Assignment,
     ExecutionMode,
@@ -19,6 +19,7 @@ from .models import (
     TaskInstance,
     TaskState,
     WorkflowSpec,
+    artifacts_from_bindings,
     resolved_placement_constraints,
 )
 from .network import synthesize_legacy_full_mesh
@@ -277,8 +278,11 @@ class CentralCoordinator:
             epoch_tasks = tuple(
                 sorted(arrived, key=lambda item: item.task_id)
             )
-            artifacts_by_task = {
-                item.task_id: resolve_task_inputs(manager, item.task_id)
+            input_bindings_by_task = {
+                item.task_id: resolve_task_input_bindings(
+                    manager,
+                    item.task_id,
+                )
                 for item in epoch_tasks
             }
             ready_times = {
@@ -307,7 +311,7 @@ class CentralCoordinator:
                 optimizer=algorithm,
                 node_specs=node_specs,
                 node_snapshots=snapshots,
-                parent_artifacts=artifacts_by_task,
+                input_artifact_bindings=input_bindings_by_task,
                 ready_time_ms=ready_times,
                 node_available_ms={
                     node_id: current_time_ms for node_id in node_specs
@@ -337,14 +341,16 @@ class CentralCoordinator:
             # fragment.
             task = manager.get(initial_assignment.task_id)
             manager.mark_running(task.task_id)
-            input_artifacts = artifacts_by_task[task.task_id]
+            input_bindings = input_bindings_by_task[task.task_id]
+            input_artifacts = artifacts_from_bindings(input_bindings)
             current_time_ms = ready_times[task.task_id]
             self._emit(
                 current_time_ms,
                 "scheduling_epoch_planned",
                 (
                     f"{epoch.epoch_id} considered {len(epoch_tasks)} ready "
-                    f"tasks with {batch_plan.optimizer_id}; selected "
+                    f"tasks with optimizer {batch_plan.optimizer_id} and "
+                    f"policy {batch_plan.policy_id}; selected "
                     f"{task.task_id} for rolling dispatch"
                 ),
                 workflow.workflow_id,
@@ -375,8 +381,8 @@ class CentralCoordinator:
                         optimizer=algorithm,
                         node_specs=node_specs,
                         node_snapshots=snapshots,
-                        parent_artifacts={
-                            task.task_id: input_artifacts
+                        input_artifact_bindings={
+                            task.task_id: input_bindings
                         },
                         ready_time_ms={
                             task.task_id: current_time_ms
@@ -412,8 +418,8 @@ class CentralCoordinator:
                         optimizer=algorithm,
                         node_specs=node_specs,
                         node_snapshots=snapshots,
-                        parent_artifacts={
-                            task.task_id: input_artifacts
+                        input_artifact_bindings={
+                            task.task_id: input_bindings
                         },
                         ready_time_ms={
                             task.task_id: current_time_ms
@@ -506,7 +512,13 @@ class CentralCoordinator:
                             assignment=assignment,
                             resource_reservation=resource_reservation,
                             transfer_reservations=transfer_reservations,
-                            input_artifacts=input_artifacts,
+                            input_artifact_bindings=input_bindings,
+                            problem_id=assignment_plan.problem_id,
+                            snapshot_id=assignment_plan.snapshot_id,
+                            policy_id=assignment_plan.policy_id,
+                            policy_version=(
+                                assignment_plan.policy_version
+                            ),
                             seed=seed,
                             inject_failure=injected_failure or sampled_failure,
                         )

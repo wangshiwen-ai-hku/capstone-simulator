@@ -9,6 +9,7 @@ from .models import (
     ArtifactRef,
     DataEdge,
     FailurePolicy,
+    InputArtifactBinding,
     TaskCompletion,
     TaskInstance,
     TaskState,
@@ -16,6 +17,7 @@ from .models import (
     WorkflowProgress,
     WorkflowSpec,
     WorkflowState,
+    artifacts_from_bindings,
 )
 
 
@@ -369,8 +371,18 @@ class TaskManager:
 
     def input_artifacts_for(self, task_id: str) -> tuple[ArtifactRef, ...]:
         """Resolve typed data-edge inputs, retaining shared refs for fan-out."""
+        return artifacts_from_bindings(
+            self.input_artifact_bindings_for(task_id)
+        )
+
+    def input_artifact_bindings_for(
+        self,
+        task_id: str,
+    ) -> tuple[InputArtifactBinding, ...]:
+        """Resolve typed producer artifacts to exact consumer input ports."""
+
         self.get(task_id)
-        resolved: list[ArtifactRef] = []
+        resolved: list[InputArtifactBinding] = []
         for edge in self.index.incoming_edges[task_id]:
             artifact = self._artifacts.get((edge.producer_task, edge.producer_port))
             if artifact is None:
@@ -378,7 +390,13 @@ class TaskManager:
                     "input artifact is not available: "
                     f"{edge.producer_task}.{edge.producer_port}"
                 )
-            resolved.append(artifact)
+            resolved.append(
+                InputArtifactBinding(
+                    consumer_task_id=task_id,
+                    consumer_port=edge.consumer_port,
+                    artifact=artifact,
+                )
+            )
         return tuple(resolved)
 
     def completion_of(self, task_id: str) -> TaskCompletion | None:
@@ -474,6 +492,17 @@ def resolve_task_inputs(
     manager: TaskManager,
     task_id: str,
 ) -> tuple[ArtifactRef, ...]:
+    """Compatibility projection of exact bindings to unique Artifacts."""
+
+    return artifacts_from_bindings(
+        resolve_task_input_bindings(manager, task_id)
+    )
+
+
+def resolve_task_input_bindings(
+    manager: TaskManager,
+    task_id: str,
+) -> tuple[InputArtifactBinding, ...]:
     """Resolve every materialized and external input for one ready task.
 
     Typed ``DataEdge`` bindings select the producer artifact for a consumer
@@ -483,49 +512,74 @@ def resolve_task_inputs(
     """
 
     task = manager.get(task_id)
-    artifacts = list(manager.input_artifacts_for(task_id))
+    bindings = list(manager.input_artifact_bindings_for(task_id))
     typed_parents = {
         edge.producer_task
         for edge in manager.index.incoming_edges[task_id]
     }
+    legacy_index = 0
     for parent in manager.index.parents[task_id]:
         if parent not in typed_parents:
-            artifacts.extend(manager.artifacts_for(parent))
+            for artifact in manager.artifacts_for(parent):
+                bindings.append(
+                    InputArtifactBinding(
+                        consumer_task_id=task_id,
+                        consumer_port=(
+                            f"__legacy_dependency_{legacy_index}"
+                        ),
+                        artifact=artifact,
+                    )
+                )
+                legacy_index += 1
 
     bound_ports = {
         edge.consumer_port
         for edge in manager.index.incoming_edges[task_id]
     }
+    unbound_ports = tuple(
+        port.name
+        for port in task.spec.input_ports
+        if port.name not in bound_ports
+    )
     if task.spec.input_ports:
-        unbound_count = sum(
-            port.name not in bound_ports
-            for port in task.spec.input_ports
-        )
         external_size_mb = (
             task.spec.input_size_mb
-            * unbound_count
+            * len(unbound_ports)
             / len(task.spec.input_ports)
         )
     else:
         external_size_mb = (
-            task.spec.input_size_mb if not artifacts else 0.0
+            task.spec.input_size_mb if not bindings else 0.0
         )
 
-    if external_size_mb > 0:
-        artifacts.append(
-            ArtifactRef(
-                artifact_id=(
-                    f"input:{task.workflow_id}:{task.task_id}"
-                ),
-                producer_task_id="",
-                node_id=task.source_node_id,
-                size_mb=external_size_mb,
-                uri=(
-                    f"source://{task.source_node_id}/"
-                    f"{task.workflow_id}/{task.task_id}"
-                ),
-                producer_port="external_input",
-                message_type="external_input_batch",
-            )
+    needs_external_binding = bool(unbound_ports) or (
+        not task.spec.input_ports
+        and not bindings
+        and not task.dependency_task_ids
+    )
+    if needs_external_binding:
+        external = ArtifactRef(
+            artifact_id=(
+                f"input:{task.workflow_id}:{task.task_id}"
+            ),
+            producer_task_id="",
+            node_id=task.source_node_id,
+            size_mb=external_size_mb,
+            uri=(
+                f"source://{task.source_node_id}/"
+                f"{task.workflow_id}/{task.task_id}"
+            ),
+            producer_port="external_input",
+            message_type="external_input_batch",
         )
-    return tuple(artifacts)
+        for consumer_port in (
+            unbound_ports or ("__external_input__",)
+        ):
+            bindings.append(
+                InputArtifactBinding(
+                    consumer_task_id=task_id,
+                    consumer_port=consumer_port,
+                    artifact=external,
+                )
+            )
+    return tuple(bindings)

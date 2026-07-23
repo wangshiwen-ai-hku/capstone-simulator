@@ -1,0 +1,126 @@
+syntax = "proto3";
+
+package mars.v1;
+
+import "interfaces/proto/mars/v1/common.proto";
+
+// Declarative placement rules for a task. Empty repeated fields mean that the
+// corresponding dimension is not restricted by this message.
+message PlacementConstraints {
+  string pinned_node_id = 1;
+  repeated NodeKind allowed_node_kinds = 2;
+  repeated NodeKind preferred_node_kinds = 3;
+  repeated string required_capabilities = 4;
+  optional bool allow_source_node = 5;
+  bool allow_other_robots = 6;
+  bool safety_required = 7;
+  optional bool allow_fallback = 8;
+  bool stateful = 9;
+  optional bool idempotent = 10;
+  bool splittable = 11;
+  bool replicable = 12;
+}
+
+message DataPort {
+  string name = 1;
+
+  // Fully-qualified payload type, for example
+  // "mars.workload.perception.v1.DetectionArray".
+  string message_type = 2;
+}
+
+message TaskSpec {
+  string task_type = 1;
+  TaskClass task_class = 2;
+  optional double compute_demand = 3;
+  double gpu_demand = 4;
+  optional double latency_budget_ms = 5;
+  string model_requirement = 6;
+  double input_size_mb = 7;
+  optional double output_size_mb = 8;
+  double bandwidth_requirement_mbps = 9;
+  double energy_budget_j = 10;
+  optional ResourceClass dominant_resource = 11;
+  optional bool allow_local_fallback = 12;
+  repeated DataPort input_ports = 13;
+  repeated DataPort output_ports = 14;
+  PlacementConstraints placement_constraints = 15;
+}
+
+message TaskInstance {
+  string task_id = 1;
+  string workflow_id = 2;
+  string name = 3;
+  string source_node_id = 4;
+  TaskSpec spec = 5;
+  repeated string dependency_task_ids = 6;
+  optional int32 priority = 7;
+  int32 stage_index = 8;
+  double arrival_time_ms = 9;
+  optional double deadline_time_ms = 10;
+  optional double expected_accuracy = 11;
+
+  // Legacy input reference. New integrations should use ArtifactRef values in
+  // SchedulingSnapshot and DispatchCommand.
+  string input_ref = 12;
+}
+
+// One typed producer-output to consumer-input binding in a workflow DAG.
+message DataEdge {
+  string producer_task_id = 1;
+  string producer_port = 2;
+  string consumer_task_id = 3;
+  string consumer_port = 4;
+  string message_type = 5;
+}
+
+message WorkflowSpec {
+  string workflow_id = 1;
+  repeated TaskInstance tasks = 2;
+  double deadline_time_ms = 3;
+  optional FailurePolicy failure_policy = 4;
+  map<string, string> metadata = 5;
+  repeated DataEdge data_edges = 6;
+}
+
+// Metadata reference to a payload. The payload bytes are intentionally not
+// embedded in this control-plane contract.
+message ArtifactRef {
+  string artifact_id = 1;
+  string producer_task_id = 2;
+  string node_id = 3;
+  double size_mb = 4;
+  string uri = 5;
+  string checksum = 6;
+  optional string producer_port = 7;
+
+  // Fully-qualified payload type.
+  string message_type = 8;
+}
+
+// Binds a reusable producer Artifact to one exact downstream task input.
+// Keeping this relation outside ArtifactRef preserves fan-out: the same
+// ArtifactRef may appear in bindings for multiple consumers or ports.
+message InputArtifactBinding {
+  string consumer_task_id = 1;
+  string consumer_port = 2;
+  ArtifactRef artifact = 3;
+}
+
+message TaskCompletion {
+  string task_id = 1;
+  bool ok = 2;
+  TaskState state = 3;
+  double finished_time_ms = 4;
+  string error_code = 5;
+  repeated ArtifactRef outputs = 6;
+}
+
+message WorkflowProgress {
+  string workflow_id = 1;
+  WorkflowState state = 2;
+  int32 total_tasks = 3;
+  map<string, int32> state_counts = 4;
+  repeated string ready_task_ids = 5;
+  repeated string critical_path_task_ids = 6;
+}

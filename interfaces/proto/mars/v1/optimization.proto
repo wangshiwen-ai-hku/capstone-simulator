@@ -1,0 +1,256 @@
+syntax = "proto3";
+
+package mars.v1;
+
+import "interfaces/proto/mars/v1/common.proto";
+import "interfaces/proto/mars/v1/topology.proto";
+import "interfaces/proto/mars/v1/workflow.proto";
+
+// Complete set of ready work considered at one control-plane instant.
+message SchedulingEpoch {
+  string epoch_id = 1;
+  double now_ms = 2;
+  repeated TaskInstance ready_tasks = 3;
+}
+
+// One feasible or rejected task-to-node placement candidate.
+message CandidateEstimate {
+  string task_id = 1;
+  string node_id = 2;
+  NodeKind node_kind = 3;
+  string source_node_id = 4;
+  optional bool feasible = 5;
+  double ready_time_ms = 6;
+  double start_time_ms = 7;
+  double finish_time_ms = 8;
+  double compute_time_ms = 9;
+  double communication_time_ms = 10;
+  double energy_j = 11;
+  ResourceDemand resource_demand = 12;
+  repeated string input_node_ids = 13;
+  repeated TransferEstimate transfers = 14;
+  string rejection_reason = 15;
+  optional double expected_accuracy_ratio = 16;
+  optional double failure_probability_ratio = 17;
+}
+
+message TaskCandidates {
+  string task_id = 1;
+  repeated CandidateEstimate candidates = 2;
+}
+
+message NodeAvailability {
+  string node_id = 1;
+  double available_at_ms = 2;
+}
+
+message LinkAvailability {
+  string link_id = 1;
+  double available_at_ms = 2;
+}
+
+message CriticalTailEstimate {
+  string task_id = 1;
+  double critical_tail_ms = 2;
+}
+
+// Immutable facts captured for one optimization run. This message does not
+// contain scheduling intent or solver configuration.
+message SchedulingSnapshot {
+  string schema_version = 1;
+  string snapshot_id = 2;
+  double captured_at_ms = 3;
+  SchedulingEpoch epoch = 4;
+  repeated NodeSpec node_specs = 5;
+  repeated NodeSnapshot node_snapshots = 6;
+  repeated LinkSpec link_specs = 7;
+  repeated LinkSnapshot link_snapshots = 8;
+  repeated TaskCandidates task_candidates = 9;
+  repeated NodeAvailability node_availability = 10;
+  repeated LinkAvailability link_availability = 11;
+  repeated PlannedResourceReservation existing_node_reservations = 12;
+  repeated TransferReservation existing_transfer_reservations = 13;
+  repeated InputArtifactBinding input_artifact_bindings = 14;
+  repeated CriticalTailEstimate critical_tail_estimates = 15;
+
+  // Identifies the profiling snapshot used to derive candidate estimates.
+  string profile_snapshot_id = 16;
+}
+
+enum ObjectiveMetric {
+  OBJECTIVE_METRIC_UNSPECIFIED = 0;
+  OBJECTIVE_METRIC_MAKESPAN_MS = 1;
+  OBJECTIVE_METRIC_TOTAL_DEADLINE_VIOLATION_MS = 2;
+  OBJECTIVE_METRIC_TOTAL_ENERGY_J = 3;
+  OBJECTIVE_METRIC_TOTAL_COMMUNICATION_TIME_MS = 4;
+  OBJECTIVE_METRIC_LOCALITY_PENALTY = 5;
+  OBJECTIVE_METRIC_DROPPED_TASK_COUNT = 6;
+  OBJECTIVE_METRIC_TOTAL_COMPLETION_TIME_MS = 7;
+  OBJECTIVE_METRIC_CRITICAL_PATH_FINISH_MS = 8;
+  OBJECTIVE_METRIC_NON_SOURCE_ASSIGNMENT_COUNT = 9;
+  OBJECTIVE_METRIC_NON_EDGE_ASSIGNMENT_COUNT = 10;
+  OBJECTIVE_METRIC_PLACEMENT_PREFERENCE_PENALTY = 11;
+  OBJECTIVE_METRIC_RULE_MISMATCH_COUNT = 12;
+}
+
+enum OptimizationDirection {
+  OPTIMIZATION_DIRECTION_UNSPECIFIED = 0;
+  OPTIMIZATION_DIRECTION_MINIMIZE = 1;
+  OPTIMIZATION_DIRECTION_MAXIMIZE = 2;
+}
+
+enum ObjectiveAggregation {
+  OBJECTIVE_AGGREGATION_UNSPECIFIED = 0;
+  OBJECTIVE_AGGREGATION_WEIGHTED_SUM = 1;
+  OBJECTIVE_AGGREGATION_LEXICOGRAPHIC = 2;
+}
+
+message ObjectiveSpec {
+  string objective_id = 1;
+  ObjectiveMetric metric = 2;
+  optional OptimizationDirection direction = 3;
+  optional double weight = 4;
+
+  // Positive scale in the metric's native unit used before applying weight.
+  optional double normalization_scale = 5;
+
+  // Lower values are evaluated first for lexicographic aggregation.
+  uint32 priority_order = 6;
+}
+
+enum ConstraintEnforcement {
+  CONSTRAINT_ENFORCEMENT_UNSPECIFIED = 0;
+  CONSTRAINT_ENFORCEMENT_HARD = 1;
+  CONSTRAINT_ENFORCEMENT_SOFT = 2;
+}
+
+enum ConstraintRelation {
+  CONSTRAINT_RELATION_UNSPECIFIED = 0;
+  CONSTRAINT_RELATION_LESS_THAN_OR_EQUAL = 1;
+  CONSTRAINT_RELATION_GREATER_THAN_OR_EQUAL = 2;
+}
+
+// Portable numeric bound evaluated from the same metric catalog as objectives.
+message MetricBoundConstraint {
+  ObjectiveMetric metric = 1;
+  ConstraintRelation relation = 2;
+  double bound = 3;
+}
+
+message ConstraintSpec {
+  string constraint_id = 1;
+  optional ConstraintEnforcement enforcement = 2;
+
+  // Penalty per unit of violation. It must be zero for hard constraints.
+  double violation_penalty = 3;
+
+  // Priority group receiving a soft-constraint penalty.
+  uint32 priority_order = 4;
+
+  oneof constraint {
+    MetricBoundConstraint metric_bound = 10;
+  }
+}
+
+// Scheduling intent. It is independent of the captured system state and the
+// algorithm used to solve the problem.
+message SchedulingPolicy {
+  string policy_id = 1;
+  string version = 2;
+  optional ObjectiveAggregation objective_aggregation = 3;
+  repeated ObjectiveSpec objectives = 4;
+  repeated ConstraintSpec constraints = 5;
+}
+
+// Generic limits shared by all optimizers. Algorithm-specific parameters such
+// as ADMM rho or a primal-dual step size do not belong here.
+message SolveLimits {
+  optional double solve_budget_ms = 1;
+  uint32 max_iterations = 2;
+  optional bool deterministic = 3;
+  uint64 random_seed = 4;
+}
+
+// Canonical optimizer input: captured facts plus scheduling intent and generic
+// solve limits.
+message SchedulingProblem {
+  string schema_version = 1;
+  string problem_id = 2;
+  SchedulingSnapshot snapshot = 3;
+  SchedulingPolicy policy = 4;
+  SolveLimits solve_limits = 5;
+}
+
+message Assignment {
+  string task_id = 1;
+  string target_node_id = 2;
+  ExecutionMode execution_mode = 3;
+  double estimated_start_time_ms = 4;
+  double estimated_finish_time_ms = 5;
+  double compute_time_ms = 6;
+  double communication_time_ms = 7;
+  double energy_j = 8;
+  string reason = 9;
+  repeated string input_node_ids = 10;
+  repeated string transfer_link_ids = 11;
+  string optimizer_id = 12;
+  string epoch_id = 13;
+}
+
+message ObjectiveEvaluation {
+  string objective_id = 1;
+  ObjectiveMetric metric = 2;
+  double raw_value = 3;
+  double normalized_value = 4;
+  double weighted_value = 5;
+  uint32 priority_order = 6;
+}
+
+message ConstraintEvaluation {
+  string constraint_id = 1;
+  ObjectiveMetric metric = 2;
+  double raw_value = 3;
+  double bound = 4;
+  double violation = 5;
+  bool satisfied = 6;
+  bool hard = 7;
+  double penalty = 8;
+  uint32 priority_order = 9;
+}
+
+enum SolveStatus {
+  SOLVE_STATUS_UNSPECIFIED = 0;
+  SOLVE_STATUS_FEASIBLE = 1;
+  SOLVE_STATUS_OPTIMAL = 2;
+  SOLVE_STATUS_INFEASIBLE = 3;
+  SOLVE_STATUS_TIME_LIMIT = 4;
+  SOLVE_STATUS_ITERATION_LIMIT = 5;
+  SOLVE_STATUS_ERROR = 6;
+}
+
+// Optimizer result correlated to the exact facts and policy it solved.
+message SchedulingPlan {
+  string schema_version = 1;
+  string problem_id = 2;
+  string snapshot_id = 3;
+  string policy_id = 4;
+  string policy_version = 5;
+  string epoch_id = 6;
+  string optimizer_id = 7;
+  string optimizer_version = 8;
+  repeated Assignment assignments = 9;
+  repeated PlannedResourceReservation node_reservations = 10;
+  repeated TransferReservation transfer_reservations = 11;
+  repeated string deferred_task_ids = 12;
+  // Complete for weighted-sum policies; the primary component only for
+  // lexicographic policies. Use objective_key for plan comparison.
+  double objective_value = 13;
+  repeated ObjectiveEvaluation objective_evaluations = 14;
+  map<string, DiagnosticValue> diagnostics = 15;
+  repeated ConstraintEvaluation constraint_evaluations = 16;
+  repeated double objective_key = 17;
+  optional SolveStatus solve_status = 18;
+  double solve_elapsed_time_ms = 19;
+  uint32 iteration_count = 20;
+  string termination_reason = 21;
+}

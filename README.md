@@ -1,20 +1,25 @@
 # MARS
 
 MARS is a runtime-neutral central scheduler for multi-robot edge workflows.
-It contains the DAG model and placement policies, one asynchronous runtime
+It contains the DAG and scheduling contracts, one asynchronous runtime
 contract, an in-process simulation adapter, a deterministic benchmark engine,
 a FastAPI adapter, and a React interface.
 
 The runnable architecture is:
 
 ```text
-React UI ──► FastAPI adapter ──► CentralCoordinator ──► RuntimePort
-                                                        └── InProcessRuntime
-                                                            ├── Simulated Orin 1
-                                                            ├── Simulated Orin 2
-                                                            └── Simulated edge
-
-                         └────► deterministic benchmark engine
+React UI ──► FastAPI adapter
+               ├── runtime request ──► CentralCoordinator
+               │                        ├── Snapshot + Policy + SolveLimits
+               │                        │      └── SchedulingProblem
+               │                        │             └── Optimizer
+               │                        │                    └── validated SchedulingPlan
+               │                        └── RuntimePort
+               │                               └── InProcessRuntime
+               │                                     ├── Simulated Orin 1
+               │                                     ├── Simulated Orin 2
+               │                                     └── Simulated edge
+               └── benchmark request ─► deterministic benchmark engine
 ```
 
 The central runtime uses virtual time rather than wall-clock model execution.
@@ -37,10 +42,15 @@ that port.
 - Transfer cost includes only the output ports selected by downstream DataEdges.
 - `TaskClass` business labels are separate from declarative placement constraints.
 - Directed `LinkSpec` and `LinkSnapshot` topology with multi-hop transfer estimates.
-- Ready-task batches are represented by one canonical `SchedulingProblem`.
-- Replaceable optimizers consume the same problem and return a `SchedulingPlan`.
+- Every planning iteration captures runtime facts in an immutable
+  `SchedulingSnapshot`.
+- `SchedulingProblem = SchedulingSnapshot + SchedulingPolicy + SolveLimits`;
+  this is the stable input contract shared by every optimizer.
+- A policy declares objectives and constraints. An optimizer is the replaceable
+  solver that consumes those declarations and returns a `SchedulingPlan`.
 - Plans are validated against candidates, node capacity, concurrency, and link
-  reservations before commit.
+  reservations before commit; shared evaluation recomputes policy objectives
+  and constraints rather than trusting solver-reported values.
 - Runtime dispatch carries the exact validated Assignment and its matching node
   and link reservation fragment.
 - Invalid plug-in plans are rejected and may be re-solved by a configured safe fallback.
@@ -72,12 +82,45 @@ backward compatibility.
 READY task batch
   → hard placement filtering
   → compute and directed-link candidate estimates
+  → immutable SchedulingSnapshot
+  + SchedulingPolicy
+  + SolveLimits
   → SchedulingProblem
   → Optimizer
-  → SchedulingPlan validation / fallback repair
+  → SchedulingPlan
+  → shared objective/constraint evaluation and plan validation
+  → optional fallback solve using the same Problem and Policy
   → node and link reservations
   → runtime commit
 ```
+
+The snapshot contains only observed or derived planning facts: epoch state,
+node and link state, exact consumer-port artifact bindings, feasible candidates,
+current reservations, availability, and critical-path estimates. The policy
+contains the optimization intent:
+ordered weighted objectives plus policy-level constraints. Solve limits bound
+solver work without changing either facts or intent. These objects are kept
+separate so the same captured state and policy can be evaluated by different
+optimizers.
+
+`snapshot_id` fingerprints all captured facts. `problem_id` additionally
+fingerprints the complete versioned Policy and SolveLimits, so a Plan cannot be
+mistaken for the result of a different state or solve contract.
+
+The DAG manager, not an optimizer, owns dependency satisfaction and task
+lifecycle. Each rolling-horizon Problem contains the currently ready batch plus
+critical-tail look-ahead; it is not a one-shot formulation of every remaining
+task in the workflow.
+
+For weighted-sum policies, `SchedulingPlan.objective_key` has one value. For
+lexicographic policies it is the ordered vector of priority-group scores,
+including soft-constraint penalties. Compare Plans by this key;
+`objective_value` is only the first component for compatibility and reporting.
+Plans also report solver status, version, elapsed time, iteration count, and a
+termination reason so future MILP, ADMM, or primal-dual implementations share
+the same result envelope. `INFEASIBLE` and `ERROR` Plans are never committable;
+time- or iteration-limited Plans must still contain a fully validated feasible
+incumbent for every assignment they return.
 
 The deterministic engine commits the validated batch plan. For `FAIL_FAST`
 workflows it uses a single rolling commit so that a failure cannot leave sibling
@@ -85,10 +128,13 @@ work in flight. The central runtime also uses rolling-horizon control: its
 optimizer sees the complete ready batch, then the coordinator commits the
 earliest assignment through `RuntimePort` and replans after completion or retry.
 
-Built-in optimizer IDs are `dag_deadline`, `rule_based`, `local_first`,
-`edge_first`, and `greedy_cost`. Additional solvers implement the `Optimizer`
-protocol and are registered through `OptimizerRegistry`; they do not change the
-coordinator, task model, or runtime interface.
+The built-in optimizer ID is `heuristic`. The existing API values
+`dag_deadline`, `rule_based`, `local_first`, `edge_first`, and `greedy_cost`
+remain stable as policy aliases. Each currently resolves to the `heuristic`
+optimizer and the policy with the same name. Additional solvers implement the
+`Optimizer` protocol and are registered through `OptimizerRegistry`; they
+consume the same `SchedulingProblem` and do not change the coordinator, task
+model, or runtime interface.
 
 ## Quick start
 
@@ -117,7 +163,7 @@ environment understanding and planning.
 
 Use either execution path:
 
-- **Run simulation / evaluation** compares scheduling algorithms in the deterministic engine.
+- **Run simulation / evaluation** compares scheduling policy presets in the deterministic engine.
 - **Run 2 Orin + 1 Edge demo** runs the central Agent lifecycle and injects one recoverable failure.
 
 ### Tests
@@ -165,8 +211,10 @@ mars/
   dag.py                       validation, readiness, results, failure propagation
   network.py                   directed topology and transfer estimation
   scheduler.py                 candidate generation and planning orchestration
-  optimizers/base.py           canonical problem, plan, registry, validation
-  optimizers/heuristics.py     built-in ready-batch policies
+  optimizers/base.py           snapshot, problem, plan, registry, invariant validation
+  optimizers/policy.py         objectives, constraints, solve limits, policy presets
+  optimizers/evaluation.py     shared objective and constraint evaluation
+  optimizers/heuristics.py     built-in heuristic optimizer
   coordinator.py               central runtime orchestration, attempts, retry, report
   runtime/base.py              sole asynchronous control-plane runtime contract
   runtime/inprocess.py         process-local simulated runtime adapter
@@ -179,9 +227,21 @@ backend/app/
   mars_adapter.py              web schema to MARS domain conversion
   scene_generator.py           deterministic typed-DAG generation
 frontend/                      React benchmark and Agent runtime UI
+interfaces/proto/mars/v1/      versioned cross-module data contracts
 configs/mars/                  synthetic workload and profile configuration
 tests/                         core, runtime contract, adapter, and API tests
 ```
+
+The Proto files define versioned data messages for workflows, topology,
+profiling, scheduling problems and plans, and runtime commands/events. They are
+the language-neutral interface source; Python domain classes remain the
+in-process implementation model.
+
+Current scope does not include generated Proto bindings, RPC service
+definitions, a gRPC or DDS network adapter, partner middleware integration, or
+production optimizer implementations such as MILP, ADMM, or primal-dual
+solvers. Those components can be added against the frozen Problem, Plan, and
+RuntimePort boundaries.
 
 ## API
 
@@ -209,8 +269,10 @@ Central runtime:
 inventory and heartbeats, accepts attempt-scoped dispatch commands, returns
 dispatch-correlated completions, supports cancellation, and reports runtime
 state. Each dispatch contains the unmodified validated Assignment plus its
-matching resource and transfer reservations. Command validation rejects an
-inconsistent plan fragment before an adapter receives it. `InProcessRuntime`
-implements the contract with virtual time. Future gRPC, DDS, or partner
-adapters implement the same contract; the coordinator does not depend on their
-communication mechanism.
+matching resource and transfer reservations and exact consumer-port input
+bindings. Command validation rejects an inconsistent plan fragment before an
+adapter receives it, and preserves the Problem, Snapshot, and Policy
+correlation identifiers for replay and audit.
+`InProcessRuntime` implements the contract with virtual time. Future gRPC,
+DDS, or partner adapters implement the same contract; the coordinator does
+not depend on their communication mechanism.

@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package mars.v1;
+
+// Business/reporting category. Placement is governed by
+// PlacementConstraints rather than by this enum.
+enum TaskClass {
+  TASK_CLASS_UNSPECIFIED = 0;
+  TASK_CLASS_LOCAL_SAFETY = 1;
+  TASK_CLASS_REALTIME_OFFLOADABLE = 2;
+  TASK_CLASS_EDGE_HEAVY = 3;
+}
+
+enum TaskState {
+  TASK_STATE_UNSPECIFIED = 0;
+  TASK_STATE_BLOCKED = 1;
+  TASK_STATE_READY = 2;
+  TASK_STATE_RUNNING = 3;
+  TASK_STATE_SUCCEEDED = 4;
+  TASK_STATE_FAILED = 5;
+  TASK_STATE_TIMEOUT = 6;
+  TASK_STATE_SKIPPED = 7;
+  TASK_STATE_DROPPED = 8;
+}
+
+enum WorkflowState {
+  WORKFLOW_STATE_UNSPECIFIED = 0;
+  WORKFLOW_STATE_ACCEPTED = 1;
+  WORKFLOW_STATE_RUNNING = 2;
+  WORKFLOW_STATE_SUCCEEDED = 3;
+  WORKFLOW_STATE_FAILED = 4;
+}
+
+enum FailurePolicy {
+  FAILURE_POLICY_UNSPECIFIED = 0;
+  FAILURE_POLICY_SKIP_DESCENDANTS = 1;
+  FAILURE_POLICY_FAIL_FAST = 2;
+}
+
+enum NodeKind {
+  NODE_KIND_UNSPECIFIED = 0;
+  NODE_KIND_ROBOT = 1;
+  NODE_KIND_EDGE = 2;
+  NODE_KIND_CLOUD = 3;
+}
+
+enum ExecutionMode {
+  EXECUTION_MODE_UNSPECIFIED = 0;
+  EXECUTION_MODE_LOCAL = 1;
+  EXECUTION_MODE_PEER = 2;
+  EXECUTION_MODE_EDGE = 3;
+  EXECUTION_MODE_CLOUD = 4;
+  EXECUTION_MODE_FALLBACK_LOCAL = 5;
+  EXECUTION_MODE_DROP = 6;
+}
+
+enum ResourceClass {
+  RESOURCE_CLASS_UNSPECIFIED = 0;
+  RESOURCE_CLASS_CPU = 1;
+  RESOURCE_CLASS_GPU = 2;
+  RESOURCE_CLASS_IO = 3;
+}
+
+// Typed diagnostic metadata emitted by optimizers and validators.
+message DiagnosticValue {
+  oneof value {
+    double double_value = 1;
+    sint64 integer_value = 2;
+    string string_value = 3;
+    bool bool_value = 4;
+  }
+}

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import replace
+from time import perf_counter
 
 from ..models import (
     Assignment,
     ExecutionMode,
     NodeKind,
-    TaskInstance,
     TransferReservation,
     resolved_placement_constraints,
 )
@@ -19,24 +19,18 @@ from .base import (
     PlannedResourceReservation,
     SchedulingPlan,
     SchedulingProblem,
+    SolveStatus,
 )
+from .evaluation import candidate_objective_key
 
 
 class HeuristicOptimizer:
-    """Joint ready-batch optimizer implementing one deterministic policy."""
+    """Deterministic solver that follows the policy carried by the problem."""
 
-    def __init__(self, optimizer_id: str) -> None:
-        if optimizer_id not in {
-            "dag_deadline",
-            "rule_based",
-            "local_first",
-            "edge_first",
-            "greedy_cost",
-        }:
-            raise ValueError(f"unknown heuristic optimizer {optimizer_id!r}")
-        self.optimizer_id = optimizer_id
+    optimizer_id = "heuristic"
 
     def solve(self, problem: SchedulingProblem) -> SchedulingPlan:
+        solve_started = perf_counter()
         link_available = {
             link_id: max(problem.epoch.now_ms, available)
             for link_id, available in problem.link_available_ms.items()
@@ -51,12 +45,33 @@ class HeuristicOptimizer:
                 reservation
             )
         transfer_reservations: list[TransferReservation] = []
-        objective_value = 0.0
 
-        for task in sorted(
+        ordered_tasks = sorted(
             problem.epoch.ready_tasks,
             key=lambda item: _task_order(problem, item.task_id),
-        ):
+        )
+        iteration_limit = problem.solve_limits.max_iterations
+        solved_tasks = (
+            ordered_tasks[:iteration_limit]
+            if iteration_limit
+            else ordered_tasks
+        )
+        deferred_tasks = list(
+            ordered_tasks[len(solved_tasks):]
+        )
+        time_limit_reached = False
+
+        for index, task in enumerate(solved_tasks):
+            if (
+                (perf_counter() - solve_started) * 1000
+                >= problem.solve_limits.solve_budget_ms
+            ):
+                deferred_tasks = [
+                    *solved_tasks[index:],
+                    *deferred_tasks,
+                ]
+                time_limit_reached = True
+                break
             materialized = [
                 _materialize_candidate(
                     problem,
@@ -132,7 +147,7 @@ class HeuristicOptimizer:
                 compute_ms=chosen.compute_ms,
                 communication_ms=chosen.communication_ms,
                 energy_j=chosen.energy_j,
-                reason=_reason(self.optimizer_id),
+                reason=_reason(problem.policy.policy_id),
                 input_locations=chosen.input_locations,
                 transfer_link_ids=link_ids,
                 optimizer_id=self.optimizer_id,
@@ -158,15 +173,39 @@ class HeuristicOptimizer:
             )
             transfer_reservations.extend(reservations)
             link_available.update(next_links)
-            objective_value += chosen.finish_ms + chosen.energy_j
 
+        deferred_task_ids = tuple(
+            task.task_id for task in deferred_tasks
+        )
+        solve_elapsed_ms = (perf_counter() - solve_started) * 1000
         return SchedulingPlan(
+            problem_id=problem.problem_id,
+            snapshot_id=problem.snapshot.snapshot_id,
+            policy_id=problem.policy.policy_id,
+            policy_version=problem.policy.version,
             epoch_id=problem.epoch.epoch_id,
             optimizer_id=self.optimizer_id,
+            optimizer_version="1",
+            solve_status=(
+                SolveStatus.TIME_LIMIT
+                if time_limit_reached
+                else SolveStatus.ITERATION_LIMIT
+                if deferred_task_ids
+                else SolveStatus.FEASIBLE
+            ),
+            solve_elapsed_ms=solve_elapsed_ms,
+            iteration_count=len(assignments),
+            termination_reason=(
+                "solve_budget_reached"
+                if time_limit_reached
+                else "max_iterations_reached"
+                if deferred_task_ids
+                else "deterministic_heuristic_complete"
+            ),
             assignments=tuple(assignments),
             node_reservations=tuple(node_reservations),
             transfer_reservations=tuple(transfer_reservations),
-            objective_value=objective_value,
+            deferred_task_ids=deferred_task_ids,
             diagnostics={
                 "task_count": len(problem.epoch.ready_tasks),
                 "scheduled_count": sum(
@@ -174,6 +213,7 @@ class HeuristicOptimizer:
                     for item in assignments
                 ),
                 "solve_budget_ms": problem.solve_budget_ms,
+                "policy_id": problem.policy.policy_id,
             },
         )
 
@@ -195,88 +235,14 @@ class HeuristicOptimizer:
         dict[str, float],
         float,
     ]:
-        task = problem.task_by_id[task_id]
-        if self.optimizer_id == "local_first":
-            return min(
-                materialized,
-                key=lambda item: (
-                    not item[0].is_source,
-                    item[0].finish_ms,
-                    item[0].energy_j,
-                    item[0].node_id,
-                ),
-            )
-        if self.optimizer_id == "edge_first":
-            return min(
-                materialized,
-                key=lambda item: (
-                    item[0].node_kind is not NodeKind.EDGE,
-                    item[0].finish_ms,
-                    item[0].energy_j,
-                    item[0].node_id,
-                ),
-            )
-        if self.optimizer_id == "rule_based":
-            constraints = resolved_placement_constraints(task)
-            source_snapshot = problem.snapshot_by_id[task.source_node_id]
-            should_offload = (
-                NodeKind.EDGE in constraints.preferred_node_kinds
-                or source_snapshot.cpu_util > 0.8
-                or source_snapshot.gpu_util > 0.8
-                or task.spec.compute_demand > 2.5
-            )
-            return min(
-                materialized,
-                key=lambda item: (
-                    (
-                        item[0].node_kind is not NodeKind.EDGE
-                        if should_offload
-                        else not item[0].is_source
-                    ),
-                    item[0].finish_ms,
-                    item[0].energy_j,
-                    item[0].node_id,
-                ),
-            )
-        if self.optimizer_id == "dag_deadline":
-            critical_tail = problem.critical_tail_ms.get(task_id, 0.0)
-
-            def dag_score(
-                item: tuple[
-                    CandidateEstimate,
-                    tuple[TransferReservation, ...],
-                    dict[str, float],
-                    float,
-                ],
-            ) -> tuple[float, int, float, float, str]:
-                candidate = item[0]
-                projected_finish = candidate.finish_ms + critical_tail
-                lateness = max(
-                    0.0,
-                    projected_finish - task.deadline_time_ms,
-                )
-                locality_penalty = (
-                    len(
-                        set(candidate.input_locations)
-                        - {candidate.node_id}
-                    )
-                    * 2.0
-                )
-                return (
-                    lateness,
-                    _preference_rank(task, candidate),
-                    projected_finish + locality_penalty,
-                    candidate.energy_j,
-                    candidate.node_id,
-                )
-
-            return min(materialized, key=dag_score)
         return min(
             materialized,
             key=lambda item: (
-                _preference_rank(task, item[0]),
-                item[0].finish_ms,
-                item[0].energy_j,
+                *candidate_objective_key(
+                    problem,
+                    task_id,
+                    item[0],
+                ),
                 item[0].node_id,
             ),
         )
@@ -284,30 +250,8 @@ class HeuristicOptimizer:
 
 def built_in_registry() -> OptimizerRegistry:
     registry = OptimizerRegistry()
-    for optimizer_id in (
-        "dag_deadline",
-        "rule_based",
-        "local_first",
-        "edge_first",
-        "greedy_cost",
-    ):
-        registry.register(HeuristicOptimizer(optimizer_id))
+    registry.register(HeuristicOptimizer())
     return registry
-
-
-def _preference_rank(
-    task: TaskInstance,
-    candidate: CandidateEstimate,
-) -> int:
-    preferred = resolved_placement_constraints(
-        task
-    ).preferred_node_kinds
-    if not preferred:
-        return 0
-    try:
-        return preferred.index(candidate.node_kind)
-    except ValueError:
-        return len(preferred)
 
 
 def _task_order(
@@ -472,13 +416,13 @@ def _earliest_resource_start(
         cursor = min(releases)
 
 
-def _reason(optimizer_id: str) -> str:
+def _reason(policy_id: str) -> str:
     return {
-        "local_first": "local-first optimizer under declarative constraints",
-        "edge_first": "edge-first optimizer under declarative constraints",
-        "rule_based": "declarative placement rule optimizer",
+        "local_first": "local-first policy under declarative constraints",
+        "edge_first": "edge-first policy under declarative constraints",
+        "rule_based": "declarative placement rule policy",
         "dag_deadline": (
-            "DAG deadline/critical-tail/data-locality batch optimizer"
+            "DAG deadline/critical-tail/data-locality batch policy"
         ),
-        "greedy_cost": "minimum estimated finish time and energy optimizer",
-    }[optimizer_id]
+        "greedy_cost": "minimum estimated finish time and energy policy",
+    }.get(policy_id, f"policy {policy_id}")

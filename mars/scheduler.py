@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import replace
+from dataclasses import fields, is_dataclass, replace
+import enum
+import hashlib
+import json
+import math
 
 from .dag import DagIndex
 from .models import (
     ArtifactRef,
     Assignment,
+    InputArtifactBinding,
     LinkSnapshot,
     LinkSpec,
     NodeKind,
     NodeSnapshot,
     NodeSpec,
     TaskInstance,
+    artifacts_from_bindings,
     resolved_placement_constraints,
     task_resource_demand,
 )
@@ -28,7 +34,12 @@ from .optimizers import (
     ResourceDemand,
     SchedulingEpoch,
     SchedulingPlan,
+    SchedulingPolicy,
     SchedulingProblem,
+    SchedulingSnapshot,
+    SolveLimits,
+    algorithm_aliases,
+    built_in_policy,
     built_in_registry,
     validate_plan,
 )
@@ -238,7 +249,10 @@ def build_scheduling_problem(
     *,
     node_specs: Mapping[str, NodeSpec],
     node_snapshots: Mapping[str, NodeSnapshot],
-    parent_artifacts: Mapping[str, Iterable[ArtifactRef]],
+    parent_artifacts: Mapping[str, Iterable[ArtifactRef]] | None = None,
+    input_artifact_bindings: Mapping[
+        str, Iterable[InputArtifactBinding]
+    ] | None = None,
     ready_time_ms: Mapping[str, float],
     node_available_ms: Mapping[str, float] | None = None,
     link_specs: Iterable[LinkSpec] | None = None,
@@ -250,10 +264,38 @@ def build_scheduling_problem(
     critical_tail_ms: Mapping[str, float] | None = None,
     profiles: ProfileCatalog | None = None,
     excluded_node_ids: Mapping[str, frozenset[str]] | None = None,
-    solve_budget_ms: float = 50.0,
+    policy: str | SchedulingPolicy | None = None,
+    solve_limits: SolveLimits | None = None,
+    solve_budget_ms: float | None = None,
 ) -> SchedulingProblem:
-    """Build the one canonical optimization input for a ready-task epoch."""
+    """Build the one canonical optimization input for a ready-task epoch.
 
+    ``input_artifact_bindings`` is the canonical input. ``parent_artifacts``
+    remains a flat compatibility input and is normalized immediately; the
+    resulting Snapshot stores only exact port bindings.
+    """
+
+    if solve_limits is not None and solve_budget_ms is not None:
+        raise ValueError(
+            "provide solve_limits or solve_budget_ms, not both"
+        )
+    resolved_policy = _resolve_policy(policy)
+    resolved_input_bindings = _normalize_input_artifact_bindings(
+        epoch,
+        input_artifact_bindings=input_artifact_bindings,
+        parent_artifacts=parent_artifacts,
+    )
+    resolved_solve_limits = (
+        solve_limits
+        if solve_limits is not None
+        else SolveLimits(
+            solve_budget_ms=(
+                50.0
+                if solve_budget_ms is None
+                else solve_budget_ms
+            )
+        )
+    )
     if (link_specs is None) != (link_snapshots is None):
         raise ValueError(
             "link_specs and link_snapshots must both be provided or omitted"
@@ -290,8 +332,8 @@ def build_scheduling_problem(
             dict(node_snapshots),
             exclusions.get(task.task_id, frozenset()),
         )
-        task_artifacts = tuple(
-            parent_artifacts.get(task.task_id, ())
+        task_artifacts = artifacts_from_bindings(
+            resolved_input_bindings[task.task_id]
         )
         candidate_map[task.task_id] = tuple(
             estimate_candidate(
@@ -309,35 +351,81 @@ def build_scheduling_problem(
             )
             for node in candidates
         )
-    return SchedulingProblem(
+    resolved_node_specs = tuple(node_specs.values())
+    resolved_node_snapshots = tuple(node_snapshots.values())
+    resolved_node_available = {
+        node_id: (node_available_ms or {}).get(
+            node_id,
+            epoch.now_ms,
+        )
+        for node_id in node_specs
+    }
+    resolved_link_available = {
+        spec.link_id: (link_available_ms or {}).get(
+            spec.link_id,
+            epoch.now_ms,
+        )
+        for spec in resolved_link_specs
+    }
+    resolved_existing_reservations = tuple(
+        existing_node_reservations
+    )
+    resolved_critical_tail = {
+        task.task_id: (critical_tail_ms or {}).get(
+            task.task_id,
+            0.0,
+        )
+        for task in epoch.ready_tasks
+    }
+    snapshot_digest = _contract_digest(
+        {
+            "schema_version": "mars.scheduling-snapshot.v1",
+            "captured_at_ms": epoch.now_ms,
+            "epoch": epoch,
+            "node_specs": resolved_node_specs,
+            "node_snapshots": resolved_node_snapshots,
+            "link_specs": resolved_link_specs,
+            "link_snapshots": resolved_link_snapshots,
+            "candidates": candidate_map,
+            "input_artifact_bindings": resolved_input_bindings,
+            "node_available_ms": resolved_node_available,
+            "link_available_ms": resolved_link_available,
+            "existing_node_reservations": (
+                resolved_existing_reservations
+            ),
+            "critical_tail_ms": resolved_critical_tail,
+        }
+    )
+    snapshot_id = f"{epoch.epoch_id}:snapshot:{snapshot_digest}"
+    snapshot = SchedulingSnapshot(
+        schema_version="mars.scheduling-snapshot.v1",
+        snapshot_id=snapshot_id,
+        captured_at_ms=epoch.now_ms,
         epoch=epoch,
-        node_specs=tuple(node_specs.values()),
-        node_snapshots=tuple(node_snapshots.values()),
+        node_specs=resolved_node_specs,
+        node_snapshots=resolved_node_snapshots,
         link_specs=resolved_link_specs,
         link_snapshots=resolved_link_snapshots,
         candidates=candidate_map,
-        node_available_ms={
-            node_id: (node_available_ms or {}).get(node_id, epoch.now_ms)
-            for node_id in node_specs
-        },
-        link_available_ms={
-            spec.link_id: (link_available_ms or {}).get(
-                spec.link_id,
-                epoch.now_ms,
-            )
-            for spec in resolved_link_specs
-        },
-        existing_node_reservations=tuple(
-            existing_node_reservations
-        ),
-        critical_tail_ms={
-            task.task_id: (critical_tail_ms or {}).get(
-                task.task_id,
-                0.0,
-            )
-            for task in epoch.ready_tasks
-        },
-        solve_budget_ms=solve_budget_ms,
+        input_artifact_bindings=resolved_input_bindings,
+        node_available_ms=resolved_node_available,
+        link_available_ms=resolved_link_available,
+        existing_node_reservations=resolved_existing_reservations,
+        critical_tail_ms=resolved_critical_tail,
+    )
+    problem_digest = _contract_digest(
+        {
+            "schema_version": "mars.scheduling-problem.v1",
+            "snapshot_id": snapshot_id,
+            "policy": resolved_policy,
+            "solve_limits": resolved_solve_limits,
+        }
+    )
+    return SchedulingProblem(
+        problem_id=f"{epoch.epoch_id}:problem:{problem_digest}",
+        snapshot=snapshot,
+        policy=resolved_policy,
+        solve_limits=resolved_solve_limits,
     )
 
 
@@ -347,7 +435,10 @@ def plan_scheduling_epoch(
     optimizer: str | Optimizer,
     node_specs: Mapping[str, NodeSpec],
     node_snapshots: Mapping[str, NodeSnapshot],
-    parent_artifacts: Mapping[str, Iterable[ArtifactRef]],
+    parent_artifacts: Mapping[str, Iterable[ArtifactRef]] | None = None,
+    input_artifact_bindings: Mapping[
+        str, Iterable[InputArtifactBinding]
+    ] | None = None,
     ready_time_ms: Mapping[str, float],
     node_available_ms: Mapping[str, float] | None = None,
     link_specs: Iterable[LinkSpec] | None = None,
@@ -359,9 +450,11 @@ def plan_scheduling_epoch(
     critical_tail_ms: Mapping[str, float] | None = None,
     profiles: ProfileCatalog | None = None,
     excluded_node_ids: Mapping[str, frozenset[str]] | None = None,
-    solve_budget_ms: float = 50.0,
+    policy: str | SchedulingPolicy | None = None,
+    solve_limits: SolveLimits | None = None,
+    solve_budget_ms: float | None = None,
     registry: OptimizerRegistry | None = None,
-    fallback_optimizer: str | Optimizer | None = "dag_deadline",
+    fallback_optimizer: str | Optimizer | None = "heuristic",
 ) -> SchedulingPlan:
     """Solve and validate one epoch through a replaceable optimizer.
 
@@ -370,11 +463,20 @@ def plan_scheduling_epoch(
     optimizer and recording the rejected optimizer in plan diagnostics.
     """
 
+    active_registry = built_in_registry()
+    if registry is not None:
+        active_registry.extend(registry, replace=True)
+    selected, resolved_policy = _resolve_selection(
+        optimizer,
+        policy,
+        active_registry,
+    )
     problem = build_scheduling_problem(
         epoch,
         node_specs=node_specs,
         node_snapshots=node_snapshots,
         parent_artifacts=parent_artifacts,
+        input_artifact_bindings=input_artifact_bindings,
         ready_time_ms=ready_time_ms,
         node_available_ms=node_available_ms,
         link_specs=link_specs,
@@ -384,12 +486,10 @@ def plan_scheduling_epoch(
         critical_tail_ms=critical_tail_ms,
         profiles=profiles,
         excluded_node_ids=excluded_node_ids,
+        policy=resolved_policy,
+        solve_limits=solve_limits,
         solve_budget_ms=solve_budget_ms,
     )
-    active_registry = built_in_registry()
-    if registry is not None:
-        active_registry.extend(registry, replace=True)
-    selected = active_registry.resolve(optimizer)
     try:
         return _solve_validated(problem, selected)
     except Exception as rejected:
@@ -553,9 +653,215 @@ def _resolve_fallback(
 ) -> Optimizer:
     if not isinstance(optimizer, str):
         return registry.resolve(optimizer)
-    if optimizer == "dag_deadline":
-        return built_in_registry().resolve(optimizer)
+    if optimizer == "heuristic" or optimizer in algorithm_aliases():
+        return built_in_registry().resolve("heuristic")
     try:
         return registry.resolve(optimizer)
     except KeyError:
         return built_in_registry().resolve(optimizer)
+
+
+def _resolve_policy(
+    policy: str | SchedulingPolicy | None,
+) -> SchedulingPolicy:
+    if policy is None:
+        return built_in_policy("greedy_cost")
+    if isinstance(policy, str):
+        return built_in_policy(policy)
+    if not isinstance(policy, SchedulingPolicy):
+        raise TypeError(
+            "policy must be a built-in id or SchedulingPolicy"
+        )
+    return policy
+
+
+def _normalize_input_artifact_bindings(
+    epoch: SchedulingEpoch,
+    *,
+    input_artifact_bindings: Mapping[
+        str, Iterable[InputArtifactBinding]
+    ] | None,
+    parent_artifacts: Mapping[str, Iterable[ArtifactRef]] | None,
+) -> dict[str, tuple[InputArtifactBinding, ...]]:
+    """Normalize legacy flat inputs into the canonical port-binding model."""
+
+    if (
+        input_artifact_bindings is not None
+        and parent_artifacts is not None
+    ):
+        raise ValueError(
+            "provide input_artifact_bindings or parent_artifacts, not both"
+        )
+    task_by_id = {
+        task.task_id: task for task in epoch.ready_tasks
+    }
+    provided_ids = set(
+        (
+            input_artifact_bindings
+            if input_artifact_bindings is not None
+            else parent_artifacts or {}
+        )
+    )
+    unknown_ids = provided_ids - set(task_by_id)
+    if unknown_ids:
+        raise ValueError(
+            "input artifacts reference tasks outside the epoch: "
+            f"{sorted(unknown_ids)}"
+        )
+
+    normalized: dict[str, tuple[InputArtifactBinding, ...]] = {}
+    for task_id, task in task_by_id.items():
+        if input_artifact_bindings is not None:
+            bindings = list(
+                input_artifact_bindings.get(task_id, ())
+            )
+        else:
+            legacy_artifacts = tuple(
+                (parent_artifacts or {}).get(task_id, ())
+            )
+            bindings = [
+                InputArtifactBinding(
+                    consumer_task_id=task_id,
+                    consumer_port=f"__legacy_input_{index}",
+                    artifact=artifact,
+                )
+                for index, artifact in enumerate(legacy_artifacts)
+            ]
+
+        bound_ports = {
+            binding.consumer_port for binding in bindings
+        }
+        unbound_ports = tuple(
+            port.name
+            for port in task.spec.input_ports
+            if port.name not in bound_ports
+        )
+        if input_artifact_bindings is not None:
+            needs_external = bool(unbound_ports) or (
+                not task.spec.input_ports
+                and not bindings
+                and not task.dependency_task_ids
+            )
+        else:
+            needs_external = (
+                not bindings and not task.dependency_task_ids
+            )
+        if needs_external:
+            if (
+                input_artifact_bindings is not None
+                and task.spec.input_ports
+            ):
+                external_size_mb = (
+                    task.spec.input_size_mb
+                    * len(unbound_ports)
+                    / len(task.spec.input_ports)
+                )
+            else:
+                external_size_mb = task.spec.input_size_mb
+            external = ArtifactRef(
+                artifact_id=(
+                    f"input:{task.workflow_id}:{task.task_id}"
+                ),
+                producer_task_id="",
+                node_id=task.source_node_id,
+                size_mb=external_size_mb,
+                uri=(
+                    f"source://{task.source_node_id}/"
+                    f"{task.workflow_id}/{task.task_id}"
+                ),
+                producer_port="external_input",
+                message_type="external_input_batch",
+            )
+            external_ports = (
+                unbound_ports
+                if input_artifact_bindings is not None
+                else ("__external_input__",)
+            ) or ("__external_input__",)
+            bindings.extend(
+                InputArtifactBinding(
+                    consumer_task_id=task_id,
+                    consumer_port=consumer_port,
+                    artifact=external,
+                )
+                for consumer_port in external_ports
+            )
+        normalized[task_id] = tuple(bindings)
+    return normalized
+
+
+def _resolve_selection(
+    optimizer: str | Optimizer,
+    policy: str | SchedulingPolicy | None,
+    registry: OptimizerRegistry,
+) -> tuple[Optimizer, SchedulingPolicy]:
+    aliases = algorithm_aliases()
+    if isinstance(optimizer, str) and optimizer in aliases:
+        alias_policy = built_in_policy(
+            aliases[optimizer]["policy_id"]
+        )
+        if policy is not None and _resolve_policy(policy) != alias_policy:
+            raise ValueError(
+                f"algorithm alias {optimizer!r} already selects policy "
+                f"{alias_policy.policy_id!r}; use optimizer='heuristic' "
+                "for an explicit policy"
+            )
+        return registry.resolve("heuristic"), alias_policy
+    return registry.resolve(optimizer), _resolve_policy(policy)
+
+
+def _contract_digest(value: object) -> str:
+    payload = json.dumps(
+        _canonical_contract_value(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:20]
+
+
+def _canonical_contract_value(value: object) -> object:
+    if isinstance(value, enum.Enum):
+        return value.value
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            item.name: _canonical_contract_value(
+                getattr(value, item.name)
+            )
+            for item in fields(value)
+        }
+    if isinstance(value, Mapping):
+        return {
+            str(key): _canonical_contract_value(item)
+            for key, item in sorted(
+                value.items(),
+                key=lambda pair: str(pair[0]),
+            )
+        }
+    if isinstance(value, (tuple, list)):
+        return [
+            _canonical_contract_value(item)
+            for item in value
+        ]
+    if isinstance(value, (set, frozenset)):
+        canonical_items = [
+            _canonical_contract_value(item)
+            for item in value
+        ]
+        return sorted(
+            canonical_items,
+            key=lambda item: json.dumps(
+                item,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+    if isinstance(value, float) and not math.isfinite(value):
+        return (
+            "Infinity"
+            if value > 0
+            else "-Infinity"
+            if value < 0
+            else "NaN"
+        )
+    return value

@@ -242,7 +242,8 @@ def test_custom_registry_extends_instead_of_hiding_builtin_optimizers() -> None:
         registry=registry,
     )
 
-    assert plan.optimizer_id == "greedy_cost"
+    assert plan.optimizer_id == "heuristic"
+    assert plan.policy_id == "greedy_cost"
     assert plan.assignments[0].target_node_id == "edge"
 
 
@@ -309,8 +310,8 @@ def test_candidate_generation_materializes_artifact_iterables_once() -> None:
 
 
 def test_failed_builtin_id_override_repairs_with_safe_builtin() -> None:
-    class BrokenDagDeadline:
-        optimizer_id = "dag_deadline"
+    class BrokenHeuristic:
+        optimizer_id = "heuristic"
 
         def solve(self, problem):
             raise RuntimeError("broken override")
@@ -318,7 +319,7 @@ def test_failed_builtin_id_override_repairs_with_safe_builtin() -> None:
     node = _node("edge", NodeKind.EDGE)
     task = _pinned_task("task", "edge", NodeKind.EDGE)
     registry = OptimizerRegistry()
-    registry.register(BrokenDagDeadline())
+    registry.register(BrokenHeuristic())
 
     plan = plan_scheduling_epoch(
         SchedulingEpoch("registry-repair", 0, (task,)),
@@ -332,12 +333,13 @@ def test_failed_builtin_id_override_repairs_with_safe_builtin() -> None:
         registry=registry,
     )
 
-    assert plan.optimizer_id == "dag_deadline"
+    assert plan.optimizer_id == "heuristic"
+    assert plan.policy_id == "dag_deadline"
     assert plan.assignments[0].target_node_id == "edge"
-    assert plan.diagnostics["fallback_optimizer"] == "dag_deadline"
+    assert plan.diagnostics["fallback_optimizer"] == "heuristic"
     assert (
         plan.diagnostics["repaired_from_optimizer"]
-        == "dag_deadline"
+        == "heuristic"
     )
 
 

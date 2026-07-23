@@ -550,7 +550,7 @@ class _DelegatingOptimizer:
     optimizer_id = "custom"
 
     def solve(self, problem):
-        baseline = HeuristicOptimizer("greedy_cost").solve(problem)
+        baseline = HeuristicOptimizer().solve(problem)
         return replace(
             baseline,
             optimizer_id=self.optimizer_id,
@@ -570,6 +570,10 @@ class _InvalidOptimizer:
 
     def solve(self, problem):
         return SchedulingPlan(
+            problem_id=problem.problem_id,
+            snapshot_id=problem.snapshot.snapshot_id,
+            policy_id=problem.policy.policy_id,
+            policy_version=problem.policy.version,
             epoch_id=problem.epoch.epoch_id,
             optimizer_id=self.optimizer_id,
             assignments=(),
@@ -621,7 +625,8 @@ def test_invalid_plugin_plan_is_repaired_by_safe_fallback() -> None:
         ready_time_ms={"repair": 0},
     )
 
-    assert plan.optimizer_id == "dag_deadline"
+    assert plan.optimizer_id == "heuristic"
+    assert plan.policy_id == "greedy_cost"
     assert plan.diagnostics["repaired_from_optimizer"] == "invalid"
     assert "assign or explicitly defer" in plan.diagnostics["repair_reason"]
 
@@ -643,7 +648,8 @@ def test_plugin_exception_is_repaired_by_safe_fallback() -> None:
         ready_time_ms={"repair-exception": 0},
     )
 
-    assert plan.optimizer_id == "dag_deadline"
+    assert plan.optimizer_id == "heuristic"
+    assert plan.policy_id == "greedy_cost"
     assert "solver process crashed" in plan.diagnostics["repair_reason"]
 
 
@@ -694,7 +700,7 @@ def test_validator_rejects_fabricated_timing_and_resource_demand() -> None:
         parent_artifacts={},
         ready_time_ms={"strict-plan": 100},
     )
-    valid = HeuristicOptimizer("greedy_cost").solve(problem)
+    valid = HeuristicOptimizer().solve(problem)
     assignment = valid.assignments[0]
     reservation = valid.node_reservations[0]
     early = replace(
@@ -743,7 +749,7 @@ def test_validator_requires_real_candidate_transfers() -> None:
         link_specs=links,
         link_snapshots=link_snapshots,
     )
-    valid = HeuristicOptimizer("greedy_cost").solve(problem)
+    valid = HeuristicOptimizer().solve(problem)
     fabricated = replace(
         valid,
         assignments=(
@@ -786,7 +792,7 @@ def test_validator_respects_declared_node_and_link_availability() -> None:
         link_snapshots=link_snapshots,
         link_available_ms={"robot-edge": 100, "edge-robot": 0},
     )
-    valid = HeuristicOptimizer("greedy_cost").solve(problem)
+    valid = HeuristicOptimizer().solve(problem)
     transfer = valid.transfer_reservations[0]
     early_transfer = replace(
         valid,

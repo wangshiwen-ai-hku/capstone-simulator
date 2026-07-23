@@ -225,6 +225,10 @@ out/
 # Local ingestion material
 ingest/
 
+# Local render and preview artifacts
+tmp/
+output/
+
 # Serverless Webpack directories
 .webpack/
 
