@@ -1,4 +1,4 @@
-"""Run Web simulations through the canonical MARS runtime boundary."""
+"""Run Web simulations through the shared MARS runtime boundary."""
 
 from __future__ import annotations
 

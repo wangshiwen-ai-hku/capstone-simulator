@@ -1,4 +1,4 @@
-"""Canonical scheduling problem, plan, validation, and optimizer contracts."""
+"""Shared scheduling problem, plan, validation, and optimizer contracts."""
 
 from __future__ import annotations
 
@@ -423,7 +423,7 @@ class SchedulingSnapshot:
 
 @dataclass(frozen=True)
 class SchedulingProblem:
-    """Canonical optimizer input: captured facts, intent, and solve limits."""
+    """Optimizer input containing captured facts, intent, and solve limits."""
 
     problem_id: str
     snapshot: SchedulingSnapshot
@@ -609,7 +609,7 @@ class SchedulingPlan:
 
 @runtime_checkable
 class Optimizer(Protocol):
-    """A replaceable solver for the canonical SchedulingProblem."""
+    """A replaceable solver for the shared SchedulingProblem."""
 
     optimizer_id: str
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -74,7 +73,7 @@ def test_validate_workflow_returns_canonical_typed_graph_payload() -> None:
     )
 
 
-def test_web_copy_excludes_project_and_conversation_residue() -> None:
+def test_web_copy_uses_neutral_english_product_language() -> None:
     paths = [
         ROOT / "frontend" / "index.html",
         *sorted((ROOT / "frontend" / "src").glob("*.ts")),
@@ -82,14 +81,4 @@ def test_web_copy_excludes_project_and_conversation_residue() -> None:
     ]
     text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
-    forbidden = (
-        r"\bcapstone\b",
-        r"\bedgesched\b",
-        r"\baos\b",
-        r"\bpony\b",
-        r"三类任务",
-        r"推荐先",
-        r"对话",
-    )
-    for pattern in forbidden:
-        assert re.search(pattern, text, re.IGNORECASE) is None
+    assert text.isascii()

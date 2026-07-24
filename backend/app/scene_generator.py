@@ -35,12 +35,27 @@ DIFFICULTY_FACTOR = {
 }
 
 SCENE_TEXT = {
-    "warehouse": "仓库移动机器人执行巡检、识别、路径规划和搬运任务。",
-    "hospital": "医院配送机器人在病区与药房之间执行导航、避障、识别和任务规划。",
-    "campus": "校园机器人执行递送、巡检、地图更新和异常检测。",
-    "factory": "工厂机器人执行零件识别、质量检测、路径规划和协同搬运。",
-    "disaster": "救援机器人在网络波动和边缘负载变化下执行搜索、检测和状态汇报。",
-    "custom": "自定义运行场景。",
+    "warehouse": (
+        "Warehouse mobile robots perform inspection, recognition, path "
+        "planning, and material transport."
+    ),
+    "hospital": (
+        "Hospital delivery robots navigate between wards and pharmacies "
+        "while performing obstacle avoidance, recognition, and task planning."
+    ),
+    "campus": (
+        "Campus robots perform delivery, inspection, map updates, and anomaly "
+        "detection."
+    ),
+    "factory": (
+        "Factory robots perform part recognition, quality inspection, path "
+        "planning, and cooperative transport."
+    ),
+    "disaster": (
+        "Rescue robots perform search, detection, and status reporting while "
+        "network conditions and edge load vary."
+    ),
+    "custom": "Custom runtime scenario.",
 }
 
 CATEGORY_ALIASES = {

@@ -8,20 +8,20 @@ FastAPI adapter, and a React interface.
 The runnable architecture is:
 
 ```text
-React UI ──► FastAPI adapter
-               ├── Web simulation request ─┐
-               └── runtime request ────────┴──► CentralCoordinator
-                                                ├── Snapshot + Policy + SolveLimits
-                                                │      └── SchedulingProblem
-                                                │             └── Optimizer
-                                                │                    └── validated SchedulingPlan
-                                                └── RuntimePort
-                                                       └── InProcessRuntime
-                                                             ├── Simulated Robot Agent(s)
-                                                             └── Simulated Edge Agent(s)
+React UI --> FastAPI adapter
+               +-- Web simulation request --+
+               +-- runtime request ----------+--> CentralCoordinator
+                                                    +-- Snapshot + Policy + SolveLimits
+                                                    |     +-- SchedulingProblem
+                                                    |           +-- Optimizer
+                                                    |                 +-- validated SchedulingPlan
+                                                    +-- RuntimePort
+                                                          +-- InProcessRuntime
+                                                                +-- Simulated Robot Agent(s)
+                                                                +-- Simulated Edge Agent(s)
 
-CoordinatorReport ──► Web response projector / runtime result
-mars.engine ────────► compatibility wrapper over the same coordinator path
+CoordinatorReport --> Web response projector / runtime result
+mars.engine -------> compatibility wrapper over the same coordinator path
 ```
 
 The central runtime uses virtual time rather than wall-clock model execution.
@@ -37,7 +37,7 @@ that port.
 ## Implemented capabilities
 
 - Atomic DAG validation with cycle, reference, port, and message-type checks.
-- `BLOCKED → READY → RUNNING → terminal` task lifecycle.
+- `BLOCKED -> READY -> RUNNING -> terminal` task lifecycle.
 - Named `DataPort` and `DataEdge` contracts separate data flow from ordering.
 - One output may fan out to multiple consumers without duplicating its Artifact.
 - One task may publish multiple typed output Artifacts.
@@ -47,7 +47,7 @@ that port.
 - Every planning iteration captures runtime facts in an immutable
   `SchedulingSnapshot`.
 - `SchedulingProblem = SchedulingSnapshot + SchedulingPolicy + SolveLimits`;
-  this is the stable input contract shared by every optimizer.
+  this is the input contract shared by every optimizer.
 - A policy declares objectives and constraints. An optimizer is the replaceable
   solver that consumes those declarations and returns a `SchedulingPlan`.
 - Plans are validated against candidates, node capacity, concurrency, and link
@@ -84,18 +84,18 @@ reporting cohorts for backward compatibility.
 
 ```text
 READY task batch
-  → hard placement filtering
-  → compute and directed-link candidate estimates
-  → immutable SchedulingSnapshot
+  -> hard placement filtering
+  -> compute and directed-link candidate estimates
+  -> immutable SchedulingSnapshot
   + SchedulingPolicy
   + SolveLimits
-  → SchedulingProblem
-  → Optimizer
-  → SchedulingPlan
-  → shared objective/constraint evaluation and plan validation
-  → optional fallback solve using the same Problem and Policy
-  → node and link reservations
-  → runtime commit
+  -> SchedulingProblem
+  -> Optimizer
+  -> SchedulingPlan
+  -> shared objective/constraint evaluation and plan validation
+  -> optional fallback solve using the same Problem and Policy
+  -> node and link reservations
+  -> runtime commit
 ```
 
 The snapshot contains only observed or derived planning facts: epoch state,
@@ -139,7 +139,7 @@ second scheduler or event loop.
 
 The built-in optimizer ID is `heuristic`. The existing API values
 `dag_deadline`, `rule_based`, `local_first`, `edge_first`, and `greedy_cost`
-remain stable as policy aliases. Each currently resolves to the `heuristic`
+continue to be accepted as policy aliases. Each resolves to the `heuristic`
 optimizer and the policy with the same name. Additional solvers implement the
 `Optimizer` protocol and are registered through `OptimizerRegistry`; they
 consume the same `SchedulingProblem` and do not change the coordinator, task
@@ -172,8 +172,9 @@ fans out to environment understanding and planning.
 
 Both interface actions use the same coordinator and RuntimePort execution path:
 
-- **运行调度模拟** returns the stable Web report projection for the completed run.
-- **提交到 Agent Runtime** stores the coordinator report asynchronously and
+- **Run Scheduling Simulation** returns the `SimulationReport` representation of
+  the completed coordinator run.
+- **Submit to Agent Runtime** stores the coordinator report asynchronously and
   exposes run events. Failure injection is available through the runtime API
   and is disabled by default.
 
@@ -228,7 +229,7 @@ mars/
     topology.py                node/link declarations and dynamic snapshots
     transfer.py                transfer estimates and reservations
     execution.py               assignments, resource demand, task completion
-  models.py                    compatibility imports for the former domain path
+  models.py                    compatibility re-exports for mars.domain
   dag.py                       validation, readiness, results, failure propagation
   network.py                   directed topology and transfer estimation
   scheduler.py                 candidate generation and planning orchestration

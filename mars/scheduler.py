@@ -268,9 +268,9 @@ def build_scheduling_problem(
     solve_limits: SolveLimits | None = None,
     solve_budget_ms: float | None = None,
 ) -> SchedulingProblem:
-    """Build the one canonical optimization input for a ready-task epoch.
+    """Build the optimization input for a ready-task epoch.
 
-    ``input_artifact_bindings`` is the canonical input. ``parent_artifacts``
+    ``input_artifact_bindings`` is the port-specific input. ``parent_artifacts``
     remains a flat compatibility input and is normalized immediately; the
     resulting Snapshot stores only exact port bindings.
     """
@@ -683,7 +683,7 @@ def _normalize_input_artifact_bindings(
     ] | None,
     parent_artifacts: Mapping[str, Iterable[ArtifactRef]] | None,
 ) -> dict[str, tuple[InputArtifactBinding, ...]]:
-    """Normalize legacy flat inputs into the canonical port-binding model."""
+    """Normalize flat compatibility inputs into port-specific bindings."""
 
     if (
         input_artifact_bindings is not None

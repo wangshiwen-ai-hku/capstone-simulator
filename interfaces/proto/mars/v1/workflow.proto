@@ -60,8 +60,8 @@ message TaskInstance {
   optional double deadline_time_ms = 10;
   optional double expected_accuracy = 11;
 
-  // Legacy input reference. New integrations should use ArtifactRef values in
-  // SchedulingSnapshot and DispatchCommand.
+  // Deprecated input reference. SchedulingSnapshot and DispatchCommand carry
+  // ArtifactRef values.
   string input_ref = 12;
 }
 

@@ -1,7 +1,6 @@
-"""Compatibility imports for the former consolidated domain module.
+"""Compatibility re-exports for MARS domain objects.
 
-New code should import these objects from ``mars.domain`` or its focused
-submodules. This module contains no independent definitions.
+Domain definitions reside in the focused ``mars.domain`` submodules.
 """
 
 from .domain import (

@@ -208,7 +208,7 @@ def runtime_for_scene(
     execution_noise: float = 0.04,
     respect_expected_accuracy: bool = False,
 ) -> InProcessRuntime:
-    """Build the reference process-local adapter for one declared topology."""
+    """Build a process-local runtime adapter for one declared topology."""
 
     validate_process_local_scene(scene)
     specs = build_node_specs(scene)
@@ -227,7 +227,7 @@ def coordinator_for_scene(
     respect_expected_accuracy: bool = False,
     link_snapshots: tuple[LinkSnapshot, ...] | None = None,
 ) -> CentralCoordinator:
-    """Build the canonical coordinator and RuntimePort implementation."""
+    """Build a CentralCoordinator with its RuntimePort implementation."""
 
     return CentralCoordinator(
         runtime_for_scene(

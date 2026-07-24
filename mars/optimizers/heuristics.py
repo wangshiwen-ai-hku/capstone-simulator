@@ -1,4 +1,4 @@
-"""Deterministic built-in optimizers for the canonical scheduling problem."""
+"""Deterministic built-in optimizers for the shared scheduling problem."""
 
 from __future__ import annotations
 

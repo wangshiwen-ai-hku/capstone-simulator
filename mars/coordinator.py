@@ -1,4 +1,4 @@
-"""Central MARS coordinator and canonical workflow event loop."""
+"""Central MARS coordinator and workflow event loop."""
 
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ class _ActiveAttempt:
 
 
 class CentralCoordinator:
-    """Execute one DAG through the canonical RuntimePort boundary."""
+    """Execute one DAG through the RuntimePort boundary."""
 
     def __init__(
         self,

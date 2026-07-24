@@ -260,9 +260,9 @@ def synthesize_legacy_full_mesh(
 ) -> tuple[tuple[LinkSpec, ...], tuple[LinkSnapshot, ...]]:
     """Convert deprecated node-level network fields into directed links.
 
-    The generated direct-link estimate exactly matches the previous endpoint
-    formula, allowing older API payloads and tests to migrate without changing
-    their expected communication time.
+    The generated direct-link estimate uses the endpoint latency and bandwidth
+    fields, preserving communication-time semantics for payloads without
+    explicit links.
     """
 
     specs = tuple(node_specs)

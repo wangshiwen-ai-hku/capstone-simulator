@@ -1,8 +1,8 @@
 """Compatibility facade for running MARS workflows in virtual time.
 
 The coordinator owns the scheduling and completion event loop. This module
-only configures the process-local runtime and projects its canonical report
-onto the stable simulation response used by the Web API and existing clients.
+configures the process-local runtime and projects ``CoordinatorReport`` into
+the ``SimulationReport`` representation used by the Web API.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def run_workflow_simulation(
     link_snapshots: list[LinkSnapshot] | None = None,
     optimizer_registry: OptimizerRegistry | None = None,
 ) -> SimulationReport:
-    """Execute a simulation through the canonical coordinator/runtime path."""
+    """Execute a simulation through the coordinator and RuntimePort."""
 
     if network_jitter < 0:
         raise ValueError("network_jitter must be non-negative")
@@ -149,7 +149,7 @@ def project_coordinator_report(
     network_jitter: float = 0.0,
     resource_noise: float = 0.0,
 ) -> SimulationReport:
-    """Project a canonical coordinator result onto the simulation contract."""
+    """Project a coordinator result onto the simulation contract."""
 
     task_by_id = {task.task_id: task for task in workflow.tasks}
     node_by_id = {node.node_id: node for node in node_specs}

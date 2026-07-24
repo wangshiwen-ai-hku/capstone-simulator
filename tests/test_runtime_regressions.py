@@ -1,3 +1,5 @@
+"""Regression tests for runtime scheduling invariants."""
+
 from __future__ import annotations
 
 import pytest

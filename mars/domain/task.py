@@ -9,11 +9,11 @@ from .topology import NodeKind
 
 
 class TaskClass(str, enum.Enum):
-    """Business/reporting categories with a legacy placement mapping.
+    """Reporting cohorts with compatibility placement mappings.
 
-    New workloads declare placement through ``PlacementConstraints``. These
-    labels remain stable for API compatibility, metrics, and old scenes that
-    do not yet provide an explicit placement contract.
+    Placement behavior is declared through ``PlacementConstraints``.
+    ``TaskClass`` supports aggregate metrics and scenes that omit an explicit
+    placement contract.
     """
 
     LOCAL_SAFETY = "local_safety"
@@ -53,9 +53,9 @@ class ResourceClass(str, enum.Enum):
 class PlacementConstraints:
     """Declarative placement contract independent of business task labels.
 
-    ``TaskClass`` remains available for reporting and legacy inputs. New
-    scheduling decisions are governed by this contract so adding a business
-    category does not require another scheduler branch.
+    ``TaskClass`` provides reporting and compatibility metadata. Scheduling
+    decisions use this contract, so business categories do not require
+    scheduler-specific branches.
     """
 
     pinned_node_id: str = ""
@@ -168,9 +168,9 @@ class TaskInstance:
 
 
 TASK_CLASS_LABELS: dict[TaskClass, str] = {
-    TaskClass.LOCAL_SAFETY: "端侧安全关键任务",
-    TaskClass.REALTIME_OFFLOADABLE: "可卸载实时推理任务",
-    TaskClass.EDGE_HEAVY: "边缘优先重计算任务",
+    TaskClass.LOCAL_SAFETY: "Local safety reporting cohort",
+    TaskClass.REALTIME_OFFLOADABLE: "Real-time offloadable reporting cohort",
+    TaskClass.EDGE_HEAVY: "Edge-heavy reporting cohort",
 }
 
 

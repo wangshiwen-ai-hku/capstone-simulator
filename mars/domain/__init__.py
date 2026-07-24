@@ -1,4 +1,4 @@
-"""Stable public imports for MARS domain objects."""
+"""Public imports for MARS domain objects."""
 
 from .artifact import (
     ArtifactRef,

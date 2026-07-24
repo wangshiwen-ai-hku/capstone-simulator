@@ -12,7 +12,7 @@ defined here.
 | `common.proto` | Shared enums and typed diagnostics |
 | `workflow.proto` | Task, workflow DAG, data ports, and artifact references |
 | `topology.proto` | Node/link inventory, dynamic state, and reservations |
-| `optimization.proto` | Canonical optimization problem and scheduling plan |
+| `optimization.proto` | Shared optimization problem and scheduling plan |
 | `runtime.proto` | Registration, heartbeat, dispatch, completion, and cancellation messages |
 | `profiling.proto` | Raw execution observations and aggregated profile snapshots |
 
@@ -20,9 +20,9 @@ The optimization boundary is:
 
 ```text
 SchedulingProblem
-├── SchedulingSnapshot  immutable captured facts
-├── SchedulingPolicy    objectives and domain constraints
-└── SolveLimits         algorithm-independent solve limits
++-- SchedulingSnapshot  immutable captured facts
++-- SchedulingPolicy    objectives and domain constraints
++-- SolveLimits         algorithm-independent solve limits
 ```
 
 This v1 Problem is a rolling-horizon epoch contract: `SchedulingEpoch`

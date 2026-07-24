@@ -171,7 +171,7 @@ message SolveLimits {
   uint64 random_seed = 4;
 }
 
-// Canonical optimizer input: captured facts plus scheduling intent and generic
+// Optimizer input: captured facts plus scheduling intent and generic
 // solve limits.
 message SchedulingProblem {
   string schema_version = 1;
