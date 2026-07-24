@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from mars.engine import run_workflow_simulation
-from mars.models import (
+from mars.domain import (
     ArtifactRef,
     ExecutionMode,
     LinkSnapshot,

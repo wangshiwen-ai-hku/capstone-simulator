@@ -307,7 +307,7 @@ export default function App() {
   }
 
   async function onSimulate() {
-    if (!scene) return;
+    if (!scene || runtimeIssue) return;
     setLoading(true);
     setError(null);
     setRuntimeRun(null);
@@ -459,7 +459,7 @@ export default function App() {
           <select id="algorithm" value={algorithm} onChange={(e) => setAlgorithm(e.target.value as Algorithm)}>
             {algorithmOptions.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
-          <button className="secondary" onClick={onSimulate} disabled={!scene || loading || runtimeLoading}>运行调度模拟</button>
+          <button className="secondary" onClick={onSimulate} disabled={!scene || Boolean(runtimeIssue) || loading || runtimeLoading}>运行调度模拟</button>
           <button
             className="primary runtime-run"
             onClick={onRuntimeRun}

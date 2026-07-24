@@ -5,19 +5,19 @@ from __future__ import annotations
 from collections import Counter, deque
 from dataclasses import dataclass
 
-from .models import (
+from .domain.artifact import (
     ArtifactRef,
+    InputArtifactBinding,
+    artifacts_from_bindings,
+)
+from .domain.execution import TaskCompletion
+from .domain.task import TERMINAL_STATES, TaskInstance, TaskState
+from .domain.workflow import (
     DataEdge,
     FailurePolicy,
-    InputArtifactBinding,
-    TaskCompletion,
-    TaskInstance,
-    TaskState,
-    TERMINAL_STATES,
     WorkflowProgress,
     WorkflowSpec,
     WorkflowState,
-    artifacts_from_bindings,
 )
 
 

@@ -7,13 +7,13 @@ import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 
-from .models import (
+from .domain.topology import (
     LinkSnapshot,
     LinkSpec,
     NodeSnapshot,
     NodeSpec,
-    TransferEstimate,
 )
+from .domain.transfer import TransferEstimate
 
 
 class NetworkTopologyError(ValueError):

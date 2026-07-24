@@ -10,7 +10,7 @@ from backend.app.mars_adapter import (
 from backend.app.scene_generator import build_deterministic_scene
 from backend.app.schemas import GenerateSceneRequest
 from mars.coordinator import CentralCoordinator
-from mars.models import (
+from mars.domain import (
     DataEdge,
     DataPort,
     NodeKind,

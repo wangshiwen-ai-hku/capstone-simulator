@@ -1,8 +1,8 @@
 """Synthetic workload definitions for scheduler and local-agent experiments.
 
 Definitions contain task capabilities and target profiles without transport or
-execution-framework dependencies. The deterministic engine and process-local
-agents consume the same definitions.
+execution-framework dependencies. The coordinator and process-local agents
+consume the same definitions.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .models import DataPort, ResourceClass, TaskClass, TaskSpec
+from .domain.task import DataPort, ResourceClass, TaskClass, TaskSpec
 
 
 DEFAULT_SYNTHETIC_WORKLOAD_PATH = (

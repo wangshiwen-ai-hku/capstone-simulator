@@ -10,19 +10,19 @@ import json
 import math
 
 from .dag import DagIndex
-from .models import (
+from .domain.artifact import (
     ArtifactRef,
-    Assignment,
     InputArtifactBinding,
+    artifacts_from_bindings,
+)
+from .domain.execution import Assignment, task_resource_demand
+from .domain.task import TaskInstance, resolved_placement_constraints
+from .domain.topology import (
     LinkSnapshot,
     LinkSpec,
     NodeKind,
     NodeSnapshot,
     NodeSpec,
-    TaskInstance,
-    artifacts_from_bindings,
-    resolved_placement_constraints,
-    task_resource_demand,
 )
 from .network import NetworkTopology, synthesize_legacy_full_mesh
 from .optimizers import (

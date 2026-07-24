@@ -2,7 +2,8 @@ from enum import Enum
 from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from mars.models import FailurePolicy, TaskClass, infer_task_class
+from mars.domain.task import TaskClass, infer_task_class
+from mars.domain.workflow import FailurePolicy
 
 
 class Difficulty(str, Enum):

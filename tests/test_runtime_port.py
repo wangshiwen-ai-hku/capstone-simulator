@@ -5,7 +5,7 @@ import unittest
 from dataclasses import replace
 
 from mars.coordinator import CentralCoordinator
-from mars.models import (
+from mars.domain import (
     Assignment,
     ExecutionMode,
     NodeKind,

@@ -5,7 +5,7 @@ import logging
 import random
 from typing import List
 
-from mars.models import TaskClass
+from mars.domain.task import TaskClass
 from mars.synthetic_workloads import ExecutionTarget, load_default_synthetic_workloads
 
 from .schemas import (

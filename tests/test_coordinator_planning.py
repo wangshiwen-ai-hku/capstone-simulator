@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from mars.coordinator import CentralCoordinator
-from mars.models import (
+from mars.domain import (
     NodeKind,
     NodeSnapshot,
     NodeSpec,

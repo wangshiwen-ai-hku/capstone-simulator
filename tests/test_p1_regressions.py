@@ -4,7 +4,7 @@ import pytest
 
 from mars.coordinator import CentralCoordinator
 from mars.engine import run_workflow_simulation
-from mars.models import (
+from mars.domain import (
     ArtifactRef,
     DataEdge,
     DataPort,
@@ -136,6 +136,51 @@ def test_engine_preserves_free_capacity_across_scheduling_epochs() -> None:
     assert all(
         0 <= utilization <= 1
         for utilization in report.node_utilization.values()
+    )
+
+
+def test_execution_noise_cannot_overlap_a_single_runtime_slot() -> None:
+    edge = _node(
+        "edge",
+        NodeKind.EDGE,
+        cpu=20,
+        gpu=4,
+        max_concurrency=1,
+    )
+    tasks = (
+        _pinned_task(
+            "a",
+            "edge",
+            NodeKind.EDGE,
+            compute=10,
+        ),
+        _pinned_task(
+            "b",
+            "edge",
+            NodeKind.EDGE,
+            compute=10,
+        ),
+    )
+
+    report = run_workflow_simulation(
+        WorkflowSpec("wf", tasks),
+        [edge],
+        [NodeSnapshot("edge")],
+        algorithm="greedy_cost",
+        seed=1,
+        network_jitter=0,
+        resource_noise=0.5,
+        link_specs=[],
+        link_snapshots=[],
+    )
+    ordered = sorted(
+        report.task_results,
+        key=lambda item: item.start_time_ms,
+    )
+
+    assert ordered[1].start_time_ms >= ordered[0].finish_time_ms
+    assert report.metrics["makespan_ms"] == max(
+        item.finish_time_ms for item in ordered
     )
 
 

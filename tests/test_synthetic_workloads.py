@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from mars.models import TaskClass
+from mars.domain import TaskClass
 from mars.synthetic_workloads import (
     ExecutionTarget,
     SyntheticSampler,

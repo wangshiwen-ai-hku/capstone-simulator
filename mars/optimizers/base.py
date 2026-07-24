@@ -10,19 +10,22 @@ import math
 from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
-from ..models import (
-    Assignment,
-    ExecutionMode,
+from ..domain.artifact import (
     InputArtifactBinding,
+    artifacts_from_bindings,
+)
+from ..domain.execution import Assignment, ExecutionMode
+from ..domain.task import TaskInstance
+from ..domain.topology import (
     LinkSnapshot,
     LinkSpec,
     NodeKind,
     NodeSnapshot,
     NodeSpec,
-    TaskInstance,
+)
+from ..domain.transfer import (
     TransferEstimate,
     TransferReservation,
-    artifacts_from_bindings,
 )
 from .policy import (
     ConstraintEvaluation,

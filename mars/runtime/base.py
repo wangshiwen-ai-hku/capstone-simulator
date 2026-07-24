@@ -5,16 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from ..models import (
+from ..domain.artifact import (
     ArtifactRef,
-    Assignment,
     InputArtifactBinding,
-    NodeSnapshot,
-    NodeSpec,
-    TaskInstance,
-    TransferReservation,
     artifacts_from_bindings,
 )
+from ..domain.execution import Assignment
+from ..domain.task import TaskInstance
+from ..domain.topology import (
+    NodeSnapshot,
+    NodeSpec,
+)
+from ..domain.transfer import TransferReservation
 from ..optimizers.base import PlannedResourceReservation
 
 
@@ -252,6 +254,7 @@ class AttemptCompletion:
     task_id: str
     agent_id: str
     ok: bool
+    started_time_ms: float
     finished_time_ms: float
     compute_time_ms: float
     energy_j: float
@@ -260,6 +263,19 @@ class AttemptCompletion:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "outputs", tuple(self.outputs))
+        if self.started_time_ms < 0:
+            raise ValueError(
+                "attempt completion start time must be non-negative"
+            )
+        if self.finished_time_ms < self.started_time_ms:
+            raise ValueError(
+                "attempt completion cannot finish before it starts"
+            )
+        if self.compute_time_ms < 0 or self.energy_j < 0:
+            raise ValueError(
+                "attempt completion compute time and energy "
+                "must be non-negative"
+            )
 
 
 @runtime_checkable

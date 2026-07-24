@@ -9,6 +9,7 @@ from threading import Lock
 from uuid import uuid4
 
 from mars.coordinator import CentralCoordinator, CoordinatorReport
+from mars.domain.topology import LinkSnapshot
 from mars.runtime import InProcessRuntime
 
 from .mars_adapter import (
@@ -52,7 +53,7 @@ class LocalRuntimeService:
                         seed=7,
                     )
                 )
-                coordinator = _coordinator_for_scene(scene)
+                coordinator = coordinator_for_scene(scene)
                 asyncio.run(coordinator.initialize_async())
                 self._coordinator = coordinator
             return self._runtime_view_locked()
@@ -65,7 +66,7 @@ class LocalRuntimeService:
 
     def submit(self, request: RuntimeWorkflowRequest) -> dict[str, object]:
         _validate_runtime_topology(request)
-        coordinator = _coordinator_for_scene(request.scene)
+        coordinator = coordinator_for_scene(request.scene)
         workflow = build_workflow(request.scene)
         failure_ids: tuple[str, ...] = ()
         if request.inject_first_failure:
@@ -201,24 +202,55 @@ class LocalRuntimeService:
         return view
 
 
-def _runtime_for_scene(scene) -> InProcessRuntime:
+def runtime_for_scene(
+    scene,
+    *,
+    execution_noise: float = 0.04,
+    respect_expected_accuracy: bool = False,
+) -> InProcessRuntime:
+    """Build the reference process-local adapter for one declared topology."""
+
+    validate_process_local_scene(scene)
     specs = build_node_specs(scene)
     return InProcessRuntime(
         specs,
         build_node_snapshots(scene),
+        execution_noise=execution_noise,
+        respect_expected_accuracy=respect_expected_accuracy,
     )
 
 
-def _coordinator_for_scene(scene) -> CentralCoordinator:
+def coordinator_for_scene(
+    scene,
+    *,
+    execution_noise: float = 0.04,
+    respect_expected_accuracy: bool = False,
+    link_snapshots: tuple[LinkSnapshot, ...] | None = None,
+) -> CentralCoordinator:
+    """Build the canonical coordinator and RuntimePort implementation."""
+
     return CentralCoordinator(
-        _runtime_for_scene(scene),
+        runtime_for_scene(
+            scene,
+            execution_noise=execution_noise,
+            respect_expected_accuracy=respect_expected_accuracy,
+        ),
         link_specs=build_link_specs(scene),
-        link_snapshots=build_link_snapshots(scene),
+        link_snapshots=(
+            build_link_snapshots(scene)
+            if link_snapshots is None
+            else link_snapshots
+        ),
     )
-
 
 def _validate_runtime_topology(request: RuntimeWorkflowRequest) -> None:
-    clouds = [node for node in request.scene.nodes if node.kind == "cloud"]
+    validate_process_local_scene(request.scene)
+
+
+def validate_process_local_scene(scene) -> None:
+    """Reject node kinds not implemented by the process-local adapter."""
+
+    clouds = [node for node in scene.nodes if node.kind == "cloud"]
     if clouds:
         raise ValueError(
             "the process-local runtime supports robot and edge nodes; "

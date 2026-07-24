@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from ..models import (
-    ExecutionMode,
-    NodeKind,
-    TaskInstance,
-    resolved_placement_constraints,
-)
+from ..domain.execution import ExecutionMode
+from ..domain.task import TaskInstance, resolved_placement_constraints
+from ..domain.topology import NodeKind
 from .base import CandidateEstimate, SchedulingPlan, SchedulingProblem
 from .policy import (
     ConstraintEvaluation,

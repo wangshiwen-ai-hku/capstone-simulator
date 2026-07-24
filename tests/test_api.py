@@ -315,14 +315,23 @@ class ApiTests(unittest.TestCase):
             "/api/runtime/workflows",
             json={"scene": scene, "algorithm": "dag_deadline", "seed": 37},
         )
+        simulation = self.client.post(
+            "/api/simulate",
+            json={"scene": scene, "algorithm": "dag_deadline", "seed": 37},
+        )
         self.assertEqual(
             runtime.status_code,
             422,
         )
+        self.assertEqual(simulation.status_code, 422)
         self.assertEqual(
             runtime.json()["detail"],
             "the process-local runtime supports robot and edge nodes; "
             "cloud nodes are not supported",
+        )
+        self.assertEqual(
+            simulation.json()["detail"],
+            runtime.json()["detail"],
         )
 
 

@@ -6,7 +6,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .models import NodeKind, TaskClass
+from .domain.task import TaskClass
+from .domain.topology import NodeKind
 
 
 DEFAULT_PROFILE_PATH = Path(__file__).resolve().parents[1] / "configs" / "mars" / "profiles.synthetic.json"

@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from mars.models import (
+from mars.domain import (
     ArtifactRef,
     InputArtifactBinding,
     NodeKind,

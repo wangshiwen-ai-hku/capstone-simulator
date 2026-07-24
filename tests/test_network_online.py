@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mars.models import (
+from mars.domain import (
     LinkSnapshot,
     LinkSpec,
     NodeKind,

@@ -115,6 +115,8 @@ message AttemptCompletion {
   repeated ArtifactRef outputs = 9;
   string error_code = 10;
   string error_message = 11;
+  // Actual compute start after runtime-local queueing and resource arbitration.
+  double started_time_ms = 12;
 }
 
 message CancelAttemptRequest {

@@ -2,23 +2,26 @@
 
 MARS is a runtime-neutral central scheduler for multi-robot edge workflows.
 It contains the DAG and scheduling contracts, one asynchronous runtime
-contract, an in-process simulation adapter, a deterministic benchmark engine,
-a FastAPI adapter, and a React interface.
+contract, one coordinator event loop, an in-process simulation adapter, a
+FastAPI adapter, and a React interface.
 
 The runnable architecture is:
 
 ```text
 React UI ──► FastAPI adapter
-               ├── runtime request ──► CentralCoordinator
-               │                        ├── Snapshot + Policy + SolveLimits
-               │                        │      └── SchedulingProblem
-               │                        │             └── Optimizer
-               │                        │                    └── validated SchedulingPlan
-               │                        └── RuntimePort
-               │                               └── InProcessRuntime
-               │                                     ├── Simulated Robot Agent(s)
-               │                                     └── Simulated Edge Agent(s)
-               └── benchmark request ─► deterministic benchmark engine
+               ├── Web simulation request ─┐
+               └── runtime request ────────┴──► CentralCoordinator
+                                                ├── Snapshot + Policy + SolveLimits
+                                                │      └── SchedulingProblem
+                                                │             └── Optimizer
+                                                │                    └── validated SchedulingPlan
+                                                └── RuntimePort
+                                                       └── InProcessRuntime
+                                                             ├── Simulated Robot Agent(s)
+                                                             └── Simulated Edge Agent(s)
+
+CoordinatorReport ──► Web response projector / runtime result
+mars.engine ────────► compatibility wrapper over the same coordinator path
 ```
 
 The central runtime uses virtual time rather than wall-clock model execution.
@@ -123,11 +126,16 @@ the same result envelope. `INFEASIBLE` and `ERROR` Plans are never committable;
 time- or iteration-limited Plans must still contain a fully validated feasible
 incumbent for every assignment they return.
 
-The deterministic engine commits the validated batch plan. For `FAIL_FAST`
-workflows it uses a single rolling commit so that a failure cannot leave sibling
-work in flight. The central runtime also uses rolling-horizon control: its
-optimizer sees the complete ready batch, then the coordinator commits the
-earliest assignment through `RuntimePort` and replans after completion or retry.
+`CentralCoordinator` owns the only scheduling event loop. Its optimizer sees
+the complete ready batch. The coordinator commits validated assignments through
+`RuntimePort`, consumes correlated completions, updates DAG state, and replans
+after completion or retry. `FAIL_FAST` workflows use a single rolling commit so
+that a failure cannot leave sibling work in flight.
+
+Both Web simulation and runtime workflow submission use this path with
+`InProcessRuntime`. `mars.engine` is a compatibility wrapper and report
+projector for callers that still consume `SimulationReport`; it does not own a
+second scheduler or event loop.
 
 The built-in optimizer ID is `heuristic`. The existing API values
 `dag_deadline`, `rule_based`, `local_first`, `edge_first`, and `greedy_cost`
@@ -162,12 +170,12 @@ Open `http://localhost:5173`. The default scene has two Orin nodes, one edge
 node, explicit per-task placement constraints, and a localization Artifact that
 fans out to environment understanding and planning.
 
-Use either execution path:
+Both interface actions use the same coordinator and RuntimePort execution path:
 
-- **运行调度模拟** evaluates a scheduling policy preset in the deterministic engine.
-- **提交到 Agent Runtime** runs registration, assignment, transfer, execution,
-  and completion through the process-local RuntimePort adapter. Failure
-  injection is available through the runtime API and is disabled by default.
+- **运行调度模拟** returns the stable Web report projection for the completed run.
+- **提交到 Agent Runtime** stores the coordinator report asynchronously and
+  exposes run events. Failure injection is available through the runtime API
+  and is disabled by default.
 
 ### Tests
 
@@ -206,14 +214,21 @@ measured metadata:
 - average/peak power or joules per task;
 - failure rate and output quality for each hardware target.
 
-`configs/mars/profiles.synthetic.json` contains benchmark-engine profiles for
+`configs/mars/profiles.synthetic.json` contains compatibility profiles for
 older task labels.
 
 ## Project layout
 
 ```text
 mars/
-  models.py                    tasks, constraints, artifacts, nodes, links, assignments
+  domain/
+    task.py                    task declarations, instances, placement, task state
+    workflow.py                DAG edges, workflow declarations, lifecycle progress
+    artifact.py                artifact references and input-port bindings
+    topology.py                node/link declarations and dynamic snapshots
+    transfer.py                transfer estimates and reservations
+    execution.py               assignments, resource demand, task completion
+  models.py                    compatibility imports for the former domain path
   dag.py                       validation, readiness, results, failure propagation
   network.py                   directed topology and transfer estimation
   scheduler.py                 candidate generation and planning orchestration
@@ -224,7 +239,7 @@ mars/
   coordinator.py               central runtime orchestration, attempts, retry, report
   runtime/base.py              sole asynchronous control-plane runtime contract
   runtime/inprocess.py         process-local simulated runtime adapter
-  engine.py                    deterministic algorithm benchmark engine
+  engine.py                    compatibility wrapper and SimulationReport projector
   synthetic_workloads.py       replaceable synthetic workload registry and sampler
   profiling.py                 execution-profile catalog
 backend/app/
@@ -251,7 +266,7 @@ RuntimePort boundaries.
 
 ## API
 
-Benchmark path:
+Web and inspection API:
 
 - `GET /api/health`
 - `GET /api/architecture`

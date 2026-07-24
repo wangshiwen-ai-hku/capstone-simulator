@@ -9,7 +9,7 @@ from backend.app.mars_adapter import (
     build_link_snapshots,
     build_link_specs,
 )
-from backend.app.runtime import _runtime_for_scene
+from backend.app.runtime import runtime_for_scene
 from backend.app.scene_generator import build_deterministic_scene
 from backend.app.schemas import BenchmarkScene, GenerateSceneRequest
 from mars.optimizers import (
@@ -80,7 +80,7 @@ def test_legacy_scene_without_link_fields_still_simulates() -> None:
     )
 
 
-def test_complete_legacy_scene_works_for_both_execution_paths() -> None:
+def test_complete_legacy_scene_works_for_both_api_views() -> None:
     payload = _scene().model_dump(mode="json")
     payload.pop("links")
     payload.pop("link_snapshots")
@@ -143,7 +143,7 @@ def test_runtime_uses_scene_declared_max_concurrency() -> None:
     }
 
     async def describe():
-        runtime = _runtime_for_scene(scene)
+        runtime = runtime_for_scene(scene)
         await runtime.start(0)
         return await runtime.describe(0)
 

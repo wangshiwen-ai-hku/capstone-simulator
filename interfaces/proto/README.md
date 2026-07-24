@@ -60,15 +60,20 @@ projection used by the in-process executor.
 
 These Proto files are the source of truth for serialized cross-process and
 cross-language data. The current Python dataclasses remain the executable
-in-process domain model and validation source:
+in-process domain contracts and validation source:
 
 | Proto area | Current Python mapping |
 | --- | --- |
-| workflow and topology | `mars/models.py` |
+| task and workflow | `mars/domain/task.py`, `mars/domain/workflow.py`, `mars/domain/artifact.py` |
+| topology and transfers | `mars/domain/topology.py`, `mars/domain/transfer.py` |
+| assignments and completion | `mars/domain/execution.py` |
 | optimization facts and plans | `mars/optimizers/base.py` |
 | optimization policy and limits | `mars/optimizers/policy.py` |
 | runtime | `mars/runtime/base.py` |
 | profiling | `mars/profiling.py` |
+
+`mars/models.py` is a compatibility re-export and contains no independent
+domain definitions.
 
 The Python planning path already uses `SchedulingSnapshot`,
 `SchedulingPolicy`, `SolveLimits`, objective/constraint evaluations, and Plan

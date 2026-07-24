@@ -1,8 +1,6 @@
 """MARS scheduling core used by the API and runtime adapters."""
 
-from .dag import DagValidationError, TaskManager, validate_workflow
-from .coordinator import CentralCoordinator, CoordinatorReport
-from .models import (
+from .domain import (
     ArtifactRef,
     DataEdge,
     DataPort,
@@ -22,6 +20,8 @@ from .models import (
     WorkflowSpec,
     WorkflowState,
 )
+from .dag import DagValidationError, TaskManager, validate_workflow
+from .coordinator import CentralCoordinator, CoordinatorReport
 from .network import NetworkTopology
 from .optimizers import (
     ConstraintSpec,

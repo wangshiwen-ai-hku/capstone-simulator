@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from mars import __version__ as mars_version
-from mars.models import TASK_CLASS_LABELS, TaskClass
+from mars.domain.task import TASK_CLASS_LABELS, TaskClass
 from mars.optimizers import (
     algorithm_aliases,
     built_in_policy_ids,
@@ -316,4 +316,7 @@ def simulate(req: SimulateRequest):
         req.algorithm,
     )
     _validate_scene_request(req.scene)
-    return run_simulation(req)
+    try:
+        return run_simulation(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

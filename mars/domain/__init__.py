@@ -1,40 +1,43 @@
-"""Compatibility imports for the former consolidated domain module.
+"""Stable public imports for MARS domain objects."""
 
-New code should import these objects from ``mars.domain`` or its focused
-submodules. This module contains no independent definitions.
-"""
-
-from .domain import (
+from .artifact import (
+    ArtifactRef,
+    InputArtifactBinding,
+    artifacts_from_bindings,
+)
+from .execution import (
+    Assignment,
+    ExecutionMode,
+    TaskCompletion,
+    task_resource_demand,
+)
+from .task import (
     TASK_CLASS_LABELS,
     TERMINAL_STATES,
-    ArtifactRef,
-    Assignment,
-    DataEdge,
     DataPort,
-    ExecutionMode,
-    FailurePolicy,
-    InputArtifactBinding,
+    PlacementConstraints,
+    ResourceClass,
+    TaskClass,
+    TaskInstance,
+    TaskSpec,
+    TaskState,
+    infer_task_class,
+    resolved_placement_constraints,
+)
+from .topology import (
     LinkSnapshot,
     LinkSpec,
     NodeKind,
     NodeSnapshot,
     NodeSpec,
-    PlacementConstraints,
-    ResourceClass,
-    TaskClass,
-    TaskCompletion,
-    TaskInstance,
-    TaskSpec,
-    TaskState,
-    TransferEstimate,
-    TransferReservation,
+)
+from .transfer import TransferEstimate, TransferReservation
+from .workflow import (
+    DataEdge,
+    FailurePolicy,
     WorkflowProgress,
     WorkflowSpec,
     WorkflowState,
-    artifacts_from_bindings,
-    infer_task_class,
-    resolved_placement_constraints,
-    task_resource_demand,
 )
 
 __all__ = [

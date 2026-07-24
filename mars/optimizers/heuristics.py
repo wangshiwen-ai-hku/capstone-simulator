@@ -6,13 +6,10 @@ from collections import defaultdict
 from dataclasses import replace
 from time import perf_counter
 
-from ..models import (
-    Assignment,
-    ExecutionMode,
-    NodeKind,
-    TransferReservation,
-    resolved_placement_constraints,
-)
+from ..domain.execution import Assignment, ExecutionMode
+from ..domain.task import resolved_placement_constraints
+from ..domain.topology import NodeKind
+from ..domain.transfer import TransferReservation
 from .base import (
     CandidateEstimate,
     OptimizerRegistry,

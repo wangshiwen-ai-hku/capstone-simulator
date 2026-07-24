@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from mars.dag import DagIndex, DagValidationError, validate_workflow
-from mars.models import (
+from mars.domain import (
     DataEdge,
     DataPort,
     FailurePolicy,

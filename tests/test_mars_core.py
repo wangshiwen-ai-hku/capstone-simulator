@@ -4,7 +4,7 @@ import unittest
 
 from mars.dag import DagValidationError, TaskManager, validate_workflow
 from mars.engine import run_workflow_simulation
-from mars.models import (
+from mars.domain import (
     ArtifactRef,
     DataEdge,
     DataPort,
