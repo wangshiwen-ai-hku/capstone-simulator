@@ -11,13 +11,17 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
+    "@xyflow/react": "^12.11.2",
+    "lucide-react": "^1.27.0",
     "react": "latest",
     "react-dom": "latest",
     "vite": "latest"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.2",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "jsdom": "^29.1.1",
     "typescript": "latest",
     "vitest": "4.1.10"
   }

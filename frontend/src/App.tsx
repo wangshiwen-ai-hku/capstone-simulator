@@ -1,271 +1,477 @@
-import { useEffect, useMemo, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  Handle,
+  MarkerType,
+  MiniMap,
+  Panel,
+  Position,
+  ReactFlow,
+  addEdge,
+  useEdgesState,
+  useNodesState,
+  type Connection,
+  type Edge,
+  type Node,
+  type NodeProps,
+} from '@xyflow/react';
+import {
+  Box,
+  ChevronLeft,
+  ChevronRight,
+  CircleStop,
+  Cpu,
+  Gauge,
+  Play,
+  RefreshCcw,
+  RotateCcw,
+  Server,
+  SlidersHorizontal,
+  Workflow,
+  Zap,
+} from 'lucide-react';
 import {
   generateScene,
   getRuntimeWorkflow,
   health,
-  simulate,
   submitRuntimeWorkflow,
 } from './api';
-import { canonicalDag } from './dag';
 import type {
   Algorithm,
   BenchmarkScene,
   Difficulty,
   GenerateSceneRequest,
-  PlacementConstraintsSpec,
+  RuntimeTaskResult,
   RuntimeWorkflowRun,
   ScenarioType,
-  SimulationResponse,
   TaskCategory,
-  TaskClass,
+  Workload,
 } from './types';
 import { TASK_CATEGORIES } from './types';
 
-const scenarioOptions: ScenarioType[] = ['warehouse', 'hospital', 'campus', 'factory', 'disaster', 'custom'];
-const difficultyOptions: Difficulty[] = ['easy', 'medium', 'hard', 'stress'];
-const algorithmOptions: Algorithm[] = ['dag_deadline', 'rule_based', 'local_first', 'edge_first', 'greedy_cost'];
-const MAX_ROBOTS = 50;
-const MIN_EDGE_NODES = 0;
-const MAX_EDGE_NODES = 8;
-const MAX_SEED = 2_147_483_647;
-const GRAPH_NODE_LIMIT = 120;
-const TASK_PAGE_SIZE = 50;
-const PLACEMENT_PAGE_SIZE = 24;
-const EDGE_PAGE_SIZE = 50;
-const EVENT_PAGE_SIZE = 100;
-const LOG_PAGE_SIZE = 200;
-const RUNTIME_POLL_TIMEOUT_MS = 60_000;
-const RUNTIME_POLL_INTERVAL_MS = 500;
+const SCENARIOS: Array<{ value: ScenarioType; label: string }> = [
+  { value: 'warehouse', label: 'Warehouse' },
+  { value: 'hospital', label: 'Hospital' },
+  { value: 'campus', label: 'Campus' },
+  { value: 'factory', label: 'Factory' },
+  { value: 'disaster', label: 'Disaster response' },
+  { value: 'custom', label: 'Custom scene' },
+];
 
-const generationSourceLabels: Record<BenchmarkScene['generation_source'], string> = {
-  deterministic: 'Deterministic',
-  llm: 'LLM',
-  deterministic_fallback: 'Deterministic fallback',
-};
+const DIFFICULTIES: Difficulty[] = ['easy', 'medium', 'hard', 'stress'];
+const ALGORITHMS: Array<{ value: Algorithm; label: string }> = [
+  { value: 'dag_deadline', label: 'DAG deadline' },
+  { value: 'rule_based', label: 'Rule based' },
+  { value: 'local_first', label: 'Local first' },
+  { value: 'edge_first', label: 'Edge first' },
+  { value: 'greedy_cost', label: 'Greedy cost' },
+];
 
-const tabOptions = [
-  ['overview', 'Overview'],
-  ['dag', 'DAG'],
-  ['tasks', 'Tasks'],
-  ['runtime', 'Agent Runtime'],
-  ['json', 'JSON'],
-  ['logs', 'Logs'],
-] as const;
+const HARDWARE = {
+  orin_nano: {
+    label: 'Orin Nano',
+    architecture: 'jetson-orin-nano',
+    cpu: 1.2,
+    gpu: 1.1,
+    memory: 8,
+  },
+  orin_nx: {
+    label: 'Orin NX',
+    architecture: 'jetson-orin-nx',
+    cpu: 2.2,
+    gpu: 2.6,
+    memory: 16,
+  },
+  orin_agx: {
+    label: 'AGX Orin',
+    architecture: 'jetson-agx-orin',
+    cpu: 3.4,
+    gpu: 4.2,
+    memory: 32,
+  },
+} as const;
 
-type TabId = typeof tabOptions[number][0];
+type HardwareId = keyof typeof HARDWARE;
+type PlaybackState = 'idle' | 'submitting' | 'running' | 'paused' | 'complete' | 'error';
+type FlowKind = 'central' | 'task' | 'agent';
 
-const taskClassLabels: Record<TaskClass, string> = {
-  local_safety: 'Local safety reporting cohort',
-  realtime_offloadable: 'Real-time offloadable reporting cohort',
-  edge_heavy: 'Edge-heavy reporting cohort',
-};
-
-type ConstraintBadgeTone = 'pin' | 'safety' | 'allowed' | 'preferred' | 'capability' | 'property' | 'warning';
-
-interface ConstraintBadge {
+interface TaskPlayback {
+  id: string;
   label: string;
-  tone: ConstraintBadgeTone;
+  target: string;
+  state: string;
+  progress: number;
+  start: number;
+  finish: number;
 }
 
-function reportClassLabel(taskClass?: TaskClass | null) {
-  return taskClass ? taskClassLabels[taskClass] : 'No reporting cohort';
+interface FlowData extends Record<string, unknown> {
+  kind: FlowKind;
+  label: string;
+  subtitle?: string;
+  task?: Workload;
+  queue?: TaskPlayback[];
+  tasks?: TaskPlayback[];
+  progress?: number;
+  state?: string;
+  hardwareKind?: 'robot' | 'edge' | 'cloud';
+  architecture?: string;
+  utilization?: number;
+  onRename?: (id: string, value: string) => void;
 }
 
-function placementBadges(
-  placement?: PlacementConstraintsSpec | null,
-  limit = Number.POSITIVE_INFINITY,
-) {
-  if (!placement) {
-    return [{ label: 'Placement constraints not declared', tone: 'warning' as const }];
-  }
+type FlowNode = Node<FlowData>;
 
-  const badges: ConstraintBadge[] = [];
-  if (placement.pinned_node_id) badges.push({ label: `Pinned to ${placement.pinned_node_id}`, tone: 'pin' });
-  if (placement.pin_to_source) badges.push({ label: 'Pinned to source', tone: 'pin' });
-  if (placement.safety_required) badges.push({ label: 'Safety-capable node', tone: 'safety' });
-  if (placement.allowed_node_kinds.length) {
-    badges.push({ label: `Allowed: ${placement.allowed_node_kinds.join(' / ')}`, tone: 'allowed' });
-  }
-  badges.push({
-    label: placement.allow_source_node ? 'Source allowed' : 'Source excluded',
-    tone: placement.allow_source_node ? 'allowed' : 'property',
-  });
-  if (placement.preferred_node_kinds.length) {
-    badges.push({ label: `Preferred: ${placement.preferred_node_kinds.join(' / ')}`, tone: 'preferred' });
-  }
-  placement.required_capabilities.forEach((capability) => {
-    badges.push({ label: `Capability: ${capability}`, tone: 'capability' });
-  });
-  if (placement.allow_other_robots) badges.push({ label: 'Cross-robot placement allowed', tone: 'property' });
-  if (placement.stateful) badges.push({ label: 'Stateful', tone: 'property' });
-  if (!placement.idempotent) badges.push({ label: 'Non-idempotent', tone: 'property' });
-  if (!placement.allow_fallback) badges.push({ label: 'Fallback disabled', tone: 'property' });
-  if (placement.splittable) badges.push({ label: 'Splittable', tone: 'property' });
-  if (placement.replicable) badges.push({ label: 'Replicable', tone: 'property' });
-  if (!badges.length) badges.push({ label: 'General placement', tone: 'allowed' });
+const NODE_TYPES = {
+  central: CentralNode,
+  task: TaskNode,
+  agent: AgentNode,
+};
 
-  if (badges.length <= limit) return badges;
-  return [
-    ...badges.slice(0, Math.max(0, limit - 1)),
-    { label: `+${badges.length - Math.max(0, limit - 1)}`, tone: 'property' as const },
-  ];
+const POLL_TIMEOUT_MS = 60_000;
+const POLL_INTERVAL_MS = 450;
+const PLAYBACK_DURATION_MS = 9_000;
+const EMPTY_RUNTIME_TASKS: RuntimeTaskResult[] = [];
+
+function clamp(value: number, min = 0, max = 1) {
+  return Math.min(max, Math.max(min, value));
 }
 
-function PlacementBadges({
-  placement,
-  limit,
-}: {
-  placement?: PlacementConstraintsSpec | null;
-  limit?: number;
-}) {
-  return (
-    <div className="constraint-badges">
-      {placementBadges(placement, limit).map((badge, index) => (
-        <span className={`constraint-badge ${badge.tone}`} key={`${badge.label}-${index}`}>
-          {badge.label}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function boundedInteger(value: string, minimum: number, maximum: number, fallback: number) {
-  if (value.trim() === '') return minimum;
+function boundedInteger(value: string, min: number, max: number, fallback: number) {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(maximum, Math.max(minimum, Math.trunc(parsed)));
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, Math.trunc(parsed))) : fallback;
 }
 
-function pageCount(itemCount: number, pageSize: number) {
-  return Math.max(1, Math.ceil(itemCount / pageSize));
+function taskLabel(category: string) {
+  return category.replace(/_/g, ' ');
 }
 
-function safePage(page: number, itemCount: number, pageSize: number) {
-  return Math.min(page, pageCount(itemCount, pageSize) - 1);
+function taskTone(state?: string) {
+  if (state === 'running') return 'running';
+  if (state === 'succeeded') return 'succeeded';
+  if (state === 'failed' || state === 'skipped') return 'failed';
+  return 'queued';
 }
 
-function pageItems<T>(items: T[], page: number, pageSize: number) {
-  const resolvedPage = safePage(page, items.length, pageSize);
-  return items.slice(resolvedPage * pageSize, (resolvedPage + 1) * pageSize);
+function taskPlayback(
+  task: Workload,
+  runtimeTask: RuntimeTaskResult | undefined,
+  playhead: number,
+): TaskPlayback {
+  if (!runtimeTask) {
+    return {
+      id: task.id,
+      label: task.name || taskLabel(task.task_type),
+      target: '',
+      state: 'queued',
+      progress: 0,
+      start: task.arrival_time_ms,
+      finish: task.arrival_time_ms,
+    };
+  }
+  const attempts = runtimeTask?.attempts ?? [];
+  const start = attempts.length
+    ? Math.min(...attempts.map((attempt) => attempt.start_time_ms))
+    : task.arrival_time_ms;
+  const finish = attempts.length
+    ? Math.max(...attempts.map((attempt) => attempt.finish_time_ms))
+    : start;
+  const hasStarted = playhead >= start;
+  const hasFinished = playhead >= finish && finish >= start;
+  const progress = !hasStarted
+    ? 0
+    : finish <= start
+      ? 1
+      : clamp((playhead - start) / (finish - start));
+  let state = 'queued';
+  if (hasStarted && !hasFinished) state = 'running';
+  if (hasFinished) state = runtimeTask?.state ?? 'succeeded';
+  return {
+    id: task.id,
+    label: task.name || taskLabel(task.task_type),
+    target: runtimeTask?.target_node_id ?? '',
+    state,
+    progress,
+    start,
+    finish,
+  };
 }
 
-function Pagination({
-  page,
-  itemCount,
-  pageSize,
-  onPageChange,
-  label,
-}: {
-  page: number;
-  itemCount: number;
-  pageSize: number;
-  onPageChange: (page: number) => void;
-  label: string;
-}) {
-  const pages = pageCount(itemCount, pageSize);
-  const resolvedPage = safePage(page, itemCount, pageSize);
-  if (pages <= 1) return null;
+function CentralNode({ data }: NodeProps<FlowNode>) {
+  const queue = data.queue ?? [];
+  const completed = queue.filter((task) => task.state === 'succeeded').length;
   return (
-    <nav className="pagination" aria-label={`${label} pagination`}>
-      <button
-        type="button"
-        onClick={() => onPageChange(resolvedPage - 1)}
-        disabled={resolvedPage === 0}
-      >
-        Previous
-      </button>
-      <span aria-live="polite">
-        Page {resolvedPage + 1} of {pages} | {itemCount} items
-      </span>
-      <button
-        type="button"
-        onClick={() => onPageChange(resolvedPage + 1)}
-        disabled={resolvedPage >= pages - 1}
-      >
-        Next
-      </button>
-    </nav>
+    <section className="flow-node central-node">
+      <Handle type="source" position={Position.Right} className="flow-handle" />
+      <div className="node-titlebar central-titlebar">
+        <span className="node-icon"><Workflow size={16} /></span>
+        <div>
+          <strong>{data.label}</strong>
+          <small>{data.subtitle}</small>
+        </div>
+        <span className={`state-dot ${data.state ?? 'idle'}`} />
+      </div>
+      <div className="central-body">
+        <div className="queue-meta">
+          <span>Dispatch queue</span>
+          <strong>{completed}/{queue.length}</strong>
+        </div>
+        <div className="queue-track" aria-label="Central task queue">
+          {queue.map((task) => (
+            <span
+              key={task.id}
+              className={`queue-segment ${taskTone(task.state)}`}
+              style={{ flexGrow: Math.max(1, task.finish - task.start) }}
+              title={`${task.label}: ${task.state}`}
+            />
+          ))}
+        </div>
+        <div className="queue-list">
+          {queue.slice(0, 8).map((task, index) => (
+            <div className="queue-row" key={task.id}>
+              <span>{String(index + 1).padStart(2, '0')}</span>
+              <p>{task.label}</p>
+              <small>{task.target || 'waiting'}</small>
+              <i className={taskTone(task.state)} />
+            </div>
+          ))}
+          {queue.length > 8 && <div className="queue-more">+{queue.length - 8} queued tasks</div>}
+        </div>
+      </div>
+    </section>
   );
 }
 
-function pct(x: number) {
-  return `${(x * 100).toFixed(1)}%`;
+function TaskNode({ id, data, selected }: NodeProps<FlowNode>) {
+  const task = data.task;
+  const tone = taskTone(data.state);
+  return (
+    <section className={`flow-node task-node ${tone} ${selected ? 'selected' : ''}`}>
+      <Handle type="target" position={Position.Left} className="flow-handle" />
+      <Handle type="source" position={Position.Right} className="flow-handle" />
+      <div className="node-titlebar">
+        <span className="node-icon"><Box size={15} /></span>
+        <input
+          className="node-name-input nodrag"
+          value={data.label}
+          aria-label={`Edit ${data.label} name`}
+          onChange={(event) => data.onRename?.(id, event.target.value)}
+        />
+        <span className={`task-status ${tone}`}>{tone}</span>
+      </div>
+      <div className="task-node-body">
+        <div className="task-type">{taskLabel(task?.task_type ?? '')}</div>
+        <div className="task-meta">
+          <span>P{task?.priority ?? 0}</span>
+          <span>{task?.compute_demand.toFixed(1)} CPU</span>
+          <span>{task?.gpu_demand.toFixed(1)} GPU</span>
+        </div>
+        <div className="progress-label">
+          <span>{data.subtitle || 'Unassigned'}</span>
+          <strong>{Math.round((data.progress ?? 0) * 100)}%</strong>
+        </div>
+        <div className="task-progress">
+          <span style={{ width: `${(data.progress ?? 0) * 100}%` }} />
+        </div>
+      </div>
+    </section>
+  );
 }
 
-function metricLabel(key: string) {
-  const map: Record<string, string> = {
-    task_count: 'Tasks',
-    success_rate: 'Success',
-    deadline_miss_rate: 'Deadline Miss',
-    avg_latency_ms: 'Avg Latency',
-    p95_latency_ms: 'P95 Latency',
-    p99_latency_ms: 'P99 Latency',
-    avg_energy_j: 'Avg Energy',
-    total_energy_j: 'Total Energy',
-    bandwidth_mb: 'Bandwidth',
-    makespan_ms: 'Makespan',
-    edge_offload_ratio: 'Offload',
-    safety_violation_count: 'Safety Violations',
-    skipped_task_count: 'Skipped',
-    workflow_success_rate: 'Workflow Success',
-    critical_path_ms: 'Critical Path',
-    dag_depth: 'DAG Depth',
-  };
-  return map[key] ?? key;
+function AgentNode({ data }: NodeProps<FlowNode>) {
+  const tasks = data.tasks ?? [];
+  const icon = data.hardwareKind === 'edge' ? <Server size={16} /> : <Cpu size={16} />;
+  return (
+    <section className={`flow-node agent-node ${data.hardwareKind ?? 'robot'}`}>
+      <Handle type="target" position={Position.Left} className="flow-handle" />
+      <div className="node-titlebar">
+        <span className="node-icon">{icon}</span>
+        <div>
+          <strong>{data.label}</strong>
+          <small>{data.architecture}</small>
+        </div>
+        <span className="online-mark">online</span>
+      </div>
+      <div className="agent-body">
+        <div className="agent-util">
+          <span>Utilization</span>
+          <strong>{Math.round((data.utilization ?? 0) * 100)}%</strong>
+        </div>
+        <div className="agent-util-track">
+          <span style={{ width: `${(data.utilization ?? 0) * 100}%` }} />
+        </div>
+        <div className="agent-tasks">
+          {tasks.length === 0 && <p className="agent-empty">No assigned tasks</p>}
+          {tasks.slice(0, 7).map((task) => (
+            <div className="agent-task" key={task.id}>
+              <div><span>{task.label}</span><small>{Math.round(task.progress * 100)}%</small></div>
+              <div className="agent-task-track"><i className={taskTone(task.state)} style={{ width: `${task.progress * 100}%` }} /></div>
+            </div>
+          ))}
+          {tasks.length > 7 && <p className="agent-empty">+{tasks.length - 7} more</p>}
+        </div>
+      </div>
+    </section>
+  );
 }
 
-function formatMetric(key: string, value: number) {
-  if (key.includes('rate') || key.includes('ratio')) return pct(value);
-  if (key.includes('latency') || key.includes('makespan') || key.includes('critical_path')) return `${value.toFixed(1)} ms`;
-  if (key.includes('energy')) return `${value.toFixed(1)} J`;
-  if (key.includes('bandwidth')) return `${value.toFixed(1)} MB`;
-  return `${value}`;
-}
+function initialGraph(
+  scene: BenchmarkScene,
+  playback: TaskPlayback[],
+  onRename: (id: string, value: string) => void,
+): { nodes: FlowNode[]; edges: Edge[] } {
+  const levelCounts = new Map<number, number>();
+  const maxLevel = Math.max(0, ...scene.tasks.map((task) => task.stage_index));
+  const nodes: FlowNode[] = [
+    {
+      id: 'central-scheduler',
+      type: 'central',
+      position: { x: 40, y: 140 },
+      draggable: true,
+      data: {
+        kind: 'central',
+        label: 'Central Scheduler',
+        subtitle: 'MARS control plane',
+        queue: playback,
+        state: 'idle',
+      },
+    },
+  ];
 
-function runtimeCompatibilityIssue(
-  scene: BenchmarkScene | null,
-) {
-  if (!scene) return null;
-  const unsupportedCount = scene.nodes.filter((node) => node.kind === 'cloud').length;
-  if (unsupportedCount > 0) return 'The in-process Agent runtime supports robot and edge nodes only.';
-  return null;
+  scene.tasks.forEach((task) => {
+    const level = task.stage_index;
+    const row = levelCounts.get(level) ?? 0;
+    levelCounts.set(level, row + 1);
+    const runtime = playback.find((item) => item.id === task.id);
+    nodes.push({
+      id: `task:${task.id}`,
+      type: 'task',
+      position: {
+        x: 430 + level * 285,
+        y: 54 + row * 168,
+      },
+      data: {
+        kind: 'task',
+        label: task.name || taskLabel(task.task_type),
+        subtitle: runtime?.target || task.source_robot_id,
+        task,
+        progress: runtime?.progress ?? 0,
+        state: runtime?.state ?? 'queued',
+        onRename,
+      },
+    });
+  });
+
+  const agentX = 430 + (maxLevel + 1) * 285 + 140;
+  scene.nodes.forEach((node, index) => {
+    const assigned = playback.filter((task) => task.target === node.id);
+    nodes.push({
+      id: `agent:${node.id}`,
+      type: 'agent',
+      position: { x: agentX, y: 54 + index * 248 },
+      data: {
+        kind: 'agent',
+        label: node.display_name || node.id,
+        subtitle: node.id,
+        hardwareKind: node.kind,
+        architecture: node.architecture,
+        tasks: assigned,
+        utilization: assigned.length > 0
+          ? assigned.reduce((sum, task) => sum + task.progress, 0) / Math.max(1, node.max_concurrency)
+          : 0,
+      },
+    });
+  });
+
+  const edges: Edge[] = [];
+  scene.tasks.forEach((task) => {
+    if (task.dependencies.length === 0) {
+      edges.push({
+        id: `central-${task.id}`,
+        source: 'central-scheduler',
+        target: `task:${task.id}`,
+        type: 'smoothstep',
+        animated: true,
+        style: { stroke: '#7dd3a8', strokeWidth: 1.5 },
+        markerEnd: { type: MarkerType.ArrowClosed, color: '#7dd3a8' },
+      });
+    }
+    task.dependencies.forEach((parent) => {
+      edges.push({
+        id: `dependency:${parent}:${task.id}`,
+        source: `task:${parent}`,
+        target: `task:${task.id}`,
+        type: 'smoothstep',
+        style: { stroke: '#8a929c', strokeWidth: 1.35 },
+        markerEnd: { type: MarkerType.ArrowClosed, color: '#8a929c' },
+      });
+    });
+  });
+  playback.forEach((task) => {
+    if (!task.target) return;
+    edges.push({
+      id: `placement:${task.id}:${task.target}`,
+      source: `task:${task.id}`,
+      target: `agent:${task.target}`,
+      type: 'smoothstep',
+      style: { stroke: '#d7a94a', strokeWidth: 1, strokeDasharray: '5 5' },
+      markerEnd: { type: MarkerType.ArrowClosed, color: '#d7a94a' },
+    });
+  });
+  return { nodes, edges };
 }
 
 export default function App() {
-  const [providerInfo, setProviderInfo] = useState<string>('Connecting to the MARS API...');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [scenarioType, setScenarioType] = useState<ScenarioType>('warehouse');
   const [customScene, setCustomScene] = useState('');
   const [robotCount, setRobotCount] = useState(2);
   const [edgeCount, setEdgeCount] = useState(1);
   const [difficulty, setDifficulty] = useState<Difficulty>('medium');
-  const [useLlm, setUseLlm] = useState(false);
+  const [hardware, setHardware] = useState<HardwareId>('orin_nx');
+  const [algorithm, setAlgorithm] = useState<Algorithm>('dag_deadline');
   const [seed, setSeed] = useState(7);
   const [taskCategories, setTaskCategories] = useState<TaskCategory[]>([
     'localization',
     'environment_understanding',
     'object_detection',
-    'semantic_segmentation',
     'local_planning',
     'obstacle_avoidance',
     'local_control',
-    'local_llm_7b',
   ]);
-  const [algorithm, setAlgorithm] = useState<Algorithm>('dag_deadline');
   const [scene, setScene] = useState<BenchmarkScene | null>(null);
-  const [result, setResult] = useState<SimulationResponse | null>(null);
   const [runtimeRun, setRuntimeRun] = useState<RuntimeWorkflowRun | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [runtimeLoading, setRuntimeLoading] = useState(false);
+  const [playbackState, setPlaybackState] = useState<PlaybackState>('idle');
+  const [playhead, setPlayhead] = useState(0);
+  const [apiStatus, setApiStatus] = useState('Connecting');
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<TabId>('overview');
+  const [building, setBuilding] = useState(false);
+  const [layoutRevision, setLayoutRevision] = useState(0);
+  const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const playStartedAt = useRef(0);
+  const playStartedFrom = useRef(0);
+  const initialBuildDone = useRef(false);
+  const stopRequested = useRef(false);
 
-  useEffect(() => {
-    health()
-      .then((h) => setProviderInfo(
-        `MARS ${h.mars_version} | Agent Runtime | LLM ${h.llm_configured ? 'configured' : 'not configured'}`,
-      ))
-      .catch((e) => setProviderInfo(`MARS API unavailable: ${e.message}`));
-  }, []);
+  const runtimeTasks = runtimeRun?.result?.task_results ?? EMPTY_RUNTIME_TASKS;
+  const makespan = runtimeRun?.result?.metrics.makespan_ms ?? 0;
+  const playback = useMemo(
+    () => (scene?.tasks ?? []).map((task) => taskPlayback(
+      task,
+      runtimeTasks.find((runtimeTask) => runtimeTask.task_id === task.id),
+      playhead,
+    )),
+    [scene, runtimeTasks, playhead],
+  );
 
   const requestPayload: GenerateSceneRequest = useMemo(() => ({
     scenario_type: scenarioType,
@@ -275,255 +481,436 @@ export default function App() {
     task_categories: taskCategories,
     difficulty,
     seed,
-    use_llm: useLlm,
-  }), [scenarioType, customScene, robotCount, edgeCount, taskCategories, difficulty, seed, useLlm]);
-  const runtimeIssue = useMemo(
-    () => runtimeCompatibilityIssue(scene),
-    [scene],
+    use_llm: false,
+  }), [
+    scenarioType,
+    customScene,
+    robotCount,
+    edgeCount,
+    taskCategories,
+    difficulty,
+    seed,
+  ]);
+
+  useEffect(() => {
+    health()
+      .then((response) => setApiStatus(`MARS ${response.mars_version}`))
+      .catch(() => setApiStatus('API offline'));
+  }, []);
+
+  const renameNode = useCallback((id: string, value: string) => {
+    setNodes((current) => current.map((node) => (
+      node.id === id ? { ...node, data: { ...node.data, label: value } } : node
+    )));
+  }, [setNodes]);
+
+  const applyHardware = useCallback((generated: BenchmarkScene) => {
+    const profile = HARDWARE[hardware];
+    return {
+      ...generated,
+      nodes: generated.nodes.map((node) => (
+        node.kind !== 'robot'
+          ? node
+          : {
+            ...node,
+            architecture: profile.architecture,
+            cpu_capacity: profile.cpu,
+            gpu_capacity: profile.gpu,
+            memory_gb: profile.memory,
+          }
+      )),
+    };
+  }, [hardware]);
+
+  const buildScene = useCallback(async (payload: GenerateSceneRequest) => {
+    setBuilding(true);
+    setError(null);
+    setPlaybackState('idle');
+    setRuntimeRun(null);
+    setPlayhead(0);
+    try {
+      if (payload.task_categories.length === 0) throw new Error('Select at least one atomic task.');
+      const generated = applyHardware(await generateScene(payload));
+      setScene(generated);
+      setLayoutRevision((value) => value + 1);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBuilding(false);
+    }
+  }, [applyHardware]);
+
+  useEffect(() => {
+    if (initialBuildDone.current) return;
+    initialBuildDone.current = true;
+    void buildScene(requestPayload);
+  }, [buildScene, requestPayload]);
+
+  useEffect(() => {
+    if (!scene) return;
+    const graph = initialGraph(scene, playback, renameNode);
+    setNodes(graph.nodes);
+    setEdges(graph.edges);
+  }, [scene, layoutRevision, renameNode, setEdges, setNodes]);
+
+  useEffect(() => {
+    if (!scene) return;
+    const playbackById = new Map(playback.map((task) => [task.id, task]));
+    setNodes((current) => current.map((node) => {
+      if (node.data.kind === 'central') {
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            queue: playback,
+            state: playbackState,
+          },
+        };
+      }
+      if (node.data.kind === 'task' && node.data.task) {
+        const task = playbackById.get(node.data.task.id);
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            subtitle: task?.target || node.data.task.source_robot_id,
+            progress: task?.progress ?? 0,
+            state: task?.state ?? 'queued',
+          },
+        };
+      }
+      if (node.data.kind === 'agent') {
+        const nodeId = node.id.replace('agent:', '');
+        const assigned = playback.filter((task) => task.target === nodeId);
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            tasks: assigned,
+            utilization: assigned.length
+              ? clamp(assigned.reduce((sum, task) => sum + task.progress, 0) / Math.max(1, assigned.length))
+              : 0,
+          },
+        };
+      }
+      return node;
+    }));
+  }, [playback, playbackState, scene, setNodes]);
+
+  useEffect(() => {
+    if (playbackState !== 'running' || makespan <= 0) return undefined;
+    let frame = 0;
+    const tick = (now: number) => {
+      const elapsed = now - playStartedAt.current;
+      const next = Math.min(
+        makespan,
+        playStartedFrom.current + (elapsed / PLAYBACK_DURATION_MS) * makespan,
+      );
+      setPlayhead(next);
+      if (next >= makespan) {
+        setPlaybackState('complete');
+        return;
+      }
+      frame = window.requestAnimationFrame(tick);
+    };
+    frame = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frame);
+  }, [makespan, playbackState]);
+
+  const toggleTask = (category: TaskCategory) => {
+    setTaskCategories((current) => (
+      current.includes(category)
+        ? current.filter((item) => item !== category)
+        : [...current, category]
+    ));
+  };
+
+  const onConnect = useCallback(
+    (connection: Connection) => setEdges((current) => addEdge({
+      ...connection,
+      type: 'smoothstep',
+      style: { stroke: '#8a929c', strokeWidth: 1.35 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: '#8a929c' },
+    }, current)),
+    [setEdges],
   );
 
-  function toggleTaskCategory(cat: TaskCategory) {
-    setTaskCategories((prev) => {
-      if (prev.includes(cat)) return prev.filter((x) => x !== cat);
-      return [...prev, cat];
-    });
-  }
-
-  async function onGenerate() {
-    setLoading(true);
-    setError(null);
-    setResult(null);
-    setRuntimeRun(null);
-    try {
-      if (taskCategories.length === 0) throw new Error('Select at least one task type.');
-      const s = await generateScene(requestPayload);
-      setScene(s);
-      setTab('overview');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function onSimulate() {
-    if (!scene || runtimeIssue) return;
-    setLoading(true);
+  async function run() {
+    if (!scene || playbackState === 'submitting') return;
     setError(null);
     setRuntimeRun(null);
-    try {
-      const r = await simulate(scene, algorithm, seed);
-      setResult(r);
-      setTab('overview');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function onRuntimeRun() {
-    if (!scene || runtimeIssue) return;
-    setRuntimeLoading(true);
-    setError(null);
-    setResult(null);
-    setRuntimeRun(null);
-    setTab('runtime');
+    setPlayhead(0);
+    setPlaybackState('submitting');
+    stopRequested.current = false;
     try {
       const accepted = await submitRuntimeWorkflow(scene, algorithm, seed);
-      let run: RuntimeWorkflowRun | null = null;
-      const pollingStartedAt = Date.now();
-      while (Date.now() - pollingStartedAt < RUNTIME_POLL_TIMEOUT_MS) {
-        run = await getRuntimeWorkflow(accepted.run_id);
-        setRuntimeRun(run);
-        if (run.status === 'succeeded' || run.status === 'failed') break;
-        await new Promise((resolve) => window.setTimeout(resolve, RUNTIME_POLL_INTERVAL_MS));
+      const start = Date.now();
+      let current: RuntimeWorkflowRun | null = null;
+      while (Date.now() - start < POLL_TIMEOUT_MS) {
+        current = await getRuntimeWorkflow(accepted.run_id);
+        setRuntimeRun(current);
+        if (current.status === 'succeeded' || current.status === 'failed') break;
+        await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL_MS));
       }
-      if (!run || (run.status !== 'succeeded' && run.status !== 'failed')) {
-        throw new Error(
-          `Run ${accepted.run_id} did not finish within 60 seconds. Automatic polling stopped; server-side execution may still be active.`,
-        );
+      if (!current || current.status === 'accepted' || current.status === 'running') {
+        throw new Error('Runtime polling timed out after 60 seconds.');
       }
-      if (run.status === 'failed') {
-        throw new Error(run.error || 'The in-process Agent workflow failed.');
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRuntimeLoading(false);
+      if (current.status === 'failed') throw new Error(current.error || 'Runtime execution failed.');
+      playStartedFrom.current = 0;
+      playStartedAt.current = performance.now();
+      setPlaybackState(stopRequested.current ? 'paused' : 'running');
+      setLayoutRevision((value) => value + 1);
+    } catch (reason) {
+      setPlaybackState('error');
+      setError(reason instanceof Error ? reason.message : String(reason));
     }
   }
 
+  function stop() {
+    if (playbackState !== 'running' && playbackState !== 'submitting') return;
+    stopRequested.current = true;
+    setPlaybackState('paused');
+  }
+
+  function continuePlayback() {
+    if (playbackState !== 'paused' || !runtimeRun?.result) return;
+    playStartedFrom.current = playhead;
+    playStartedAt.current = performance.now();
+    stopRequested.current = false;
+    setPlaybackState('running');
+  }
+
+  function reset() {
+    setRuntimeRun(null);
+    setPlayhead(0);
+    setPlaybackState('idle');
+    stopRequested.current = false;
+    setError(null);
+    setLayoutRevision((value) => value + 1);
+  }
+
+  const progress = makespan > 0 ? clamp(playhead / makespan) : 0;
+  const succeeded = playback.filter((task) => task.state === 'succeeded').length;
+  const runningCount = playback.filter((task) => task.state === 'running').length;
+
   return (
-    <div className="app-shell">
-      <header className="hero">
-        <div>
-          <p className="eyebrow">MARS | Multi-Agent Robot Scheduling</p>
-          <h1>Robot-Edge Workflow Scheduling</h1>
-          <p className="subtitle">Build typed DAG workflows and inspect placement constraints, scheduling results, and Agent runtime state.</p>
-        </div>
-        <div className="status-pill" role="status" aria-live="polite">{providerInfo}</div>
-      </header>
-
-      <main className="layout">
-        <aside className="panel controls">
-          <h2>Workflow Generation</h2>
-          <label htmlFor="scenario-type">Scenario</label>
-          <select id="scenario-type" value={scenarioType} onChange={(e) => setScenarioType(e.target.value as ScenarioType)}>
-            {scenarioOptions.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-
-          {scenarioType === 'custom' && (
-            <>
-              <label htmlFor="custom-scene">Scenario Description</label>
-              <textarea id="custom-scene" value={customScene} onChange={(e) => setCustomScene(e.target.value)} placeholder="Hospital pharmacy delivery with network congestion and edge-server overload" />
-            </>
+    <div className={`studio-shell ${sidebarOpen ? '' : 'sidebar-collapsed'}`}>
+      <aside className="settings-sidebar">
+        <div className="sidebar-brand">
+          <div className="brand-mark"><Workflow size={19} /></div>
+          {sidebarOpen && (
+            <div>
+              <strong>MARS Studio</strong>
+              <small>Scheduler graph</small>
+            </div>
           )}
-
-          <div className="grid2">
-            <div>
-              <label htmlFor="robot-count">Robot Count</label>
-              <input
-                id="robot-count"
-                type="number"
-                min={1}
-                max={MAX_ROBOTS}
-                value={robotCount}
-                onChange={(e) => setRobotCount(
-                  boundedInteger(e.target.value, 1, MAX_ROBOTS, robotCount),
-                )}
-              />
-            </div>
-            <div>
-              <label htmlFor="edge-count">Edge PC Count</label>
-              <input
-                id="edge-count"
-                type="number"
-                min={MIN_EDGE_NODES}
-                max={MAX_EDGE_NODES}
-                value={edgeCount}
-                onChange={(e) => setEdgeCount(
-                  boundedInteger(e.target.value, MIN_EDGE_NODES, MAX_EDGE_NODES, edgeCount),
-                )}
-              />
-            </div>
-          </div>
-
-          <label htmlFor="difficulty">Workload Difficulty</label>
-          <select id="difficulty" value={difficulty} onChange={(e) => setDifficulty(e.target.value as Difficulty)}>
-            {difficultyOptions.map((d) => <option key={d} value={d}>{d}</option>)}
-          </select>
-
-          <fieldset className="control-fieldset">
-            <legend>Task Types</legend>
-            <div className="chips">
-              {TASK_CATEGORIES.map((cat) => {
-                const selected = taskCategories.includes(cat);
-                return (
-                  <button
-                    type="button"
-                    key={cat}
-                    className={selected ? 'chip selected' : 'chip'}
-                    aria-pressed={selected}
-                    onClick={() => toggleTaskCategory(cat)}
-                  >
-                    {cat}
-                  </button>
-                );
-              })}
-            </div>
-          </fieldset>
-
-          <div className="grid2">
-            <label className="checkbox-line" htmlFor="use-llm"><input id="use-llm" type="checkbox" checked={useLlm} onChange={(e) => setUseLlm(e.target.checked)} /> Use LLM</label>
-            <div>
-              <label htmlFor="seed">Seed</label>
-              <input
-                id="seed"
-                type="number"
-                min={0}
-                max={MAX_SEED}
-                value={seed}
-                onChange={(e) => setSeed(
-                  boundedInteger(e.target.value, 0, MAX_SEED, seed),
-                )}
-              />
-            </div>
-          </div>
-
-          <button className="primary" aria-busy={loading} onClick={onGenerate} disabled={loading || runtimeLoading}>{loading ? 'Processing...' : 'Generate Workflow'}</button>
-
-          <hr />
-          <h2>Scheduling and Execution</h2>
-          <label htmlFor="algorithm">Scheduling Policy</label>
-          <select id="algorithm" value={algorithm} onChange={(e) => setAlgorithm(e.target.value as Algorithm)}>
-            {algorithmOptions.map((a) => <option key={a} value={a}>{a}</option>)}
-          </select>
-          <button className="secondary" onClick={onSimulate} disabled={!scene || Boolean(runtimeIssue) || loading || runtimeLoading}>Run Scheduling Simulation</button>
           <button
-            className="primary runtime-run"
-            onClick={onRuntimeRun}
-            disabled={!scene || Boolean(runtimeIssue) || runtimeLoading || loading}
-            aria-busy={runtimeLoading}
-            aria-describedby="runtime-note"
+            type="button"
+            className="icon-button sidebar-toggle"
+            aria-label={sidebarOpen ? 'Collapse settings' : 'Expand settings'}
+            title={sidebarOpen ? 'Collapse settings' : 'Expand settings'}
+            onClick={() => setSidebarOpen((value) => !value)}
           >
-            {runtimeLoading ? 'Agent Running...' : 'Submit to Agent Runtime'}
+            {sidebarOpen ? <ChevronLeft size={17} /> : <ChevronRight size={17} />}
           </button>
-          <p id="runtime-note" className={runtimeIssue ? 'control-note warning' : 'control-note'}>
-            {runtimeIssue ?? 'The central scheduler assigns tasks and records data transfers, execution attempts, and retry events.'}
-          </p>
-        </aside>
+        </div>
 
-        <section className="panel workspace">
-          {error && <div className="error" role="alert" aria-live="assertive">{error}</div>}
-          {!scene && <EmptyState />}
-          {scene && (
-            <>
-              <div className="scene-header">
-                <div>
-                  <h2>{scene.title}</h2>
-                  <p>{scene.natural_language_description}</p>
-                  {scene.generation_note && (
-                    <p className="generation-note">{scene.generation_note}</p>
-                  )}
-                </div>
-                <div className="scene-badges">
-                  <div className={`generation-source ${scene.generation_source}`}>
-                    {generationSourceLabels[scene.generation_source]}
-                  </div>
-                  <div className={`difficulty ${scene.difficulty}`}>{scene.difficulty}</div>
-                </div>
-              </div>
-              <nav className="tabs" aria-label="Workflow views" role="tablist">
-                {tabOptions.map(([tabId, label]) => (
+        {sidebarOpen && (
+          <div className="settings-scroll">
+            <SettingsSection icon={<SlidersHorizontal size={15} />} title="Scene">
+              <label htmlFor="scenario">Scene</label>
+              <select id="scenario" value={scenarioType} onChange={(event) => setScenarioType(event.target.value as ScenarioType)}>
+                {SCENARIOS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+              {scenarioType === 'custom' && (
+                <textarea
+                  value={customScene}
+                  onChange={(event) => setCustomScene(event.target.value)}
+                  placeholder="Describe the operating scene"
+                  aria-label="Custom scene description"
+                />
+              )}
+              <label htmlFor="difficulty">Task difficulty</label>
+              <div className="segmented" id="difficulty">
+                {DIFFICULTIES.map((item) => (
                   <button
                     type="button"
-                    role="tab"
-                    id={`tab-${tabId}`}
-                    aria-controls={`panel-${tabId}`}
-                    aria-selected={tab === tabId}
-                    className={tab === tabId ? 'active' : ''}
-                    onClick={() => setTab(tabId)}
-                    key={tabId}
+                    key={item}
+                    className={difficulty === item ? 'active' : ''}
+                    onClick={() => setDifficulty(item)}
                   >
-                    {label}
+                    {item}
                   </button>
                 ))}
-              </nav>
-
-              <div
-                id={`panel-${tab}`}
-                role="tabpanel"
-                aria-labelledby={`tab-${tab}`}
-              >
-                {tab === 'overview' && <Overview scene={scene} result={result} />}
-                {tab === 'dag' && <DagView scene={scene} result={result} runtimeRun={runtimeRun} />}
-                {tab === 'tasks' && <Tasks scene={scene} result={result} />}
-                {tab === 'runtime' && <RuntimeView scene={scene} run={runtimeRun} />}
-                {tab === 'json' && <pre className="json-view">{JSON.stringify({ scene, result, runtimeRun }, null, 2)}</pre>}
-                {tab === 'logs' && <Logs result={result} />}
               </div>
-            </>
+            </SettingsSection>
+
+            <SettingsSection icon={<Cpu size={15} />} title="Hardware">
+              <div className="stepper-row">
+                <label htmlFor="robot-count">Robot nodes</label>
+                <div className="stepper">
+                  <button type="button" onClick={() => setRobotCount((value) => Math.max(1, value - 1))}>-</button>
+                  <input id="robot-count" type="number" min={1} max={50} value={robotCount} onChange={(event) => setRobotCount(boundedInteger(event.target.value, 1, 50, robotCount))} />
+                  <button type="button" onClick={() => setRobotCount((value) => Math.min(50, value + 1))}>+</button>
+                </div>
+              </div>
+              <div className="stepper-row">
+                <label htmlFor="edge-count">Edge nodes</label>
+                <div className="stepper">
+                  <button type="button" onClick={() => setEdgeCount((value) => Math.max(0, value - 1))}>-</button>
+                  <input id="edge-count" type="number" min={0} max={8} value={edgeCount} onChange={(event) => setEdgeCount(boundedInteger(event.target.value, 0, 8, edgeCount))} />
+                  <button type="button" onClick={() => setEdgeCount((value) => Math.min(8, value + 1))}>+</button>
+                </div>
+              </div>
+              <label>Robot hardware</label>
+              <div className="hardware-options">
+                {(Object.entries(HARDWARE) as Array<[HardwareId, typeof HARDWARE[HardwareId]]>).map(([id, profile]) => (
+                  <button
+                    type="button"
+                    key={id}
+                    className={hardware === id ? 'active' : ''}
+                    onClick={() => setHardware(id)}
+                  >
+                    <Cpu size={14} />
+                    <span>{profile.label}</span>
+                    <small>{profile.memory} GB</small>
+                  </button>
+                ))}
+              </div>
+            </SettingsSection>
+
+            <SettingsSection icon={<Box size={15} />} title="Atomic tasks">
+              <div className="task-options">
+                {TASK_CATEGORIES.map((category) => (
+                  <label key={category}>
+                    <input
+                      type="checkbox"
+                      checked={taskCategories.includes(category)}
+                      onChange={() => toggleTask(category)}
+                    />
+                    <span>{taskLabel(category)}</span>
+                  </label>
+                ))}
+              </div>
+            </SettingsSection>
+
+            <SettingsSection icon={<Gauge size={15} />} title="Scheduler">
+              <label htmlFor="algorithm">Policy</label>
+              <select id="algorithm" value={algorithm} onChange={(event) => setAlgorithm(event.target.value as Algorithm)}>
+                {ALGORITHMS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+              <label htmlFor="seed">Deterministic seed</label>
+              <input id="seed" type="number" min={0} max={2_147_483_647} value={seed} onChange={(event) => setSeed(boundedInteger(event.target.value, 0, 2_147_483_647, seed))} />
+            </SettingsSection>
+
+            <button
+              type="button"
+              className="apply-button"
+              onClick={() => void buildScene(requestPayload)}
+              disabled={building}
+            >
+              <RefreshCcw size={15} className={building ? 'spin' : ''} />
+              {building ? 'Building graph' : 'Apply settings'}
+            </button>
+          </div>
+        )}
+      </aside>
+
+      <main className="graph-workspace">
+        <header className="command-bar">
+          <div className="workspace-identity">
+            <span className={`api-indicator ${apiStatus === 'API offline' ? 'offline' : ''}`} />
+            <div>
+              <strong>{scene?.title ?? 'Loading scene'}</strong>
+              <small>{apiStatus} | {scene?.workflow_id ?? 'No workflow'}</small>
+            </div>
+          </div>
+          <div className="run-controls" aria-label="Runtime controls">
+            <button type="button" className="run" onClick={() => void run()} disabled={!scene || playbackState === 'submitting' || playbackState === 'running'} title="Run workflow">
+              <Play size={15} fill="currentColor" /> Run
+            </button>
+            <button type="button" onClick={stop} disabled={playbackState !== 'running' && playbackState !== 'submitting'} title="Stop playback">
+              <CircleStop size={15} /> Stop
+            </button>
+            <button type="button" onClick={reset} disabled={!scene} title="Reset workflow">
+              <RotateCcw size={15} /> Reset
+            </button>
+            <button type="button" onClick={continuePlayback} disabled={playbackState !== 'paused' || !runtimeRun?.result} title="Continue playback">
+              <Play size={15} /> Continue
+            </button>
+          </div>
+          <div className="runtime-summary">
+            <span className={`runtime-state ${playbackState}`}>{playbackState}</span>
+            <strong>{Math.round(progress * 100)}%</strong>
+          </div>
+        </header>
+
+        <section className="canvas-shell">
+          {error && (
+            <div className="workspace-error" role="alert">
+              <CircleStop size={16} />
+              <span>{error}</span>
+              <button type="button" onClick={() => setError(null)}>Dismiss</button>
+            </div>
+          )}
+          <ReactFlow<FlowNode, Edge>
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={NODE_TYPES}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            fitView
+            fitViewOptions={{ padding: 0.16, maxZoom: 1 }}
+            minZoom={0.2}
+            maxZoom={1.8}
+            deleteKeyCode={['Backspace', 'Delete']}
+            selectionOnDrag
+            panOnScroll
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="#40464f" />
+            <MiniMap
+              pannable
+              zoomable
+              nodeColor={(node) => {
+                if (node.data?.kind === 'central') return '#69c493';
+                if (node.data?.kind === 'agent') return '#d7a94a';
+                return '#747d89';
+              }}
+              maskColor="rgba(15, 17, 20, 0.72)"
+            />
+            <Controls showInteractive={false} />
+            <Panel position="bottom-center">
+              <div className="timeline-panel">
+                <div className="timeline-top">
+                  <span><Zap size={13} /> Virtual timeline</span>
+                  <strong>{playhead.toFixed(1)} / {makespan.toFixed(1)} ms</strong>
+                </div>
+                <div className="timeline-track">
+                  <span style={{ width: `${progress * 100}%` }} />
+                  {playback.map((task) => (
+                    <i
+                      key={task.id}
+                      style={{ left: `${makespan ? clamp(task.start / makespan) * 100 : 0}%` }}
+                      title={`${task.label}: ${task.start.toFixed(1)} ms`}
+                    />
+                  ))}
+                </div>
+                <div className="timeline-stats">
+                  <span>{playback.length} tasks</span>
+                  <span>{runningCount} running</span>
+                  <span>{succeeded} completed</span>
+                </div>
+              </div>
+            </Panel>
+          </ReactFlow>
+          {!scene && !building && (
+            <div className="canvas-empty">
+              <Workflow size={34} />
+              <strong>No workflow graph</strong>
+              <span>Apply scene settings to build one.</span>
+            </div>
           )}
         </section>
       </main>
@@ -531,659 +918,19 @@ export default function App() {
   );
 }
 
-function EmptyState() {
-  return (
-    <div className="empty">
-      <h2>Generate a workflow to inspect its scheduling structure</h2>
-      <p>Select a topology scale and task types to view the DAG, placement constraints, and execution results.</p>
-    </div>
-  );
-}
-
-function Overview({ scene, result }: { scene: BenchmarkScene; result: SimulationResponse | null }) {
-  const [placementPage, setPlacementPage] = useState(0);
-  const resolvedPlacementPage = safePage(
-    placementPage,
-    scene.tasks.length,
-    PLACEMENT_PAGE_SIZE,
-  );
-  const visiblePlacementTasks = pageItems(
-    scene.tasks,
-    resolvedPlacementPage,
-    PLACEMENT_PAGE_SIZE,
-  );
-  return (
-    <div className="overview">
-      <div className="cards">
-        <div className="card"><span>Compute Nodes</span><strong>{scene.nodes.length}</strong></div>
-        <div className="card"><span>Robots</span><strong>{scene.nodes.filter((n) => n.kind === 'robot').length}</strong></div>
-        <div className="card"><span>Tasks</span><strong>{scene.tasks.length}</strong></div>
-        <div className="card"><span>Typed Data Edges</span><strong>{scene.data_edges.length}</strong></div>
-      </div>
-
-      <div className="section-heading">
-        <div>
-          <h3>Task Placement Constraints</h3>
-          <p>Each task uses task_type to identify its work and independent constraint dimensions to declare valid execution locations and runtime properties.</p>
-        </div>
-      </div>
-      <div className="placement-overview">
-        {visiblePlacementTasks.map((task) => (
-          <article className="placement-card" key={task.id}>
-            <div>
-              <strong>{task.task_type}</strong>
-              <span>{task.id}</span>
-            </div>
-            <PlacementBadges placement={task.placement_constraints} limit={5} />
-          </article>
-        ))}
-      </div>
-      <Pagination
-        page={resolvedPlacementPage}
-        itemCount={scene.tasks.length}
-        pageSize={PLACEMENT_PAGE_SIZE}
-        onPageChange={setPlacementPage}
-        label="Task placement constraints"
-      />
-
-      {result && (
-        <>
-          <h3>Scheduling Metrics | {result.algorithm}</h3>
-          <div className="metrics-grid">
-            {Object.entries(result.metrics).map(([key, value]) => (
-              <div className="metric" key={key}>
-                <span>{metricLabel(key)}</span>
-                <strong>{formatMetric(key, value as number)}</strong>
-              </div>
-            ))}
-          </div>
-          <div className="section-heading">
-            <div>
-              <h3>Reporting Cohort Statistics</h3>
-              <p>TaskClass aggregates results; PlacementConstraints determine placement.</p>
-            </div>
-          </div>
-          <div className="class-grid">
-            {Object.entries(result.task_class_summary).map(([taskClass, summary]) => (
-              summary ? (
-                <div className={`class-card ${taskClass}`} key={taskClass}>
-                  <span>{reportClassLabel(taskClass as TaskClass)}</span>
-                  <strong>{summary.task_count}</strong>
-                  <small>success {pct(summary.success_rate)} | edge {pct(summary.edge_offload_ratio)} | avg {summary.avg_latency_ms.toFixed(1)} ms</small>
-                </div>
-              ) : null
-            ))}
-          </div>
-        </>
-      )}
-
-      <div className="split">
-        <div>
-          <h3>Scenario Stressors</h3>
-          <ul>{scene.stressors.map((s) => <li key={s}>{s}</li>)}</ul>
-        </div>
-        <div>
-          <h3>Success Criteria</h3>
-          <ul>{scene.success_criteria.map((s) => <li key={s}>{s}</li>)}</ul>
-        </div>
-      </div>
-
-      <h3>Node Resources</h3>
-      <div className="node-list">
-        {scene.nodes.map((n) => {
-          const r = scene.initial_resources.find((x) => x.node_id === n.id);
-          return (
-            <div className="node-card" key={n.id}>
-              <strong>{n.display_name}</strong>
-              <span>{n.kind} | CPU {n.cpu_capacity} | GPU {n.gpu_capacity} | {n.memory_gb}GB</span>
-              {r && <span>util CPU {pct(r.cpu_util)} | GPU {pct(r.gpu_util)} | Temp {r.temperature_c.toFixed(1)} C | Net {r.network_latency_ms.toFixed(1)}ms</span>}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function Tasks({ scene, result }: { scene: BenchmarkScene; result: SimulationResponse | null }) {
-  const [taskPage, setTaskPage] = useState(0);
-  const resultMap = new Map(result?.task_results.map((r) => [r.task_id, r]) ?? []);
-  const dag = canonicalDag(scene);
-  const resolvedTaskPage = safePage(taskPage, scene.tasks.length, TASK_PAGE_SIZE);
-  const visibleTasks = pageItems(scene.tasks, resolvedTaskPage, TASK_PAGE_SIZE);
-  return (
-    <>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Task Type</th>
-              <th>Placement Constraints</th>
-              <th>DAG Inputs</th>
-              <th>Priority</th>
-              <th>Budget</th>
-              <th>Model</th>
-              <th>Assignment</th>
-              <th>Latency</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {visibleTasks.map((t) => {
-              const r = resultMap.get(t.id);
-              const parents = dag.parents[t.id] ?? [];
-              return (
-                <tr key={t.id}>
-                  <td>
-                    <strong>{t.task_type}</strong>
-                    <span>{t.id}</span>
-                  </td>
-                  <td><PlacementBadges placement={t.placement_constraints} /></td>
-                  <td>
-                    level {dag.levels[t.id] ?? 0}
-                    <span>{parents.length ? `depends on ${parents.join(', ')}` : 'root task'}</span>
-                    <span>source {t.source_robot_id}</span>
-                  </td>
-                  <td>{t.priority}</td>
-                  <td>{t.latency_budget_ms.toFixed(0)} ms</td>
-                  <td>{t.model_requirement}</td>
-                  <td>{r?.target_node_id ?? '-'}</td>
-                  <td>{r ? `${r.total_latency_ms.toFixed(1)} ms` : '-'}</td>
-                  <td>{r ? <span className={r.success ? 'ok' : 'bad'}>{r.state}{r.deadline_missed ? ' | deadline' : ''}</span> : '-'}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-      <Pagination
-        page={resolvedTaskPage}
-        itemCount={scene.tasks.length}
-        pageSize={TASK_PAGE_SIZE}
-        onPageChange={setTaskPage}
-        label="Task table"
-      />
-    </>
-  );
-}
-
-function DagView({
-  scene,
-  result,
-  runtimeRun,
+function SettingsSection({
+  icon,
+  title,
+  children,
 }: {
-  scene: BenchmarkScene;
-  result: SimulationResponse | null;
-  runtimeRun: RuntimeWorkflowRun | null;
+  icon: React.ReactNode;
+  title: string;
+  children: React.ReactNode;
 }) {
-  const [viewMode, setViewMode] = useState<'graph' | 'levels'>('graph');
-  const [levelPage, setLevelPage] = useState(0);
-  const [edgePage, setEdgePage] = useState(0);
-  const runtimeResult = runtimeRun?.result ?? null;
-  const dag = useMemo(() => canonicalDag(scene), [scene]);
-  const levels = dag.levels;
-  const maxLevel = Math.max(0, ...Object.values(levels));
-  const graphAvailable = scene.tasks.length <= GRAPH_NODE_LIMIT;
-  const effectiveViewMode = graphAvailable ? viewMode : 'levels';
-  const critical = new Set(result?.workflow.critical_path ?? runtimeResult?.workflow.critical_path ?? []);
-  const resultMap = new Map(result?.task_results.map((item) => [item.task_id, item]) ?? []);
-  const runtimeMap = new Map(runtimeResult?.task_results.map((item) => [item.task_id, item]) ?? []);
-  const nodeWidth = 248;
-  const nodeHeight = 190;
-  const levelGap = 112;
-  const nodeGap = 28;
-  const marginX = 48;
-  const marginY = 44;
-  const groupedTasks = Array.from({ length: maxLevel + 1 }, () => [] as typeof scene.tasks);
-  scene.tasks.forEach((task) => {
-    groupedTasks[levels[task.id] ?? 0]?.push(task);
-  });
-  const maxTasksInLevel = Math.max(1, ...groupedTasks.map((tasks) => tasks.length));
-  const graphWidth = Math.max(
-    960,
-    marginX * 2 + ((maxLevel + 1) * nodeWidth) + (maxLevel * levelGap),
-  );
-  const graphHeight = Math.max(
-    520,
-    marginY * 2 + (maxTasksInLevel * nodeHeight) + ((maxTasksInLevel - 1) * nodeGap),
-  );
-  const positions = new Map<string, { x: number; y: number }>();
-  if (graphAvailable) {
-    groupedTasks.forEach((tasks, level) => {
-      const levelHeight = (tasks.length * nodeHeight) + (Math.max(0, tasks.length - 1) * nodeGap);
-      const startY = (graphHeight - levelHeight) / 2;
-      tasks.forEach((task, index) => {
-        positions.set(task.id, {
-          x: marginX + level * (nodeWidth + levelGap),
-          y: startY + index * (nodeHeight + nodeGap),
-        });
-      });
-    });
-  }
-
-  const typedPairCounts = new Map<string, number>();
-  dag.graphEdges.forEach((edge) => {
-    if (edge.kind !== 'data') return;
-    const key = `${edge.from}\u0000${edge.to}`;
-    typedPairCounts.set(key, (typedPairCounts.get(key) ?? 0) + 1);
-  });
-  const typedPairSeen = new Map<string, number>();
-  const taskById = new Map(scene.tasks.map((task) => [task.id, task]));
-  const topologicalIds = new Set(dag.topologicalOrder);
-  const orderedIds = [
-    ...dag.topologicalOrder,
-    ...scene.tasks
-      .map((task) => task.id)
-      .filter((taskId) => !topologicalIds.has(taskId)),
-  ];
-  const orderedTasks = orderedIds.flatMap((taskId) => {
-    const task = taskById.get(taskId);
-    return task ? [task] : [];
-  });
-  const resolvedLevelPage = safePage(levelPage, orderedTasks.length, TASK_PAGE_SIZE);
-  const visibleLevelTasks = pageItems(orderedTasks, resolvedLevelPage, TASK_PAGE_SIZE);
-  const visibleLevelGroups = new Map<number, typeof scene.tasks>();
-  visibleLevelTasks.forEach((task) => {
-    const level = levels[task.id] ?? 0;
-    const tasks = visibleLevelGroups.get(level) ?? [];
-    tasks.push(task);
-    visibleLevelGroups.set(level, tasks);
-  });
-  const resolvedEdgePage = safePage(edgePage, scene.data_edges.length, EDGE_PAGE_SIZE);
-  const visibleDataEdges = pageItems(scene.data_edges, resolvedEdgePage, EDGE_PAGE_SIZE);
-
   return (
-    <div className="dag-view">
-      <div className="dag-toolbar">
-        <div className="dag-summary">
-          <span>{scene.workflow_id}</span>
-          <span className={dag.valid && result?.dag.valid !== false ? 'valid' : 'invalid'}>
-            {dag.valid && result?.dag.valid !== false ? 'valid DAG' : 'invalid DAG'}
-          </span>
-          <span>{dag.dependencyEdges.length} task.dependencies</span>
-          <span>{scene.data_edges.length} typed DataEdges</span>
-          <span>failure: {scene.failure_policy}</span>
-        </div>
-        <div className="view-switch" role="group" aria-label="DAG view mode">
-          <button
-            type="button"
-            className={effectiveViewMode === 'graph' ? 'active' : ''}
-            aria-pressed={effectiveViewMode === 'graph'}
-            disabled={!graphAvailable}
-            title={graphAvailable ? undefined : `Graph view supports up to ${GRAPH_NODE_LIMIT} task nodes`}
-            onClick={() => setViewMode('graph')}
-          >
-            Graph
-          </button>
-          <button
-            type="button"
-            className={effectiveViewMode === 'levels' ? 'active' : ''}
-            aria-pressed={effectiveViewMode === 'levels'}
-            onClick={() => setViewMode('levels')}
-          >
-            Levels
-          </button>
-        </div>
-      </div>
-
-      {!graphAvailable && (
-        <p className="scale-notice" role="status">
-          This workflow contains {scene.tasks.length} tasks. Graph view supports up to {GRAPH_NODE_LIMIT} nodes; Levels view paginates the complete task set.
-        </p>
-      )}
-
-      <div className="dag-legend">
-        <span><i className="legend-line dependency" />Dependency without a data contract</span>
-        <span><i className="legend-line data" />Typed DataEdge</span>
-        <span><i className="legend-node critical" />Critical path</span>
-        <span><i className="legend-node assigned" />Assigned / executed</span>
-      </div>
-
-      {effectiveViewMode === 'graph' ? (
-        <div className="dag-graph-scroll">
-          <svg
-            className="dag-graph"
-            width={graphWidth}
-            height={graphHeight}
-            viewBox={`0 0 ${graphWidth} ${graphHeight}`}
-            role="img"
-            aria-label={`${scene.workflow_id} directed acyclic graph`}
-          >
-            <title>{scene.workflow_id} directed acyclic graph</title>
-            <defs>
-              <marker id="arrow-dependency" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                <path d="M 0 0 L 10 5 L 0 10 z" className="dependency-arrow" />
-              </marker>
-              <marker id="arrow-data" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                <path d="M 0 0 L 10 5 L 0 10 z" className="data-arrow" />
-              </marker>
-            </defs>
-            {groupedTasks.map((_, level) => {
-              const x = marginX + level * (nodeWidth + levelGap) - 18;
-              return (
-                <g className="level-guide" key={level}>
-                  <text x={x + 18} y={24}>LEVEL {level}</text>
-                  <line x1={x} x2={x} y1={34} y2={graphHeight - 24} />
-                </g>
-              );
-            })}
-            <g className="graph-edges">
-              {dag.graphEdges.map((edge) => {
-                const source = positions.get(edge.from);
-                const target = positions.get(edge.to);
-                if (!source || !target) return null;
-                const pairKey = `${edge.from}\u0000${edge.to}`;
-                const pairCount = edge.kind === 'data' ? (typedPairCounts.get(pairKey) ?? 1) : 1;
-                const pairIndex = edge.kind === 'data' ? (typedPairSeen.get(pairKey) ?? 0) : 0;
-                if (edge.kind === 'data') typedPairSeen.set(pairKey, pairIndex + 1);
-                const offset = edge.kind === 'data' ? (pairIndex - ((pairCount - 1) / 2)) * 22 : 0;
-                const x1 = source.x + nodeWidth;
-                const y1 = source.y + nodeHeight / 2;
-                const x2 = target.x;
-                const y2 = target.y + nodeHeight / 2;
-                const curve = Math.max(48, (x2 - x1) * 0.42);
-                const path = `M ${x1} ${y1} C ${x1 + curve} ${y1 + offset}, ${x2 - curve} ${y2 + offset}, ${x2} ${y2}`;
-                const labelX = (x1 + x2) / 2;
-                const labelY = (y1 + y2) / 2 + offset - 8;
-                const label = edge.label ?? '';
-                const labelWidth = Math.min(170, Math.max(72, label.length * 7.2 + 18));
-                return (
-                  <g className={`graph-edge ${edge.kind}`} key={edge.id}>
-                    <path d={path} markerEnd={`url(#arrow-${edge.kind})`} />
-                    {edge.kind === 'data' && (
-                      <g className="edge-label">
-                        <title>{label}</title>
-                        <rect x={labelX - labelWidth / 2} y={labelY - 11} width={labelWidth} height={20} rx={8} />
-                        <text x={labelX} y={labelY + 3}>{label.length > 22 ? `${label.slice(0, 20)}...` : label}</text>
-                      </g>
-                    )}
-                  </g>
-                );
-              })}
-            </g>
-            <g className="graph-nodes">
-              {scene.tasks.map((task) => {
-                const position = positions.get(task.id);
-                if (!position) return null;
-                const run = runtimeMap.get(task.id) ?? resultMap.get(task.id);
-                const state = run?.state ?? 'not-run';
-                const stateClass = state.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-                return (
-                  <foreignObject
-                    x={position.x}
-                    y={position.y}
-                    width={nodeWidth}
-                    height={nodeHeight}
-                    key={task.id}
-                  >
-                    <article className={`graph-task-node status-${stateClass} ${critical.has(task.id) ? 'critical' : ''}`}>
-                      <div className="graph-node-heading">
-                        <span>{task.id}</span>
-                        <strong>{state === 'not-run' ? 'Not run' : state}</strong>
-                      </div>
-                      <h4>{task.task_type}</h4>
-                      <div className="graph-assignment">
-                        <span>assignment</span>
-                        <strong>{run?.target_node_id || 'Unassigned'}</strong>
-                      </div>
-                      <PlacementBadges placement={task.placement_constraints} limit={4} />
-                      <div className="graph-node-footer">
-                        <span>source {task.source_robot_id}</span>
-                        <span>priority {task.priority}</span>
-                      </div>
-                    </article>
-                  </foreignObject>
-                );
-              })}
-            </g>
-          </svg>
-        </div>
-      ) : (
-        <>
-          <div className="dag-stages">
-            {[...visibleLevelGroups.entries()]
-              .sort(([left], [right]) => left - right)
-              .map(([level, tasks]) => (
-                <section className="dag-stage" key={level}>
-                  <div className="stage-label">Level {level}</div>
-                  <div className="stage-nodes">
-                    {tasks.map((task) => {
-                      const run = runtimeMap.get(task.id) ?? resultMap.get(task.id);
-                      const parents = dag.parents[task.id] ?? [];
-                      return (
-                        <article className={`dag-node ${critical.has(task.id) ? 'critical' : ''} ${run ? 'assigned' : ''}`} key={task.id}>
-                          <div><strong>{task.task_type}</strong><span>{run?.state ?? 'Not run'}</span></div>
-                          <p>{task.id}</p>
-                          <PlacementBadges placement={task.placement_constraints} limit={4} />
-                          <small>{parents.length ? `depends on ${parents.join(', ')}` : 'root'} | {run?.target_node_id || 'Unassigned'}</small>
-                        </article>
-                      );
-                    })}
-                  </div>
-                </section>
-              ))}
-          </div>
-          <Pagination
-            page={resolvedLevelPage}
-            itemCount={orderedTasks.length}
-            pageSize={TASK_PAGE_SIZE}
-            onPageChange={setLevelPage}
-            label="DAG level tasks"
-          />
-        </>
-      )}
-
-      {scene.data_edges.length > 0 && (
-        <section className="data-contracts">
-          <div className="section-heading">
-            <div>
-              <h3>DataEdge Contracts</h3>
-              <p>Ports and message_type define the data interface between producers and consumers.</p>
-            </div>
-          </div>
-          <div className="data-edge-list">
-            {visibleDataEdges.map((edge, index) => (
-              <div className="data-edge" key={`${edge.producer_task}.${edge.producer_port}-${edge.consumer_task}.${edge.consumer_port}-${index}`}>
-                <code>{edge.producer_task}.{edge.producer_port}</code>
-                <span>-&gt;</span>
-                <code>{edge.consumer_task}.{edge.consumer_port}</code>
-                <small>{edge.message_type}</small>
-              </div>
-            ))}
-          </div>
-          <Pagination
-            page={resolvedEdgePage}
-            itemCount={scene.data_edges.length}
-            pageSize={EDGE_PAGE_SIZE}
-            onPageChange={setEdgePage}
-            label="DataEdge contracts"
-          />
-        </section>
-      )}
-    </div>
+    <section className="settings-section">
+      <h2>{icon}<span>{title}</span></h2>
+      {children}
+    </section>
   );
-}
-
-function Logs({ result }: { result: SimulationResponse | null }) {
-  const [logPage, setLogPage] = useState(0);
-  if (!result) return <p className="muted">Scheduling logs appear here after a simulation run.</p>;
-  const resolvedLogPage = safePage(logPage, result.logs.length, LOG_PAGE_SIZE);
-  const visibleLogs = pageItems(result.logs, resolvedLogPage, LOG_PAGE_SIZE);
-  return (
-    <>
-      <pre className="json-view">{visibleLogs.join('\n')}</pre>
-      <Pagination
-        page={resolvedLogPage}
-        itemCount={result.logs.length}
-        pageSize={LOG_PAGE_SIZE}
-        onPageChange={setLogPage}
-        label="Scheduling logs"
-      />
-    </>
-  );
-}
-
-function RuntimeView({
-  scene,
-  run,
-}: {
-  scene: BenchmarkScene;
-  run: RuntimeWorkflowRun | null;
-}) {
-  const [taskPage, setTaskPage] = useState(0);
-  const [eventPage, setEventPage] = useState(0);
-  const result = run?.result ?? null;
-  const sceneTaskMap = new Map(scene.tasks.map((task) => [task.id, task]));
-  const runtimeTasks = result?.task_results ?? [];
-  const resolvedTaskPage = safePage(taskPage, runtimeTasks.length, TASK_PAGE_SIZE);
-  const visibleRuntimeTasks = pageItems(runtimeTasks, resolvedTaskPage, TASK_PAGE_SIZE);
-  const runtimeEvents = result?.events ?? [];
-  const resolvedEventPage = safePage(eventPage, runtimeEvents.length, EVENT_PAGE_SIZE);
-  const visibleRuntimeEvents = pageItems(runtimeEvents, resolvedEventPage, EVENT_PAGE_SIZE);
-  return (
-    <div className="runtime-view">
-      <div className="runtime-topology">
-        <div className="topology-node scheduler-node">
-          <span>Control plane</span>
-          <strong>MARS Central Scheduler</strong>
-          <small>{result?.workflow.state ?? run?.status ?? 'scene declared'}</small>
-        </div>
-        <div className="topology-arrow">-&gt;</div>
-        <div className="topology-agents">
-          {result
-            ? result.agents.map((agent) => (
-              <div className={`topology-node ${agent.kind}`} key={agent.agent_id}>
-                <span>{agent.kind === 'robot' ? 'Robot Agent' : 'Edge Agent'}</span>
-                <strong>{agent.agent_id}</strong>
-                <small>{agent.registered && agent.online ? 'registered | online' : 'offline'} | heartbeat {agent.heartbeat_sequence}</small>
-              </div>
-            ))
-            : scene.nodes
-              .filter((node) => node.kind === 'robot' || node.kind === 'edge')
-              .map((node) => (
-                <div className={`topology-node ${node.kind}`} key={node.id}>
-                  <span>{node.kind === 'robot' ? 'Robot Agent' : 'Edge Agent'}</span>
-                  <strong>{node.id}</strong>
-                  <small>{node.architecture} | scene declared | max concurrency {node.max_concurrency}</small>
-                </div>
-              ))}
-        </div>
-      </div>
-
-      {!run && <p className="runtime-hint">Submit a workflow to inspect assignments, data transfers, execution attempts, Artifacts, and runtime results.</p>}
-      {run && !result && <p className="runtime-hint" role="status" aria-live="polite">{run.workflow_id} | {run.status}</p>}
-
-      {result && (
-        <>
-          <h3>Runtime Result | {result.workflow.state}</h3>
-          <div className="metrics-grid runtime-metrics">
-            {Object.entries(result.metrics).map(([key, value]) => (
-              <div className="metric" key={key}>
-                <span>{runtimeMetricLabel(key)}</span>
-                <strong>{runtimeMetricValue(key, value)}</strong>
-              </div>
-            ))}
-          </div>
-
-          <h3>Agent execution</h3>
-          <div className="agent-runtime-grid">
-            {result.agents.map((agent) => (
-              <div className="agent-runtime-card" key={agent.agent_id}>
-                <div><strong>{agent.agent_id}</strong><span className={agent.online ? 'ok' : 'bad'}>{agent.online ? 'online' : 'offline'}</span></div>
-                <p>{agent.architecture} | max concurrency {agent.max_concurrency}</p>
-                <small>completed {agent.completed_attempts} | failed attempts {agent.failed_attempts} | utilization {pct(agent.utilization)}</small>
-              </div>
-            ))}
-          </div>
-
-          <h3>Assignments and attempts</h3>
-          <div className="table-wrap runtime-table">
-            <table>
-              <thead>
-                <tr><th>Task Type</th><th>Placement Constraints</th><th>Final Placement</th><th>Attempts</th><th>Outputs</th><th>State</th></tr>
-              </thead>
-              <tbody>
-                {visibleRuntimeTasks.map((task) => {
-                  const taskSpec = sceneTaskMap.get(task.task_id);
-                  return (
-                    <tr key={task.task_id}>
-                      <td>
-                        <strong>{task.task_type}</strong>
-                        <span>{task.task_id}</span>
-                      </td>
-                      <td><PlacementBadges placement={taskSpec?.placement_constraints} /></td>
-                      <td>{task.target_node_id || '-'}<span>{task.mode || 'not assigned'}</span></td>
-                      <td>
-                        {task.attempts.length === 0 ? '-' : task.attempts.map((attempt) => (
-                          <span className={`attempt-line ${attempt.state}`} key={attempt.attempt_id}>
-                            #{attempt.attempt_no} {attempt.target_node_id} | {attempt.state}
-                            {attempt.error_code ? ` | ${attempt.error_code}` : ''}
-                          </span>
-                        ))}
-                      </td>
-                      <td>{task.outputs.map((output) => `${output.producer_port} (${output.size_mb.toFixed(3)} MB)`).join(', ') || '-'}</td>
-                      <td><span className={task.state === 'succeeded' ? 'ok' : 'bad'}>{task.state}</span></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <Pagination
-            page={resolvedTaskPage}
-            itemCount={runtimeTasks.length}
-            pageSize={TASK_PAGE_SIZE}
-            onPageChange={setTaskPage}
-            label="Runtime assignments"
-          />
-
-          <h3>Control-plane events</h3>
-          <div className="event-list">
-            {visibleRuntimeEvents.map((event) => (
-              <div className={`runtime-event ${event.event_type}`} key={event.sequence}>
-                <code>#{event.sequence} | {event.time_ms.toFixed(1)} ms</code>
-                <strong>{event.event_type}</strong>
-                <span>{event.message}</span>
-              </div>
-            ))}
-          </div>
-          <Pagination
-            page={resolvedEventPage}
-            itemCount={runtimeEvents.length}
-            pageSize={EVENT_PAGE_SIZE}
-            onPageChange={setEventPage}
-            label="Control-plane events"
-          />
-        </>
-      )}
-    </div>
-  );
-}
-
-function runtimeMetricLabel(key: string) {
-  const labels: Record<string, string> = {
-    task_count: 'Tasks',
-    succeeded_task_count: 'Succeeded',
-    failed_task_count: 'Failed',
-    success_rate: 'Success',
-    attempt_count: 'Attempts',
-    retry_count: 'Retries',
-    retry_success_count: 'Recovered',
-    transferred_mb: 'Transferred',
-    transfer_time_ms: 'Transfer time',
-    total_energy_j: 'Energy',
-    makespan_ms: 'Makespan',
-    edge_offload_ratio: 'Edge offload',
-    safety_violation_count: 'Safety violations',
-    critical_path_ms: 'Critical path',
-  };
-  return labels[key] ?? key;
-}
-
-function runtimeMetricValue(key: string, value: number) {
-  if (key.includes('rate') || key.includes('ratio')) return pct(value);
-  if (key.endsWith('_ms')) return `${value.toFixed(1)} ms`;
-  if (key.endsWith('_mb')) return `${value.toFixed(3)} MB`;
-  if (key.endsWith('_j')) return `${value.toFixed(2)} J`;
-  return `${value}`;
 }
