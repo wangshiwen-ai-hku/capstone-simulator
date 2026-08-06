@@ -81,6 +81,7 @@ class NodeSnapshot:
     power_w: float = 0.0
     network_latency_ms: float = 0.0
     online: bool = True
+    remaining_energy_j: float | None = None
 
     def __post_init__(self) -> None:
         if not self.node_id.strip():
@@ -106,6 +107,13 @@ class NodeSnapshot:
             raise ValueError("node utilization values must be in [0, 1]")
         if self.power_w < 0 or self.network_latency_ms < 0:
             raise ValueError("node power and network latency must be non-negative")
+        if self.remaining_energy_j is not None and (
+            not math.isfinite(self.remaining_energy_j)
+            or self.remaining_energy_j < 0
+        ):
+            raise ValueError(
+                "remaining_energy_j must be non-negative when provided"
+            )
 
 
 @dataclass(frozen=True)

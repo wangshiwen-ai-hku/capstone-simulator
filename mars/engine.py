@@ -94,6 +94,7 @@ def run_workflow_simulation(
     link_specs: list[LinkSpec] | None = None,
     link_snapshots: list[LinkSnapshot] | None = None,
     optimizer_registry: OptimizerRegistry | None = None,
+    fallback_optimizer: str | None = "heuristic",
 ) -> SimulationReport:
     """Execute a simulation through the coordinator and RuntimePort."""
 
@@ -120,6 +121,7 @@ def run_workflow_simulation(
         link_snapshots=resolved_link_snapshots,
         optimizer_registry=optimizer_registry,
         profile_catalog=profiles,
+        fallback_optimizer=fallback_optimizer,
     )
     report = coordinator.run(
         workflow,
@@ -474,6 +476,17 @@ def _simulation_metrics(
             2,
         ),
         "total_energy_j": round(sum(energies), 2),
+        "total_solver_time_ms": round(
+            _number(report.metrics.get("total_solver_time_ms")),
+            6,
+        ),
+        "max_solver_time_ms": round(
+            _number(report.metrics.get("max_solver_time_ms")),
+            6,
+        ),
+        "scheduling_epoch_count": int(
+            _number(report.metrics.get("scheduling_epoch_count"))
+        ),
         "bandwidth_mb": round(
             _number(report.metrics.get("transferred_mb")),
             2,

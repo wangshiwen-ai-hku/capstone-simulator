@@ -379,10 +379,13 @@ class _SimulatedAgent:
         finished_time_ms: float,
         *,
         ok: bool,
+        retain_until_finish: bool = False,
     ) -> bool:
-        reservation = self._reservations.pop(reservation_id, None)
+        reservation = self._reservations.get(reservation_id)
         if reservation is None:
             return False
+        if not retain_until_finish:
+            self._reservations.pop(reservation_id, None)
         self._busy_ms += max(0.0, finished_time_ms - reservation.scheduled_start_ms)
         if ok:
             self._completed_attempts += 1
@@ -390,7 +393,24 @@ class _SimulatedAgent:
             self._failed_attempts += 1
         return True
 
+    def _discard_expired_reservations(self, now_ms: float) -> None:
+        expired_ids = tuple(
+            reservation_id
+            for reservation_id, reservation in self._reservations.items()
+            if reservation.scheduled_finish_ms <= now_ms + 1e-9
+        )
+        for reservation_id in expired_ids:
+            self._reservations.pop(reservation_id, None)
+
+    def _discard_attempt_reservation(self, attempt_id: str) -> None:
+        for reservation_id, reservation in tuple(
+            self._reservations.items()
+        ):
+            if reservation.attempt_id == attempt_id:
+                self._reservations.pop(reservation_id, None)
+
     def describe(self, makespan_ms: float) -> dict[str, object]:
+        self._discard_expired_reservations(makespan_ms)
         active = self._active_reservations(makespan_ms)
         available_cpu, available_gpu, available_memory = (
             self._available_resources(makespan_ms)
@@ -694,6 +714,7 @@ class InProcessRuntime:
         heartbeats: list[AgentHeartbeat] = []
         for node_id in self._node_order:
             agent = self._agents[node_id]
+            agent._discard_expired_reservations(now_ms)
             if not agent.registered:
                 agent.register(now_ms)
             heartbeats.append(agent.heartbeat(now_ms))
@@ -819,6 +840,7 @@ class InProcessRuntime:
             reservation.reservation_id,
             completion.finished_time_ms,
             ok=completion.ok,
+            retain_until_finish=True,
         ):
             raise RuntimeError(
                 f"reservation already released: {reservation.reservation_id}"
@@ -837,6 +859,8 @@ class InProcessRuntime:
     ) -> bool:
         dispatch_id = self._dispatch_by_attempt.pop(attempt_id, None)
         if dispatch_id is None:
+            for agent in self._agents.values():
+                agent._discard_attempt_reservation(attempt_id)
             return False
         pending = self._pending.pop(dispatch_id, None)
         if pending is None:

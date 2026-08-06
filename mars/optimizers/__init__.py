@@ -14,6 +14,7 @@ from .base import (
     SolveStatus,
     validate_plan,
 )
+from .binary_offload import BinaryOffloadOptimizer
 from .evaluation import (
     candidate_objective_key,
     evaluate_constraints,
@@ -38,6 +39,7 @@ from .policy import (
 )
 
 __all__ = [
+    "BinaryOffloadOptimizer",
     "CandidateEstimate",
     "ConstraintEvaluation",
     "ConstraintRelation",

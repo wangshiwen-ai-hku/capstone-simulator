@@ -76,6 +76,7 @@ class CandidateEstimate:
     input_locations: tuple[str, ...]
     transfers: tuple[TransferEstimate, ...] = ()
     reason: str = ""
+    success_probability: float = 1.0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -114,6 +115,13 @@ class CandidateEstimate:
         ) > 1e-6:
             raise ValueError(
                 "candidate communication estimate must equal its transfers"
+            )
+        if (
+            not math.isfinite(self.success_probability)
+            or not 0.0 <= self.success_probability <= 1.0
+        ):
+            raise ValueError(
+                "candidate success_probability must be in [0, 1]"
             )
 
     @property

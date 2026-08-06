@@ -29,6 +29,7 @@ class ExecutionProfile:
     peak_memory_mb: float
     energy_j: float
     output_size_mb: float
+    failure_rate: float = 0.0
     supported: bool = True
     provenance: str = "synthetic_placeholder"
 
@@ -63,6 +64,7 @@ class ProfileCatalog:
                     peak_memory_mb=item["peak_memory_mb"],
                     energy_j=item["energy_j"],
                     output_size_mb=item["output_size_mb"],
+                    failure_rate=item.get("failure_rate", 0.0),
                     supported=item.get("supported", True),
                     provenance=item.get("provenance", raw.get("provenance", "unknown")),
                 )

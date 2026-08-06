@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Coordinator Edge 排队预约 Bug Debug 报告</title>
+  <style>
+    body { max-width: 1050px; margin: 36px auto; padding: 0 24px 48px; color: #202124; font: 16px/1.75 system-ui, "Microsoft YaHei", sans-serif; }
+    h1, h2, h3 { line-height: 1.35; color: #17324d; }
+    h1 { border-bottom: 3px solid #3b82f6; padding-bottom: 12px; }
+    h2 { margin-top: 34px; border-left: 5px solid #3b82f6; padding-left: 12px; }
+    code { font-family: Consolas, monospace; }
+    pre { overflow-x: auto; padding: 16px; border-radius: 8px; background: #f4f6f8; border: 1px solid #d8dee4; line-height: 1.5; }
+    .summary { padding: 16px 20px; background: #eef6ff; border: 1px solid #9ec5fe; border-radius: 8px; }
+    .bad { background: #fff1f0; border-color: #ffb3ad; }
+    .good { background: #effaf3; border-color: #91d5a8; }
+    table { width: 100%; border-collapse: collapse; margin: 14px 0; }
+    th, td { border: 1px solid #cfd7df; padding: 9px 12px; text-align: left; vertical-align: top; }
+    th { background: #edf2f7; }
+    .result { font-weight: 700; color: #176b35; }
+  </style>
+</head>
+<body>
+  <h1>Coordinator Edge 排队预约 Bug Debug 报告</h1>
+  <p><strong>范围：</strong>Edge 上已有多个排队任务时，任务因准确率不足失败并触发新一轮调度，随后出现错误的并发超限。</p>
+  <p><strong>涉及平台文件：</strong><code>mars/coordinator.py</code></p>
+  <p><strong>回归测试文件：</strong><code>tests/test_runtime_regressions.py</code></p>
+
+  <div class="summary">
+    <strong>一句话结论：</strong>原 Coordinator 把每个未完成任务的预约结束时间都延长到约 10<sup>12</sup> ms，破坏了任务原本依次排队的关系；修复后保留原预约时间，校验器不再把排队任务误判为同时运行。
+  </div>
+
+  <h2>1. Bug 成因</h2>
+  <h3>1.1 正常情况下的预约</h3>
+  <p>Edge 的并发上限是 2。多于两个任务到达时，调度器会为它们安排不同的开始、结束时间。前两个任务可以同时执行，后面的任务在前面任务完成后依次开始。这些时间段就是资源预约。</p>
+
+  <h3>1.2 原来的代码</h3>
+  <p>原版 <code>mars/coordinator.py</code> 在每轮调度前生成 <code>carry_in</code>，将上一轮仍未完成的预约交给下一轮调度：</p>
+  <pre><code>_PENDING_COMPLETION_HORIZON_MS = 1_000_000_000_000.0
+
+pending_attempt_ids = {
+    active.attempt_id
+    for active in active_by_dispatch.values()
+    if not active.completion_future.done()
+}
+carry_in = tuple(
+    replace(
+        reservation,
+        finish_ms=max(
+            reservation.finish_ms,
+            current_time_ms
+            + _PENDING_COMPLETION_HORIZON_MS,
+        ),
+    )
+    if attempt_id in pending_attempt_ids
+    else reservation
+    for attempt_id, reservation
+    in active_resource_reservations.items()
+    if (
+        attempt_id in pending_attempt_ids
+        or reservation.finish_ms
+        &gt; current_time_ms + 1e-9
+    )
+)</code></pre>
+  <p>这段代码的问题在于：<code>completion_future.done() == False</code> 不只表示“现在正在运行”，也可能表示“已经安排到 Edge、但仍在等待完成通知”。因此，排队任务也被当作需要无限期保护的任务。</p>
+
+  <h3>1.3 为什么会误报并发超限</h3>
+  <p>假设几个预约本来是前后排列的：</p>
+  <pre><code>B：0 ～ 20 ms
+C：0 ～ 20 ms
+D：20 ～ 40 ms
+E：20 ～ 40 ms</code></pre>
+  <p>失败触发重新调度后，原代码把这些尚未完成任务的结束时间全部改成约 10<sup>12</sup> ms：</p>
+  <pre><code>B：0  ～ 1,000,000,000,000 ms
+C：0  ～ 1,000,000,000,000 ms
+D：20 ～ 1,000,000,000,000 ms
+E：20 ～ 1,000,000,000,000 ms</code></pre>
+  <p>到 20 ms 左右，校验器看到 B、C、D、E 的时间段相互重叠，于是认为四个任务同时占用并发上限为 2 的 Edge，最终抛出 <code>PlanValidationError</code>。实际错误不是 Edge 真正同时运行了四个任务，而是预约时间被错误延长了。</p>
+
+  <h2>2. Bug 复现过程</h2>
+  <p>回归测试建立了以下确定性场景：</p>
+  <table>
+    <tr><th>项目</th><th>设置</th></tr>
+    <tr><td>设备</td><td>1 台 Edge</td></tr>
+    <tr><td>Edge 并发上限</td><td>2</td></tr>
+    <tr><td>失败任务</td><td><code>a-failing</code>，短任务，启用准确率判断</td></tr>
+    <tr><td>排队任务</td><td><code>b-queued</code>、<code>c-queued</code>、<code>d-queued</code>、<code>e-queued</code></td></tr>
+    <tr><td>执行噪声</td><td>0，避免随机耗时干扰</td></tr>
+    <tr><td>随机种子</td><td>0</td></tr>
+    <tr><td>最大尝试次数</td><td>2；第一次失败后会触发重试调度</td></tr>
+  </table>
+  <p>为了稳定复现“失败任务先返回、其他任务完成通知仍在等待”的时序，测试专用 Runtime 只延迟四个排队任务的完成通知 0.01 秒。该类只存在于测试文件，没有修改或替代平台 Runtime。</p>
+
+  <h3>2.1 修复前的实际结果</h3>
+  <div class="summary bad">
+    <ol>
+      <li><code>a-failing</code> 在约 <strong>0.943396 ms</strong> 完成并因准确率不足失败。</li>
+      <li>失败触发 <code>wf:retry-epoch:2</code> 新一轮调度。</li>
+      <li>四个排队预约的结束时间被延长到约 <strong>1,000,000,000,000.9434 ms</strong>。</li>
+      <li>校验器在 <strong>18.8679245283 ms</strong> 发现重叠预约数量超过 Edge 的 <code>max_concurrency=2</code>。</li>
+      <li>测试以 <code>node edge exceeds max_concurrency</code> 失败，Bug 被成功复现。</li>
+    </ol>
+  </div>
+
+  <h2>3. 修改文件 Diff</h2>
+  <p>平台代码只修改了 <code>mars/coordinator.py</code> 的 <code>carry_in</code> 生成逻辑，并删除了不再使用的极远时间常量；没有修改 Runtime、Scheduler 或 Optimizer，也没有新增平台字段、接口或抽象层。</p>
+
+  <h3>3.1 修改前</h3>
+  <pre><code>pending_attempt_ids = {
+    active.attempt_id
+    for active in active_by_dispatch.values()
+    if not active.completion_future.done()
+}
+carry_in = tuple(
+    replace(
+        reservation,
+        finish_ms=max(
+            reservation.finish_ms,
+            current_time_ms
+            + _PENDING_COMPLETION_HORIZON_MS,
+        ),
+    )
+    if attempt_id in pending_attempt_ids
+    else reservation
+    for attempt_id, reservation
+    in active_resource_reservations.items()
+    if (
+        attempt_id in pending_attempt_ids
+        or reservation.finish_ms
+        &gt; current_time_ms + 1e-9
+    )
+)</code></pre>
+
+  <h3>3.2 修改后</h3>
+  <pre><code>active_attempt_ids = {
+    active.attempt_id
+    for active in active_by_dispatch.values()
+}
+carry_in = tuple(
+    reservation
+    for attempt_id, reservation
+    in active_resource_reservations.items()
+    if attempt_id in active_attempt_ids
+)</code></pre>
+
+  <h3>3.3 修改含义</h3>
+  <table>
+    <tr><th>修改前</th><th>修改后</th></tr>
+    <tr><td>复制预约并强行修改 <code>finish_ms</code></td><td>直接沿用原预约</td></tr>
+    <tr><td>多个排队任务可能被误认为长期同时运行</td><td>保留原来的前后排队关系</td></tr>
+    <tr><td>准确率失败触发重调度时可能并发超限</td><td>新调度依据真实的已有预约寻找空闲时间</td></tr>
+  </table>
+
+  <h2>4. 回归测试文件说明</h2>
+  <h3>4.1 测试辅助类</h3>
+  <p><code>tests/test_runtime_regressions.py</code> 中增加了 <code>_DelayedQueuedCompletionRuntime</code>。它继承现有 <code>InProcessRuntime</code>，唯一作用是延迟指定排队任务的完成通知，从而稳定制造真实系统可能出现的异步返回顺序。它不是平台接口，也不会进入生产调度逻辑。</p>
+
+  <h3>4.2 回归测试</h3>
+  <p>新增测试函数：</p>
+  <pre><code>test_accuracy_failure_replanning_preserves_edge_queue()</code></pre>
+  <p>测试检查三件事：</p>
+  <ol>
+    <li>准确率失败任务确实进行了两次尝试，证明失败触发了重新调度。</li>
+    <li>四个排队任务最终全部成功。</li>
+    <li>整个过程没有抛出 Edge 并发超限异常。</li>
+  </ol>
+
+  <h3>4.3 验收结果</h3>
+  <div class="summary good">
+    <p><strong>修复前：</strong>新增回归测试失败，成功复现 <code>node edge exceeds max_concurrency</code>。</p>
+    <p><strong>修复后：</strong>同一个回归测试 <span class="result">1 passed</span>。</p>
+    <p><strong>相关测试集：</strong><code>test_coordinator.py</code>、<code>test_coordinator_planning.py</code>、<code>test_runtime_regressions.py</code> 合计 <span class="result">25 passed</span>。</p>
+  </div>
+
+  <h2>5. 最终结论</h2>
+  <p>本次修复没有关闭准确率失败判断，也没有绕过并发校验。它只纠正了 Coordinator 传递旧预约的方式：未完成任务继续保留原调度时间，不再被统一延长到极远时间。因此任务仍按原顺序排队，准确率失败仍能触发重试，而校验器不会再根据错误的重叠时间误报并发超限。</p>
+</body>
+</html>

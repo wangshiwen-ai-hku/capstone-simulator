@@ -31,6 +31,7 @@ from .domain.transfer import TransferReservation
 from .domain.workflow import FailurePolicy, WorkflowSpec
 from .network import synthesize_legacy_full_mesh
 from .optimizers import (
+    Optimizer,
     OptimizerRegistry,
     PlannedResourceReservation,
     SchedulingEpoch,
@@ -52,9 +53,6 @@ from .synthetic_workloads import (
     UnsupportedTargetError,
     load_default_synthetic_workloads,
 )
-
-_PENDING_COMPLETION_HORIZON_MS = 1_000_000_000_000.0
-
 
 @dataclass(frozen=True)
 class RuntimeEvent:
@@ -137,6 +135,7 @@ class CentralCoordinator:
         link_specs: Iterable[LinkSpec] | None = None,
         link_snapshots: Iterable[LinkSnapshot] | None = None,
         optimizer_registry: OptimizerRegistry | None = None,
+        fallback_optimizer: str | Optimizer | None = "heuristic",
     ) -> None:
         if not isinstance(runtime, RuntimePort):
             raise TypeError("runtime must implement RuntimePort")
@@ -160,6 +159,7 @@ class CentralCoordinator:
             None if link_snapshots is None else tuple(link_snapshots)
         )
         self.optimizer_registry = optimizer_registry
+        self.fallback_optimizer = fallback_optimizer
         self._events: list[RuntimeEvent] = []
         self._sequence = 0
         self._started = False
@@ -321,6 +321,8 @@ class CentralCoordinator:
         transfer_time_ms = 0.0
         total_energy_j = 0.0
         retry_successes = 0
+        total_solver_time_ms = 0.0
+        max_solver_time_ms = 0.0
 
         self._emit(
             current_time_ms,
@@ -357,6 +359,7 @@ class CentralCoordinator:
             dict[str, float],
         ]:
             nonlocal epoch_sequence, inventory, node_specs
+            nonlocal total_solver_time_ms, max_solver_time_ms
             inventory = await self.runtime.inventory(current_time_ms)
             node_specs = {
                 node.node_id: node for node in inventory.nodes
@@ -384,29 +387,15 @@ class CentralCoordinator:
                 )
                 for task in tasks
             }
-            pending_attempt_ids = {
+            active_attempt_ids = {
                 active.attempt_id
                 for active in active_by_dispatch.values()
-                if not active.completion_future.done()
             }
             carry_in = tuple(
-                replace(
-                    reservation,
-                    finish_ms=max(
-                        reservation.finish_ms,
-                        current_time_ms
-                        + _PENDING_COMPLETION_HORIZON_MS,
-                    ),
-                )
-                if attempt_id in pending_attempt_ids
-                else reservation
+                reservation
                 for attempt_id, reservation
                 in active_resource_reservations.items()
-                if (
-                    attempt_id in pending_attempt_ids
-                    or reservation.finish_ms
-                    > current_time_ms + 1e-9
-                )
+                if attempt_id in active_attempt_ids
             )
             plan = plan_scheduling_epoch(
                 epoch,
@@ -430,6 +419,12 @@ class CentralCoordinator:
                 profiles=profiles,
                 excluded_node_ids=excluded_node_ids,
                 registry=self.optimizer_registry,
+                fallback_optimizer=self.fallback_optimizer,
+            )
+            total_solver_time_ms += plan.solve_elapsed_ms
+            max_solver_time_ms = max(
+                max_solver_time_ms,
+                plan.solve_elapsed_ms,
             )
             if not plan.assignments:
                 raise RuntimeError(
@@ -1185,6 +1180,12 @@ class CentralCoordinator:
             "transferred_mb": round(transferred_mb, 6),
             "transfer_time_ms": round(transfer_time_ms, 4),
             "total_energy_j": round(total_energy_j, 6),
+            "total_solver_time_ms": round(
+                total_solver_time_ms,
+                6,
+            ),
+            "max_solver_time_ms": round(max_solver_time_ms, 6),
+            "scheduling_epoch_count": epoch_sequence,
             "makespan_ms": round(makespan_ms, 4),
             "edge_offload_ratio": round(
                 offloaded / max(1, len(task_results)),
@@ -1367,6 +1368,7 @@ def _profile_catalog(
                     peak_memory_mb=profile.resources.memory_mb,
                     energy_j=profile.energy_j.typical,
                     output_size_mb=profile.output_size_mb.typical,
+                    failure_rate=profile.failure_rate,
                     supported=profile.supported,
                     provenance="synthetic_workload_catalog",
                 )

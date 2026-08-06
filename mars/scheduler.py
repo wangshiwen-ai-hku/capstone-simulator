@@ -239,6 +239,11 @@ def estimate_candidate(
         communication_ms=communication_ms,
         energy_j=energy_j,
         resource_demand=_resource_demand(task, node),
+        success_probability=(
+            1.0 - profile.failure_rate
+            if profile is not None
+            else 1.0
+        ),
         input_locations=tuple(locations),
         transfers=tuple(transfers),
     )
