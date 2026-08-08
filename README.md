@@ -158,6 +158,30 @@ pip install -r backend/requirements.txt
 python -m uvicorn backend.app.main:app --reload --port 8000
 ```
 
+### Optional LLM scene generation
+
+LLM integration generates a candidate scene and typed DAG; it does not replace
+the scheduler or optimizer. To use DeepSeek locally, copy the ignored
+environment file and add a private API key:
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+```dotenv
+MODEL_PROVIDER=deepseek
+DEEPSEEK_API_KEY=<private-api-key>
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-flash
+LLM_TIMEOUT_SECONDS=120
+```
+
+Restart the backend and confirm that `GET /api/health` reports
+`"provider": "deepseek"` and `"llm_configured": true`. Enable **Use LLM** in
+the Web interface when generating a scene. Provider credentials remain in the
+backend; they are not returned by the API or sent to the browser. Invalid model
+output falls back to the deterministic scene generator.
+
 ### Frontend
 
 ```bash

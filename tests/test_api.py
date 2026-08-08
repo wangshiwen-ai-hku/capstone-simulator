@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from backend.app import main as api_main
+from backend.app.config import Settings
 from backend.app.llm_client import generate_scene_with_llm
 from backend.app.mars_adapter import validate_scene
 from backend.app.scene_generator import (
@@ -53,6 +54,43 @@ class ApiTests(unittest.TestCase):
                 "configured": True,
             },
         )
+
+    def test_deepseek_provider_status_never_exposes_credentials(self):
+        secret = "sentinel-deepseek-secret-that-must-not-leak"
+        private_base_url = "https://private-gateway.example.invalid/v1"
+        with (
+            patch.object(api_main.settings, "model_provider", "deepseek"),
+            patch.object(api_main.settings, "deepseek_api_key", secret),
+            patch.object(
+                api_main.settings,
+                "deepseek_base_url",
+                private_base_url,
+            ),
+            patch.object(
+                api_main.settings,
+                "deepseek_model",
+                "deepseek-v4-flash",
+            ),
+        ):
+            providers = self.client.get("/api/providers")
+            health = self.client.get("/api/health")
+
+        self.assertEqual(providers.status_code, 200)
+        self.assertEqual(health.status_code, 200)
+        self.assertIn("deepseek", providers.json()["available"])
+        self.assertEqual(
+            providers.json()["current"],
+            {
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "configured": True,
+            },
+        )
+        self.assertEqual(health.json()["provider"], "deepseek")
+        self.assertEqual(health.json()["model"], "deepseek-v4-flash")
+        self.assertTrue(health.json()["llm_configured"])
+        self.assertNotIn(secret, providers.text + health.text)
+        self.assertNotIn(private_base_url, providers.text + health.text)
 
     def test_generate_validate_and_simulate_flow(self):
         health = self.client.get("/api/health")
@@ -336,6 +374,60 @@ class ApiTests(unittest.TestCase):
 
 
 class LlmFallbackTests(unittest.TestCase):
+    def test_deepseek_uses_openai_compatible_client(self):
+        request = GenerateSceneRequest(
+            robot_count=1,
+            edge_count=1,
+            seed=11,
+            use_llm=True,
+        )
+        payload = build_deterministic_scene(request).model_dump_json()
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=payload)
+                )
+            ]
+        )
+        client = MagicMock()
+        client.chat.completions.create.return_value = response
+        settings = SimpleNamespace(
+            llm_timeout_seconds=12,
+            llm_temperature=0.2,
+            current_llm=lambda: {
+                "provider": "deepseek",
+                "api_key": "test-deepseek-key",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-v4-flash",
+            },
+        )
+
+        with patch(
+            "backend.app.llm_client.OpenAI",
+            return_value=client,
+        ) as openai_client:
+            scene = generate_scene_with_llm(settings, request)
+
+        openai_client.assert_called_once_with(
+            api_key="test-deepseek-key",
+            base_url="https://api.deepseek.com",
+            timeout=12,
+        )
+        call = client.chat.completions.create.call_args
+        self.assertEqual(call.kwargs["model"], "deepseek-v4-flash")
+        self.assertEqual(call.kwargs["temperature"], 0.2)
+        self.assertEqual(
+            call.kwargs["response_format"],
+            {"type": "json_object"},
+        )
+        self.assertEqual(
+            [message["role"] for message in call.kwargs["messages"]],
+            ["system", "user"],
+        )
+        validate_scene(scene)
+        self.assertEqual(scene.generation_source, "llm")
+        self.assertEqual(scene.generation_note, "")
+
     def test_invalid_llm_dag_falls_back_to_valid_deterministic_scene(self):
         request = GenerateSceneRequest(robot_count=1, edge_count=1, seed=13, use_llm=True)
         invalid = build_deterministic_scene(request)
@@ -371,6 +463,112 @@ class LlmFallbackTests(unittest.TestCase):
             scene.generation_source,
             "deterministic_fallback",
         )
+
+    def test_llm_null_empty_pin_is_normalized(self):
+        request = GenerateSceneRequest(
+            robot_count=1,
+            edge_count=1,
+            seed=23,
+            use_llm=True,
+        )
+        payload = build_deterministic_scene(request).model_dump(
+            mode="json"
+        )
+        for task in payload["tasks"]:
+            task["placement_constraints"]["pinned_node_id"] = None
+
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(payload)
+                    )
+                )
+            ]
+        )
+        client = MagicMock()
+        client.chat.completions.create.return_value = response
+        settings = SimpleNamespace(
+            llm_timeout_seconds=120,
+            llm_temperature=0.0,
+            current_llm=lambda: {
+                "provider": "deepseek",
+                "api_key": "test-key",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-v4-flash",
+            },
+        )
+
+        with patch(
+            "backend.app.llm_client.OpenAI",
+            return_value=client,
+        ):
+            scene = generate_scene_with_llm(settings, request)
+
+        self.assertEqual(scene.generation_source, "llm")
+        self.assertTrue(
+            all(
+                task.placement_constraints.pinned_node_id == ""
+                for task in scene.tasks
+            )
+        )
+
+    def test_llm_scene_with_unsupported_cloud_node_uses_fallback(self):
+        request = GenerateSceneRequest(
+            robot_count=1,
+            edge_count=1,
+            seed=29,
+            use_llm=True,
+        )
+        payload = build_deterministic_scene(request).model_dump(
+            mode="json"
+        )
+        cloud = dict(payload["nodes"][-1])
+        cloud.update(
+            {
+                "id": "cloud_1",
+                "kind": "cloud",
+                "display_name": "Cloud 1",
+            }
+        )
+        snapshot = dict(payload["initial_resources"][-1])
+        snapshot["node_id"] = "cloud_1"
+        payload["nodes"].append(cloud)
+        payload["initial_resources"].append(snapshot)
+
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(payload)
+                    )
+                )
+            ]
+        )
+        client = MagicMock()
+        client.chat.completions.create.return_value = response
+        settings = SimpleNamespace(
+            llm_timeout_seconds=120,
+            llm_temperature=0.0,
+            current_llm=lambda: {
+                "provider": "deepseek",
+                "api_key": "test-key",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-v4-flash",
+            },
+        )
+
+        with patch(
+            "backend.app.llm_client.OpenAI",
+            return_value=client,
+        ):
+            scene = generate_scene_with_llm(settings, request)
+
+        self.assertEqual(
+            scene.generation_source,
+            "deterministic_fallback",
+        )
+        self.assertFalse(any(node.kind == "cloud" for node in scene.nodes))
 
     def test_llm_scene_without_explicit_placement_uses_fallback(self):
         request = GenerateSceneRequest(
@@ -422,6 +620,35 @@ class LlmFallbackTests(unittest.TestCase):
                 task.placement_constraints is not None
                 for task in scene.tasks
             )
+        )
+
+
+class SettingsTests(unittest.TestCase):
+    def test_deepseek_provider_selection(self):
+        settings = Settings(
+            _env_file=None,
+            MODEL_PROVIDER=" DeepSeek ",
+            DEEPSEEK_API_KEY="test-deepseek-key",
+            DEEPSEEK_BASE_URL="https://api.deepseek.com",
+            DEEPSEEK_MODEL="deepseek-v4-flash",
+        )
+
+        self.assertEqual(
+            settings.current_llm(),
+            {
+                "provider": "deepseek",
+                "api_key": "test-deepseek-key",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-v4-flash",
+            },
+        )
+        self.assertEqual(
+            settings.public_llm(),
+            {
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "configured": True,
+            },
         )
 
 

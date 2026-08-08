@@ -30,26 +30,32 @@ export function canonicalDag(scene: DagSource): CanonicalDag {
   const indegree = new Map(scene.tasks.map((task) => [task.id, 0]));
   const dependencyEdges: GraphEdge[] = [];
   const seenRelations = new Set<string>();
+  let referencesValid = true;
 
   const addRelation = (from: string, to: string) => {
-    if (!taskIds.has(from) || !taskIds.has(to)) return;
+    if (!taskIds.has(from) || !taskIds.has(to)) {
+      referencesValid = false;
+      return false;
+    }
     const relation = `${from}\u0000${to}`;
-    if (seenRelations.has(relation)) return;
+    if (seenRelations.has(relation)) return true;
     seenRelations.add(relation);
     adjacency.get(from)?.add(to);
     parentSets.get(to)?.add(from);
     indegree.set(to, (indegree.get(to) ?? 0) + 1);
+    return true;
   };
 
   scene.tasks.forEach((task) => {
     task.dependencies.forEach((dependency) => {
-      dependencyEdges.push({
-        id: `dependency:${dependency}:${task.id}`,
-        from: dependency,
-        to: task.id,
-        kind: 'dependency',
-      });
-      addRelation(dependency, task.id);
+      if (addRelation(dependency, task.id)) {
+        dependencyEdges.push({
+          id: `dependency:${dependency}:${task.id}`,
+          from: dependency,
+          to: task.id,
+          kind: 'dependency',
+        });
+      }
     });
   });
   scene.data_edges.forEach((edge) => addRelation(edge.producer_task, edge.consumer_task));
@@ -74,17 +80,21 @@ export function canonicalDag(scene: DagSource): CanonicalDag {
   }
 
   const typedRelations = new Set(
-    scene.data_edges.map((edge) => `${edge.producer_task}\u0000${edge.consumer_task}`),
+    scene.data_edges
+      .filter((edge) => taskIds.has(edge.producer_task) && taskIds.has(edge.consumer_task))
+      .map((edge) => `${edge.producer_task}\u0000${edge.consumer_task}`),
   );
   const graphEdges: GraphEdge[] = [
     ...dependencyEdges.filter((edge) => !typedRelations.has(`${edge.from}\u0000${edge.to}`)),
-    ...scene.data_edges.map((edge, index) => ({
-      id: `data:${edge.producer_task}:${edge.producer_port}:${edge.consumer_task}:${edge.consumer_port}:${index}`,
-      from: edge.producer_task,
-      to: edge.consumer_task,
-      kind: 'data' as const,
-      label: edge.message_type,
-    })),
+    ...scene.data_edges
+      .filter((edge) => taskIds.has(edge.producer_task) && taskIds.has(edge.consumer_task))
+      .map((edge, index) => ({
+        id: `data:${edge.producer_task}:${edge.producer_port}:${edge.consumer_task}:${edge.consumer_port}:${index}`,
+        from: edge.producer_task,
+        to: edge.consumer_task,
+        kind: 'data' as const,
+        label: edge.message_type,
+      })),
   ];
   const parents = Object.fromEntries(
     scene.tasks.map((task) => [
@@ -96,7 +106,7 @@ export function canonicalDag(scene: DagSource): CanonicalDag {
   );
 
   return {
-    valid: topologicalOrder.length === scene.tasks.length,
+    valid: referencesValid && topologicalOrder.length === scene.tasks.length,
     levels,
     parents,
     topologicalOrder,

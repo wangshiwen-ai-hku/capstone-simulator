@@ -114,6 +114,7 @@ Scene controls:
 Domain constraints:
 - Robot nodes are Jetson Orin-like and can execute local inference and safety tasks.
 - Edge nodes are PC/control-plane-like and can run heavier VLA/LLM/VLM workloads.
+- Generate only the requested robot and edge nodes. Do not add cloud nodes.
 - Use workload abstraction fields: task_type, compute_demand, latency_budget, safety_level, model_requirement, data_size, bandwidth_requirement, energy_budget, allow_local_fallback, result_verification.
 - Build per-robot DAG pipelines with typed input/output ports, explicit data_edges, dependencies and stage_index. Never emit a cycle or a missing dependency.
 - Define explicit placement_constraints for every task from its task_type, safety, state, capabilities, and data-locality requirements.
@@ -154,9 +155,13 @@ def _validate_llm_contract(
 
     robot_count = sum(node.kind == "robot" for node in scene.nodes)
     edge_count = sum(node.kind == "edge" for node in scene.nodes)
-    if (robot_count, edge_count) != (req.robot_count, req.edge_count):
+    if (
+        (robot_count, edge_count) != (req.robot_count, req.edge_count)
+        or len(scene.nodes) != robot_count + edge_count
+    ):
         raise ValueError(
-            "LLM scene topology does not match requested robot/edge counts"
+            "LLM scene topology must contain exactly the requested robot "
+            "and edge nodes"
         )
 
 
