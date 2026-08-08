@@ -15,10 +15,8 @@ import {
   Panel,
   Position,
   ReactFlow,
-  addEdge,
   useEdgesState,
   useNodesState,
-  type Connection,
   type Edge,
   type Node,
   type NodeProps,
@@ -30,6 +28,7 @@ import {
   CircleStop,
   Cpu,
   Gauge,
+  Pause,
   Play,
   RefreshCcw,
   RotateCcw,
@@ -44,6 +43,7 @@ import {
   health,
   submitRuntimeWorkflow,
 } from './api';
+import { canonicalDag } from './dag';
 import type {
   Algorithm,
   BenchmarkScene,
@@ -100,8 +100,21 @@ const HARDWARE = {
 } as const;
 
 type HardwareId = keyof typeof HARDWARE;
-type PlaybackState = 'idle' | 'submitting' | 'running' | 'paused' | 'complete' | 'error';
+type PlaybackState =
+  | 'idle'
+  | 'submitting'
+  | 'running'
+  | 'paused'
+  | 'complete'
+  | 'failed'
+  | 'error';
 type FlowKind = 'central' | 'task' | 'agent';
+
+interface LlmStatus {
+  configured: boolean;
+  provider: string;
+  model: string;
+}
 
 interface TaskPlayback {
   id: string;
@@ -124,8 +137,10 @@ interface FlowData extends Record<string, unknown> {
   state?: string;
   hardwareKind?: 'robot' | 'edge' | 'cloud';
   architecture?: string;
+  online?: boolean;
   utilization?: number;
-  onRename?: (id: string, value: string) => void;
+  activeSlots?: number;
+  maxConcurrency?: number;
 }
 
 type FlowNode = Node<FlowData>;
@@ -140,6 +155,13 @@ const POLL_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 450;
 const PLAYBACK_DURATION_MS = 9_000;
 const EMPTY_RUNTIME_TASKS: RuntimeTaskResult[] = [];
+const TERMINAL_TASK_STATES = new Set([
+  'succeeded',
+  'failed',
+  'timeout',
+  'skipped',
+  'dropped',
+]);
 
 function clamp(value: number, min = 0, max = 1) {
   return Math.min(max, Math.max(min, value));
@@ -157,14 +179,27 @@ function taskLabel(category: string) {
 function taskTone(state?: string) {
   if (state === 'running') return 'running';
   if (state === 'succeeded') return 'succeeded';
-  if (state === 'failed' || state === 'skipped') return 'failed';
+  if (state && TERMINAL_TASK_STATES.has(state)) return 'failed';
   return 'queued';
 }
 
-function taskPlayback(
+export function slotUtilization(activeSlots: number, maxConcurrency: number) {
+  return clamp(activeSlots / Math.max(1, maxConcurrency));
+}
+
+function agentPlaybackLoad(tasks: TaskPlayback[], maxConcurrency: number) {
+  const activeSlots = tasks.filter((task) => task.state === 'running').length;
+  return {
+    activeSlots,
+    utilization: slotUtilization(activeSlots, maxConcurrency),
+  };
+}
+
+export function taskPlayback(
   task: Workload,
   runtimeTask: RuntimeTaskResult | undefined,
   playhead: number,
+  makespan: number,
 ): TaskPlayback {
   if (!runtimeTask) {
     return {
@@ -178,6 +213,19 @@ function taskPlayback(
     };
   }
   const attempts = runtimeTask?.attempts ?? [];
+  if (attempts.length === 0 && TERMINAL_TASK_STATES.has(runtimeTask.state)) {
+    const finish = Math.max(0, makespan);
+    const finished = playhead >= finish;
+    return {
+      id: task.id,
+      label: task.name || taskLabel(task.task_type),
+      target: runtimeTask.target_node_id ?? '',
+      state: finished ? runtimeTask.state : 'queued',
+      progress: finished ? 1 : 0,
+      start: finish,
+      finish,
+    };
+  }
   const start = attempts.length
     ? Math.min(...attempts.map((attempt) => attempt.start_time_ms))
     : task.arrival_time_ms;
@@ -207,7 +255,7 @@ function taskPlayback(
 
 function CentralNode({ data }: NodeProps<FlowNode>) {
   const queue = data.queue ?? [];
-  const completed = queue.filter((task) => task.state === 'succeeded').length;
+  const completed = queue.filter((task) => TERMINAL_TASK_STATES.has(task.state)).length;
   return (
     <section className="flow-node central-node">
       <Handle type="source" position={Position.Right} className="flow-handle" />
@@ -250,7 +298,7 @@ function CentralNode({ data }: NodeProps<FlowNode>) {
   );
 }
 
-function TaskNode({ id, data, selected }: NodeProps<FlowNode>) {
+function TaskNode({ data, selected }: NodeProps<FlowNode>) {
   const task = data.task;
   const tone = taskTone(data.state);
   return (
@@ -259,12 +307,7 @@ function TaskNode({ id, data, selected }: NodeProps<FlowNode>) {
       <Handle type="source" position={Position.Right} className="flow-handle" />
       <div className="node-titlebar">
         <span className="node-icon"><Box size={15} /></span>
-        <input
-          className="node-name-input nodrag"
-          value={data.label}
-          aria-label={`Edit ${data.label} name`}
-          onChange={(event) => data.onRename?.(id, event.target.value)}
-        />
+        <strong className="node-name">{data.label}</strong>
         <span className={`task-status ${tone}`}>{tone}</span>
       </div>
       <div className="task-node-body">
@@ -288,6 +331,8 @@ function TaskNode({ id, data, selected }: NodeProps<FlowNode>) {
 
 function AgentNode({ data }: NodeProps<FlowNode>) {
   const tasks = data.tasks ?? [];
+  const activeSlots = data.activeSlots ?? 0;
+  const maxConcurrency = data.maxConcurrency ?? 1;
   const icon = data.hardwareKind === 'edge' ? <Server size={16} /> : <Cpu size={16} />;
   return (
     <section className={`flow-node agent-node ${data.hardwareKind ?? 'robot'}`}>
@@ -298,12 +343,14 @@ function AgentNode({ data }: NodeProps<FlowNode>) {
           <strong>{data.label}</strong>
           <small>{data.architecture}</small>
         </div>
-        <span className="online-mark">online</span>
+        <span className={data.online ? 'online-mark' : 'offline-mark'}>
+          {data.online ? 'online' : 'offline'}
+        </span>
       </div>
       <div className="agent-body">
         <div className="agent-util">
-          <span>Utilization</span>
-          <strong>{Math.round((data.utilization ?? 0) * 100)}%</strong>
+          <span>Active slots</span>
+          <strong>{activeSlots}/{maxConcurrency}</strong>
         </div>
         <div className="agent-util-track">
           <span style={{ width: `${(data.utilization ?? 0) * 100}%` }} />
@@ -326,10 +373,10 @@ function AgentNode({ data }: NodeProps<FlowNode>) {
 function initialGraph(
   scene: BenchmarkScene,
   playback: TaskPlayback[],
-  onRename: (id: string, value: string) => void,
 ): { nodes: FlowNode[]; edges: Edge[] } {
+  const dag = canonicalDag(scene);
   const levelCounts = new Map<number, number>();
-  const maxLevel = Math.max(0, ...scene.tasks.map((task) => task.stage_index));
+  const maxLevel = Math.max(0, ...Object.values(dag.levels));
   const nodes: FlowNode[] = [
     {
       id: 'central-scheduler',
@@ -347,7 +394,7 @@ function initialGraph(
   ];
 
   scene.tasks.forEach((task) => {
-    const level = task.stage_index;
+    const level = dag.levels[task.id] ?? 0;
     const row = levelCounts.get(level) ?? 0;
     levelCounts.set(level, row + 1);
     const runtime = playback.find((item) => item.id === task.id);
@@ -365,14 +412,17 @@ function initialGraph(
         task,
         progress: runtime?.progress ?? 0,
         state: runtime?.state ?? 'queued',
-        onRename,
       },
     });
   });
 
   const agentX = 430 + (maxLevel + 1) * 285 + 140;
+  const resourceByNode = new Map(
+    scene.initial_resources.map((snapshot) => [snapshot.node_id, snapshot]),
+  );
   scene.nodes.forEach((node, index) => {
     const assigned = playback.filter((task) => task.target === node.id);
+    const load = agentPlaybackLoad(assigned, node.max_concurrency);
     nodes.push({
       id: `agent:${node.id}`,
       type: 'agent',
@@ -383,36 +433,44 @@ function initialGraph(
         subtitle: node.id,
         hardwareKind: node.kind,
         architecture: node.architecture,
+        online: resourceByNode.get(node.id)?.online ?? false,
         tasks: assigned,
-        utilization: assigned.length > 0
-          ? assigned.reduce((sum, task) => sum + task.progress, 0) / Math.max(1, node.max_concurrency)
-          : 0,
+        activeSlots: load.activeSlots,
+        maxConcurrency: node.max_concurrency,
+        utilization: load.utilization,
       },
     });
   });
 
   const edges: Edge[] = [];
   scene.tasks.forEach((task) => {
-    if (task.dependencies.length === 0) {
+    if ((dag.parents[task.id] ?? []).length === 0) {
       edges.push({
         id: `central-${task.id}`,
         source: 'central-scheduler',
         target: `task:${task.id}`,
         type: 'smoothstep',
         animated: true,
+        deletable: false,
         style: { stroke: '#7dd3a8', strokeWidth: 1.5 },
         markerEnd: { type: MarkerType.ArrowClosed, color: '#7dd3a8' },
       });
     }
-    task.dependencies.forEach((parent) => {
-      edges.push({
-        id: `dependency:${parent}:${task.id}`,
-        source: `task:${parent}`,
-        target: `task:${task.id}`,
-        type: 'smoothstep',
-        style: { stroke: '#8a929c', strokeWidth: 1.35 },
-        markerEnd: { type: MarkerType.ArrowClosed, color: '#8a929c' },
-      });
+  });
+  dag.graphEdges.forEach((edge) => {
+    const typed = edge.kind === 'data';
+    const color = typed ? '#65b9c8' : '#8a929c';
+    edges.push({
+      id: edge.id,
+      source: `task:${edge.from}`,
+      target: `task:${edge.to}`,
+      type: 'smoothstep',
+      label: edge.label,
+      deletable: false,
+      style: { stroke: color, strokeWidth: typed ? 1.7 : 1.35 },
+      labelStyle: { fill: '#9dcbd4', fontSize: 8 },
+      labelBgStyle: { fill: '#171a1f', fillOpacity: 0.94 },
+      markerEnd: { type: MarkerType.ArrowClosed, color },
     });
   });
   playback.forEach((task) => {
@@ -422,6 +480,7 @@ function initialGraph(
       source: `task:${task.id}`,
       target: `agent:${task.target}`,
       type: 'smoothstep',
+      deletable: false,
       style: { stroke: '#d7a94a', strokeWidth: 1, strokeDasharray: '5 5' },
       markerEnd: { type: MarkerType.ArrowClosed, color: '#d7a94a' },
     });
@@ -439,6 +498,8 @@ export default function App() {
   const [hardware, setHardware] = useState<HardwareId>('orin_nx');
   const [algorithm, setAlgorithm] = useState<Algorithm>('dag_deadline');
   const [seed, setSeed] = useState(7);
+  const [useLlm, setUseLlm] = useState(false);
+  const [llmStatus, setLlmStatus] = useState<LlmStatus | null>(null);
   const [taskCategories, setTaskCategories] = useState<TaskCategory[]>([
     'localization',
     'environment_understanding',
@@ -460,7 +521,6 @@ export default function App() {
   const playStartedAt = useRef(0);
   const playStartedFrom = useRef(0);
   const initialBuildDone = useRef(false);
-  const stopRequested = useRef(false);
 
   const runtimeTasks = runtimeRun?.result?.task_results ?? EMPTY_RUNTIME_TASKS;
   const makespan = runtimeRun?.result?.metrics.makespan_ms ?? 0;
@@ -469,8 +529,9 @@ export default function App() {
       task,
       runtimeTasks.find((runtimeTask) => runtimeTask.task_id === task.id),
       playhead,
+      makespan,
     )),
-    [scene, runtimeTasks, playhead],
+    [scene, runtimeTasks, playhead, makespan],
   );
 
   const requestPayload: GenerateSceneRequest = useMemo(() => ({
@@ -481,7 +542,7 @@ export default function App() {
     task_categories: taskCategories,
     difficulty,
     seed,
-    use_llm: false,
+    use_llm: useLlm,
   }), [
     scenarioType,
     customScene,
@@ -490,19 +551,24 @@ export default function App() {
     taskCategories,
     difficulty,
     seed,
+    useLlm,
   ]);
 
   useEffect(() => {
     health()
-      .then((response) => setApiStatus(`MARS ${response.mars_version}`))
-      .catch(() => setApiStatus('API offline'));
+      .then((response) => {
+        setApiStatus(`MARS ${response.mars_version}`);
+        setLlmStatus({
+          configured: response.llm_configured,
+          provider: response.provider,
+          model: response.model,
+        });
+      })
+      .catch(() => {
+        setApiStatus('API offline');
+        setLlmStatus(null);
+      });
   }, []);
-
-  const renameNode = useCallback((id: string, value: string) => {
-    setNodes((current) => current.map((node) => (
-      node.id === id ? { ...node, data: { ...node.data, label: value } } : node
-    )));
-  }, [setNodes]);
 
   const applyHardware = useCallback((generated: BenchmarkScene) => {
     const profile = HARDWARE[hardware];
@@ -548,10 +614,10 @@ export default function App() {
 
   useEffect(() => {
     if (!scene) return;
-    const graph = initialGraph(scene, playback, renameNode);
+    const graph = initialGraph(scene, playback);
     setNodes(graph.nodes);
     setEdges(graph.edges);
-  }, [scene, layoutRevision, renameNode, setEdges, setNodes]);
+  }, [scene, layoutRevision, setEdges, setNodes]);
 
   useEffect(() => {
     if (!scene) return;
@@ -582,14 +648,15 @@ export default function App() {
       if (node.data.kind === 'agent') {
         const nodeId = node.id.replace('agent:', '');
         const assigned = playback.filter((task) => task.target === nodeId);
+        const maxConcurrency = node.data.maxConcurrency ?? 1;
+        const load = agentPlaybackLoad(assigned, maxConcurrency);
         return {
           ...node,
           data: {
             ...node.data,
             tasks: assigned,
-            utilization: assigned.length
-              ? clamp(assigned.reduce((sum, task) => sum + task.progress, 0) / Math.max(1, assigned.length))
-              : 0,
+            activeSlots: load.activeSlots,
+            utilization: load.utilization,
           },
         };
       }
@@ -608,14 +675,18 @@ export default function App() {
       );
       setPlayhead(next);
       if (next >= makespan) {
-        setPlaybackState('complete');
+        setPlaybackState(
+          runtimeRun?.result?.workflow.state === 'succeeded'
+            ? 'complete'
+            : 'failed',
+        );
         return;
       }
       frame = window.requestAnimationFrame(tick);
     };
     frame = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(frame);
-  }, [makespan, playbackState]);
+  }, [makespan, playbackState, runtimeRun]);
 
   const toggleTask = (category: TaskCategory) => {
     setTaskCategories((current) => (
@@ -625,23 +696,12 @@ export default function App() {
     ));
   };
 
-  const onConnect = useCallback(
-    (connection: Connection) => setEdges((current) => addEdge({
-      ...connection,
-      type: 'smoothstep',
-      style: { stroke: '#8a929c', strokeWidth: 1.35 },
-      markerEnd: { type: MarkerType.ArrowClosed, color: '#8a929c' },
-    }, current)),
-    [setEdges],
-  );
-
   async function run() {
     if (!scene || playbackState === 'submitting') return;
     setError(null);
     setRuntimeRun(null);
     setPlayhead(0);
     setPlaybackState('submitting');
-    stopRequested.current = false;
     try {
       const accepted = await submitRuntimeWorkflow(scene, algorithm, seed);
       const start = Date.now();
@@ -655,10 +715,18 @@ export default function App() {
       if (!current || current.status === 'accepted' || current.status === 'running') {
         throw new Error('Runtime polling timed out after 60 seconds.');
       }
-      if (current.status === 'failed') throw new Error(current.error || 'Runtime execution failed.');
+      if (!current.result) {
+        throw new Error(current.error || 'Runtime execution failed without a report.');
+      }
       playStartedFrom.current = 0;
       playStartedAt.current = performance.now();
-      setPlaybackState(stopRequested.current ? 'paused' : 'running');
+      setPlaybackState(
+        current.result.metrics.makespan_ms > 0
+          ? 'running'
+          : current.result.workflow.state === 'succeeded'
+            ? 'complete'
+            : 'failed',
+      );
       setLayoutRevision((value) => value + 1);
     } catch (reason) {
       setPlaybackState('error');
@@ -666,9 +734,8 @@ export default function App() {
     }
   }
 
-  function stop() {
-    if (playbackState !== 'running' && playbackState !== 'submitting') return;
-    stopRequested.current = true;
+  function pausePlayback() {
+    if (playbackState !== 'running') return;
     setPlaybackState('paused');
   }
 
@@ -676,7 +743,6 @@ export default function App() {
     if (playbackState !== 'paused' || !runtimeRun?.result) return;
     playStartedFrom.current = playhead;
     playStartedAt.current = performance.now();
-    stopRequested.current = false;
     setPlaybackState('running');
   }
 
@@ -684,7 +750,6 @@ export default function App() {
     setRuntimeRun(null);
     setPlayhead(0);
     setPlaybackState('idle');
-    stopRequested.current = false;
     setError(null);
     setLayoutRevision((value) => value + 1);
   }
@@ -730,6 +795,20 @@ export default function App() {
                   aria-label="Custom scene description"
                 />
               )}
+              <label className="llm-option">
+                <input
+                  type="checkbox"
+                  checked={useLlm}
+                  disabled={!llmStatus?.configured}
+                  onChange={(event) => setUseLlm(event.target.checked)}
+                />
+                <span>Use LLM scene generation</span>
+              </label>
+              <small className="settings-note">
+                {llmStatus?.configured
+                  ? `${llmStatus.provider} / ${llmStatus.model}`
+                  : 'Configure an LLM provider in the backend to enable this option.'}
+              </small>
               <label htmlFor="difficulty">Task difficulty</label>
               <div className="segmented" id="difficulty">
                 {DIFFICULTIES.map((item) => (
@@ -807,7 +886,7 @@ export default function App() {
               type="button"
               className="apply-button"
               onClick={() => void buildScene(requestPayload)}
-              disabled={building}
+              disabled={building || playbackState === 'submitting'}
             >
               <RefreshCcw size={15} className={building ? 'spin' : ''} />
               {building ? 'Building graph' : 'Apply settings'}
@@ -822,17 +901,20 @@ export default function App() {
             <span className={`api-indicator ${apiStatus === 'API offline' ? 'offline' : ''}`} />
             <div>
               <strong>{scene?.title ?? 'Loading scene'}</strong>
-              <small>{apiStatus} | {scene?.workflow_id ?? 'No workflow'}</small>
+              <small title={scene?.generation_note || undefined}>
+                {apiStatus} | {scene?.workflow_id ?? 'No workflow'}
+                {scene ? ` | ${scene.generation_source}` : ''}
+              </small>
             </div>
           </div>
           <div className="run-controls" aria-label="Runtime controls">
-            <button type="button" className="run" onClick={() => void run()} disabled={!scene || playbackState === 'submitting' || playbackState === 'running'} title="Run workflow">
+            <button type="button" className="run" onClick={() => void run()} disabled={!scene || playbackState === 'submitting' || playbackState === 'running' || playbackState === 'paused'} title="Run workflow">
               <Play size={15} fill="currentColor" /> Run
             </button>
-            <button type="button" onClick={stop} disabled={playbackState !== 'running' && playbackState !== 'submitting'} title="Stop playback">
-              <CircleStop size={15} /> Stop
+            <button type="button" onClick={pausePlayback} disabled={playbackState !== 'running'} title="Pause playback">
+              <Pause size={15} /> Pause
             </button>
-            <button type="button" onClick={reset} disabled={!scene} title="Reset workflow">
+            <button type="button" onClick={reset} disabled={!scene || playbackState === 'submitting'} title="Reset workflow">
               <RotateCcw size={15} /> Reset
             </button>
             <button type="button" onClick={continuePlayback} disabled={playbackState !== 'paused' || !runtimeRun?.result} title="Continue playback">
@@ -859,12 +941,13 @@ export default function App() {
             nodeTypes={NODE_TYPES}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
+            nodesConnectable={false}
+            edgesReconnectable={false}
             fitView
             fitViewOptions={{ padding: 0.16, maxZoom: 1 }}
             minZoom={0.2}
             maxZoom={1.8}
-            deleteKeyCode={['Backspace', 'Delete']}
+            deleteKeyCode={null}
             selectionOnDrag
             panOnScroll
             proOptions={{ hideAttribution: true }}

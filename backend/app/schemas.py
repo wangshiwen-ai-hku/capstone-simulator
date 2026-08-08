@@ -122,6 +122,12 @@ class PlacementConstraintsSpec(BaseModel):
     splittable: bool = False
     replicable: bool = False
 
+    @field_validator("pinned_node_id", mode="before")
+    @classmethod
+    def normalize_empty_pin(cls, value):
+        """Accept JSON null as the wire representation of no explicit pin."""
+        return "" if value is None else value
+
     @model_validator(mode="after")
     def validate_contract(self):
         if self.pinned_node_id and self.pin_to_source:

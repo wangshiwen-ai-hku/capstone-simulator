@@ -81,7 +81,14 @@ def health():
 def providers():
     return {
         "current": settings.public_llm(),
-        "available": ["openai", "doubao", "glm", "gemini", "custom"],
+        "available": [
+            "openai",
+            "deepseek",
+            "doubao",
+            "glm",
+            "gemini",
+            "custom",
+        ],
         "note": (
             "Provider configuration is loaded from backend/.env through an "
             "OpenAI-compatible client."

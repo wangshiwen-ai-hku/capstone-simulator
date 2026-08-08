@@ -99,4 +99,15 @@ describe('canonicalDag', () => {
     expect(dag.topologicalOrder).toEqual([]);
     expect(dag.parents).toEqual({ first: ['second'], second: ['first'] });
   });
+
+  it('marks unknown task references invalid and omits dangling graph edges', () => {
+    const dag = canonicalDag(scene(
+      [task('known', ['missing'])],
+      [dataEdge('unknown', 'known')],
+    ));
+
+    expect(dag.valid).toBe(false);
+    expect(dag.graphEdges).toEqual([]);
+    expect(dag.parents).toEqual({ known: [] });
+  });
 });
