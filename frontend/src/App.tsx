@@ -23,7 +23,7 @@ import { TASK_CATEGORIES } from './types';
 
 const scenarioOptions: ScenarioType[] = ['warehouse', 'hospital', 'campus', 'factory', 'disaster', 'custom'];
 const difficultyOptions: Difficulty[] = ['easy', 'medium', 'hard', 'stress'];
-const algorithmOptions: Algorithm[] = ['dag_deadline', 'rule_based', 'local_first', 'edge_first', 'greedy_cost'];
+const algorithmOptions: Algorithm[] = ['dag_deadline', 'rule_based', 'local_first', 'edge_first', 'greedy_cost', 'binary_offload'];
 const MAX_ROBOTS = 50;
 const MIN_EDGE_NODES = 0;
 const MAX_EDGE_NODES = 8;
@@ -210,13 +210,23 @@ function metricLabel(key: string) {
     workflow_success_rate: 'Workflow Success',
     critical_path_ms: 'Critical Path',
     dag_depth: 'DAG Depth',
+    total_solver_time_ms: 'Total Solver Time',
+    max_solver_time_ms: 'Max Solver Time',
+    scheduling_epoch_count: 'Scheduling Epochs',
+    expected_success_reward: 'Expected Success Reward',
+    communication_time_ms: 'Communication Time',
+    peak_cpu_utilization: 'Peak CPU Utilization',
+    peak_gpu_utilization: 'Peak GPU Utilization',
+    peak_memory_utilization: 'Peak Memory Utilization',
+    maximum_resource_utilization: 'Umax',
+    workflow_evaluation_objective: 'Evaluation Objective',
   };
   return map[key] ?? key;
 }
 
 function formatMetric(key: string, value: number) {
-  if (key.includes('rate') || key.includes('ratio')) return pct(value);
-  if (key.includes('latency') || key.includes('makespan') || key.includes('critical_path')) return `${value.toFixed(1)} ms`;
+  if (key.includes('rate') || key.includes('ratio') || key.includes('utilization')) return pct(value);
+  if (key.includes('latency') || key.includes('makespan') || key.includes('critical_path') || key.includes('time_ms')) return `${value.toFixed(1)} ms`;
   if (key.includes('energy')) return `${value.toFixed(1)} J`;
   if (key.includes('bandwidth')) return `${value.toFixed(1)} MB`;
   return `${value}`;
@@ -251,6 +261,7 @@ export default function App() {
     'local_llm_7b',
   ]);
   const [algorithm, setAlgorithm] = useState<Algorithm>('dag_deadline');
+  const [beta, setBeta] = useState(0.01);
   const [scene, setScene] = useState<BenchmarkScene | null>(null);
   const [result, setResult] = useState<SimulationResponse | null>(null);
   const [runtimeRun, setRuntimeRun] = useState<RuntimeWorkflowRun | null>(null);
@@ -312,7 +323,7 @@ export default function App() {
     setError(null);
     setRuntimeRun(null);
     try {
-      const r = await simulate(scene, algorithm, seed);
+      const r = await simulate(scene, algorithm, seed, beta);
       setResult(r);
       setTab('overview');
     } catch (e) {
@@ -330,7 +341,7 @@ export default function App() {
     setRuntimeRun(null);
     setTab('runtime');
     try {
-      const accepted = await submitRuntimeWorkflow(scene, algorithm, seed);
+      const accepted = await submitRuntimeWorkflow(scene, algorithm, seed, beta);
       let run: RuntimeWorkflowRun | null = null;
       const pollingStartedAt = Date.now();
       while (Date.now() - pollingStartedAt < RUNTIME_POLL_TIMEOUT_MS) {
@@ -459,6 +470,12 @@ export default function App() {
           <select id="algorithm" value={algorithm} onChange={(e) => setAlgorithm(e.target.value as Algorithm)}>
             {algorithmOptions.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
+          {algorithm === 'binary_offload' && (
+            <>
+              <label htmlFor="binary-beta">Communication Weight (Beta)</label>
+              <input id="binary-beta" type="number" min={0} step={0.0001} value={beta} onChange={(e) => setBeta(Math.max(0, Number(e.target.value) || 0))} />
+            </>
+          )}
           <button className="secondary" onClick={onSimulate} disabled={!scene || Boolean(runtimeIssue) || loading || runtimeLoading}>Run Scheduling Simulation</button>
           <button
             className="primary runtime-run"

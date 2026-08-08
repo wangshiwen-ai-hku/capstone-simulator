@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from mars.coordinator import CentralCoordinator, CoordinatorReport
 from mars.domain.topology import LinkSnapshot
+from mars.optimizers import BinaryOffloadOptimizer, OptimizerRegistry
 from mars.runtime import InProcessRuntime
 
 from .mars_adapter import (
@@ -66,7 +67,20 @@ class LocalRuntimeService:
 
     def submit(self, request: RuntimeWorkflowRequest) -> dict[str, object]:
         _validate_runtime_topology(request)
-        coordinator = coordinator_for_scene(request.scene)
+        registry = None
+        fallback_optimizer = "heuristic"
+        if request.algorithm == "binary_offload":
+            registry = OptimizerRegistry()
+            registry.register(BinaryOffloadOptimizer(beta=request.beta))
+            fallback_optimizer = None
+        if registry is None:
+            coordinator = coordinator_for_scene(request.scene)
+        else:
+            coordinator = coordinator_for_scene(
+                request.scene,
+                optimizer_registry=registry,
+                fallback_optimizer=fallback_optimizer,
+            )
         workflow = build_workflow(request.scene)
         failure_ids: tuple[str, ...] = ()
         if request.inject_first_failure:
@@ -226,6 +240,8 @@ def coordinator_for_scene(
     execution_noise: float = 0.04,
     respect_expected_accuracy: bool = False,
     link_snapshots: tuple[LinkSnapshot, ...] | None = None,
+    optimizer_registry: OptimizerRegistry | None = None,
+    fallback_optimizer: str | None = "heuristic",
 ) -> CentralCoordinator:
     """Build a CentralCoordinator with its RuntimePort implementation."""
 
@@ -241,6 +257,8 @@ def coordinator_for_scene(
             if link_snapshots is None
             else link_snapshots
         ),
+        optimizer_registry=optimizer_registry,
+        fallback_optimizer=fallback_optimizer,
     )
 
 def _validate_runtime_topology(request: RuntimeWorkflowRequest) -> None:

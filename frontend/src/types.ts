@@ -1,6 +1,6 @@
 export type Difficulty = 'easy' | 'medium' | 'hard' | 'stress';
 export type ScenarioType = 'warehouse' | 'hospital' | 'campus' | 'factory' | 'disaster' | 'custom';
-export type Algorithm = 'dag_deadline' | 'rule_based' | 'local_first' | 'edge_first' | 'greedy_cost';
+export type Algorithm = 'dag_deadline' | 'rule_based' | 'local_first' | 'edge_first' | 'greedy_cost' | 'binary_offload';
 export type TaskClass = 'local_safety' | 'realtime_offloadable' | 'edge_heavy';
 
 export const TASK_CATEGORIES = [
@@ -172,6 +172,16 @@ export interface SimulationMetrics {
   workflow_success_rate: number;
   critical_path_ms: number;
   dag_depth: number;
+  total_solver_time_ms: number;
+  max_solver_time_ms: number;
+  scheduling_epoch_count: number;
+  expected_success_reward: number;
+  communication_time_ms: number;
+  peak_cpu_utilization: number;
+  peak_gpu_utilization: number;
+  peak_memory_utilization: number;
+  maximum_resource_utilization: number;
+  workflow_evaluation_objective: number;
 }
 
 export interface TaskRunResult {

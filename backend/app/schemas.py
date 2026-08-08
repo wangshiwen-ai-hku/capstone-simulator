@@ -353,7 +353,8 @@ class BenchmarkScene(BaseModel):
 
 class SimulateRequest(BaseModel):
     scene: BenchmarkScene
-    algorithm: Literal["dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
+    algorithm: Literal["binary_offload", "dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
+    beta: float = Field(default=0.01, ge=0)
     network_jitter: float = Field(default=0.1, ge=0, le=1)
     resource_noise: float = Field(default=0.05, ge=0, le=0.5)
     seed: int = Field(default=7, ge=0)
@@ -361,7 +362,8 @@ class SimulateRequest(BaseModel):
 
 class RuntimeWorkflowRequest(BaseModel):
     scene: BenchmarkScene
-    algorithm: Literal["dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
+    algorithm: Literal["binary_offload", "dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
+    beta: float = Field(default=0.01, ge=0)
     seed: int = Field(default=7, ge=0)
     max_attempts: int = Field(default=2, ge=1, le=5)
     inject_first_failure: bool = False
@@ -412,6 +414,16 @@ class SimulationMetrics(BaseModel):
     workflow_success_rate: float
     critical_path_ms: float
     dag_depth: int
+    total_solver_time_ms: float = 0.0
+    max_solver_time_ms: float = 0.0
+    scheduling_epoch_count: int = 0
+    expected_success_reward: float = 0.0
+    communication_time_ms: float = 0.0
+    peak_cpu_utilization: float = 0.0
+    peak_gpu_utilization: float = 0.0
+    peak_memory_utilization: float = 0.0
+    maximum_resource_utilization: float = 0.0
+    workflow_evaluation_objective: float = 0.0
 
 
 class WorkflowSummary(BaseModel):

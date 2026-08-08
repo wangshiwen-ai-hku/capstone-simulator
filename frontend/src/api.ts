@@ -38,7 +38,12 @@ export function generateScene(payload: GenerateSceneRequest) {
   });
 }
 
-export function simulate(scene: BenchmarkScene, algorithm: Algorithm, seed: number) {
+export function simulate(
+  scene: BenchmarkScene,
+  algorithm: Algorithm,
+  seed: number,
+  beta = 0.01,
+) {
   return request<SimulationResponse>('/api/simulate', {
     method: 'POST',
     body: JSON.stringify({
@@ -47,6 +52,7 @@ export function simulate(scene: BenchmarkScene, algorithm: Algorithm, seed: numb
       network_jitter: 0.12,
       resource_noise: 0.05,
       seed,
+      beta,
     }),
   });
 }
@@ -55,6 +61,7 @@ export function submitRuntimeWorkflow(
   scene: BenchmarkScene,
   algorithm: Algorithm,
   seed: number,
+  beta = 0.01,
 ) {
   return request<{ run_id: string; workflow_id: string; status: string }>(
     '/api/runtime/workflows',
@@ -64,6 +71,7 @@ export function submitRuntimeWorkflow(
         scene,
         algorithm,
         seed,
+        beta,
         max_attempts: 2,
         inject_first_failure: false,
         deterministic: true,
