@@ -173,7 +173,9 @@ MODEL_PROVIDER=deepseek
 DEEPSEEK_API_KEY=<private-api-key>
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-flash
-LLM_TIMEOUT_SECONDS=120
+LLM_TIMEOUT_SECONDS=300
+LLM_MAX_RETRIES=1
+LLM_STREAM_RESPONSES=1
 ```
 
 Restart the backend and confirm that `GET /api/health` reports
@@ -181,6 +183,51 @@ Restart the backend and confirm that `GET /api/health` reports
 the Web interface when generating a scene. Provider credentials remain in the
 backend; they are not returned by the API or sent to the browser. Invalid model
 output falls back to the deterministic scene generator.
+
+### Optional API trace archive
+
+Off by default. Set in `backend/.env`:
+
+```dotenv
+MARS_TRACE_ARCHIVE=1
+MARS_TRACE_DIR=tmp/mars-traces
+```
+
+When enabled, the backend logs a **warning** on startup. Each generated scene
+owns one timestamped root, and later simulation/runtime calls are attached to
+that root through the scene's opaque `trace_id`. Calls are grouped by execution
+path and record the effective solver in their directory name. The v3 layout is:
+
+```text
+tmp/mars-traces/
+  YYYYMMDDTHHMMSS.ffffff_<scene-id>/
+    scene/
+      meta.json
+      request.json
+      response.json
+    llm/
+      meta.json               # timing, summary, and exception chain
+      request.json            # prompts and safe request metadata
+      response.json           # full raw content, when received
+    calls/
+      simulate/
+        YYYYMMDDTHHMMSS.ffffff_<solver>_<call-id>/
+          meta.json
+          request.json
+          response.json
+      runtime/
+        YYYYMMDDTHHMMSS.ffffff_<solver>_<call-id>/
+          meta.json
+          request.json
+          accepted.json
+          response.json
+          status.json
+```
+
+If a scheduler call uses an older/imported scene without a known `trace_id`, a
+new root marked `status: imported` is created instead of silently losing the
+call. Files are written atomically. `GET /api/health` includes the archive
+status, layout, schema version, and directory. Credentials are never archived.
 
 ### Frontend
 

@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from time import perf_counter
 from typing import Any, Dict
 
 from openai import OpenAI
@@ -9,6 +10,12 @@ from .config import Settings
 from .mars_adapter import validate_scene
 from .scene_generator import build_deterministic_scene
 from .schemas import BenchmarkScene, GenerateSceneRequest
+from .trace_archive import (
+    TraceSession,
+    archive_llm_request,
+    archive_llm_result,
+    exception_chain,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -100,6 +107,21 @@ def _extract_json(text: str) -> Dict[str, Any]:
         raise
 
 
+def _normalize_llm_scene_payload(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Repair common LLM placement mistakes before schema validation."""
+    for task in data.get("tasks") or []:
+        if not isinstance(task, dict):
+            continue
+        placement = task.get("placement_constraints")
+        if not isinstance(placement, dict):
+            continue
+        if placement.get("pinned_node_id") is None:
+            placement["pinned_node_id"] = ""
+        if placement.get("pin_to_source") and placement.get("pinned_node_id"):
+            placement["pinned_node_id"] = ""
+    return data
+
+
 def _request_prompt(req: GenerateSceneRequest) -> str:
     return f"""
 Scene controls:
@@ -165,7 +187,45 @@ def _validate_llm_contract(
         )
 
 
-def generate_scene_with_llm(settings: Settings, req: GenerateSceneRequest) -> BenchmarkScene:
+def _chat_completion_content(
+    client: OpenAI,
+    *,
+    model: str,
+    temperature: float,
+    system_prompt: str,
+    user_prompt: str,
+    stream: bool,
+) -> str:
+    request = {
+        "model": model,
+        "temperature": temperature,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    }
+    if not stream:
+        response = client.chat.completions.create(**request)
+        return response.choices[0].message.content or "{}"
+
+    chunks: list[str] = []
+    response_stream = client.chat.completions.create(stream=True, **request)
+    for event in response_stream:
+        if not event.choices:
+            continue
+        content = event.choices[0].delta.content
+        if content:
+            chunks.append(content)
+    return "".join(chunks) or "{}"
+
+
+def generate_scene_with_llm(
+    settings: Settings,
+    req: GenerateSceneRequest,
+    *,
+    trace_session: TraceSession | None = None,
+) -> BenchmarkScene:
     cfg = settings.current_llm()
     api_key = cfg.get("api_key")
     model = cfg.get("model")
@@ -188,45 +248,94 @@ def generate_scene_with_llm(settings: Settings, req: GenerateSceneRequest) -> Be
             note="LLM provider configuration is incomplete",
         )
 
-    client = OpenAI(api_key=api_key, base_url=base_url, timeout=settings.llm_timeout_seconds)
+    client_options: dict[str, Any] = {
+        "api_key": api_key,
+        "base_url": base_url,
+        "timeout": settings.llm_timeout_seconds,
+    }
+    if hasattr(settings, "llm_max_retries"):
+        client_options["max_retries"] = settings.llm_max_retries
+    client = OpenAI(**client_options)
+    user_prompt = _request_prompt(req)
+    stream = bool(getattr(settings, "llm_stream_responses", False))
+    started = perf_counter()
+    content = ""
+    archive_llm_request(
+        trace_session,
+        provider=str(cfg.get("provider", "")),
+        model=str(model),
+        base_url=str(base_url or ""),
+        system_prompt=SYSTEM_PROMPT.strip(),
+        user_prompt=user_prompt.strip(),
+        timeout_seconds=settings.llm_timeout_seconds,
+        max_retries=getattr(settings, "llm_max_retries", 2),
+        stream=stream,
+    )
     try:
-        user_prompt = _request_prompt(req)
         logger.info(
-            "Sending scene-generation request to provider=%s model=%s",
+            "Sending scene-generation request to provider=%s model=%s stream=%s",
             cfg.get("provider"),
             model,
+            stream,
         )
 
-        resp = client.chat.completions.create(
+        content = _chat_completion_content(
+            client,
             model=model,
             temperature=settings.llm_temperature,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            stream=stream,
         )
-        content = resp.choices[0].message.content or "{}"
         logger.info("Received scene-generation response (%d bytes)", len(content))
-
-        data = _extract_json(content)
+        data = _normalize_llm_scene_payload(_extract_json(content))
         scene = BenchmarkScene.model_validate(data)
         _validate_llm_contract(scene, req)
         validate_scene(scene)
+        archive_llm_result(
+            trace_session,
+            provider=str(cfg.get("provider", "")),
+            model=str(model),
+            response_content=content,
+            success=True,
+            elapsed_ms=(perf_counter() - started) * 1000,
+        )
         scene.generation_source = "llm"
         scene.generation_note = ""
         return scene
     except Exception as exc:
+        archive_llm_result(
+            trace_session,
+            provider=str(cfg.get("provider", "")),
+            model=str(model or ""),
+            response_content=content,
+            success=False,
+            elapsed_ms=(perf_counter() - started) * 1000,
+            error=exc,
+        )
+        chain = exception_chain(exc)
+        cause = chain[-1] if chain else {
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
         logger.error(
-            "LLM generation failed with %s: %s",
+            "LLM generation failed with %s: %s (root cause: %s: %s)",
             type(exc).__name__,
             exc,
+            cause["type"],
+            cause["message"],
+        )
+        trace_hint = (
+            f" Trace: {trace_session.trace_id}."
+            if trace_session is not None
+            else ""
         )
         return _deterministic_result(
             req,
             fallback=True,
             note=(
-                f"{type(exc).__name__}: LLM scene generation or validation "
-                "failed"
+                f"LLM {cfg.get('provider')}/{model} failed with "
+                f"{type(exc).__name__}; deterministic fallback used."
+                f"{trace_hint}"
             ),
         )

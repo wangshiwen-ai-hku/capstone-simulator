@@ -30,6 +30,12 @@ export function health() {
     llm_configured: boolean;
     system: string;
     mars_version: string;
+    trace_archive?: {
+      enabled: boolean;
+      directory: string;
+      layout?: string;
+      schema_version?: string;
+    };
   }>('/api/health');
 }
 

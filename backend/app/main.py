@@ -29,6 +29,7 @@ from .schemas import (
     SimulateRequest,
 )
 from .simulation import run_simulation
+from .trace_archive import begin_session, log_startup_banner, trace_status
 
 
 logging.basicConfig(
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 synthetic_workloads = load_default_synthetic_workloads()
+log_startup_banner(settings)
 
 app = FastAPI(
     title="MARS Simulator API",
@@ -75,6 +77,7 @@ def health():
         "llm_configured": cfg["configured"],
         "system": "MARS",
         "mars_version": mars_version,
+        "trace_archive": trace_status(settings),
     }
 
 
@@ -89,6 +92,7 @@ def providers():
             "glm",
             "gemini",
             "custom",
+            "apiyi",
         ],
         "note": (
             "Provider configuration is loaded from backend/.env through an "
@@ -185,10 +189,22 @@ def runtime_agents():
 @app.post("/api/runtime/workflows", status_code=202)
 def submit_runtime_workflow(req: RuntimeWorkflowRequest):
     _validate_scene_request(req.scene)
+    trace = begin_session(
+        "runtime",
+        settings,
+        scene_trace_id=req.scene.trace_id,
+        algorithm=req.algorithm,
+        scene_id=req.scene.id,
+    )
+    if trace is not None:
+        trace.write_request(req)
     try:
-        return runtime_service.submit(req)
+        response = runtime_service.submit(req, trace_session=trace)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if trace is not None:
+        trace.write_json("accepted.json", response)
+    return response
 
 
 @app.get("/api/runtime/workflows/{run_id}")
@@ -313,8 +329,28 @@ def generate_scene(req: GenerateSceneRequest):
         req.scenario_type.value,
         req.difficulty.value,
     )
-    scene = generate_scene_with_llm(settings, req)
+    trace = begin_session("generate-scene", settings)
+    if trace is not None:
+        trace.write_json("scene/request.json", req)
+    scene = generate_scene_with_llm(settings, req, trace_session=trace)
     _validate_scene_request(scene)
+    if trace is not None:
+        scene.trace_id = trace.scene_trace_id
+        trace.write_json(
+            "scene/meta.json",
+            {
+                "schema_version": "mars.trace.v3",
+                "scene_trace_id": trace.scene_trace_id,
+                "scene_id": scene.id,
+                "workflow_id": scene.workflow_id,
+                "generation_source": scene.generation_source,
+                "generation_note": scene.generation_note,
+                "node_count": len(scene.nodes),
+                "task_count": len(scene.tasks),
+                "status": "complete",
+            },
+        )
+        trace.write_json("scene/response.json", scene)
     return scene
 
 
@@ -325,7 +361,19 @@ def simulate(req: SimulateRequest):
         req.algorithm,
     )
     _validate_scene_request(req.scene)
+    trace = begin_session(
+        "simulate",
+        settings,
+        scene_trace_id=req.scene.trace_id,
+        algorithm=req.algorithm,
+        scene_id=req.scene.id,
+    )
+    if trace is not None:
+        trace.write_request(req)
     try:
-        return run_simulation(req)
+        response = run_simulation(req)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if trace is not None:
+        trace.write_response(response)
+    return response
