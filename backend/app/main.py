@@ -17,6 +17,7 @@ from .config import get_settings
 from .llm_client import generate_scene_with_llm
 from .mars_adapter import SceneValidationError, validate_scene
 from .runtime import runtime_service
+from .scheduling import scheduling_capabilities
 from .scene_generator import (
     TASK_TYPE_TEMPLATES,
     placement_constraints_for,
@@ -121,6 +122,7 @@ def architecture():
         "optimizers": list(built_in_registry().ids()),
         "policies": list(built_in_policy_ids()),
         "algorithm_aliases": algorithm_aliases(),
+        "scheduling_capabilities": scheduling_capabilities(),
         "task_class_role": "reporting_compatibility",
         "task_classes": [
             {"id": task_class.value, "label": TASK_CLASS_LABELS[task_class]}

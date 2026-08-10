@@ -7,16 +7,17 @@ from dataclasses import replace
 from time import perf_counter
 
 from ..domain.execution import Assignment, ExecutionMode
-from ..domain.task import resolved_placement_constraints
-from ..domain.topology import NodeKind
 from ..domain.transfer import TransferReservation
 from .base import (
+    CandidateMaterializationError,
     CandidateEstimate,
     OptimizerRegistry,
     PlannedResourceReservation,
     SchedulingPlan,
     SchedulingProblem,
     SolveStatus,
+    background_resource_demand,
+    execution_mode_for_candidate,
 )
 from .evaluation import candidate_objective_key
 
@@ -69,16 +70,21 @@ class HeuristicOptimizer:
                 ]
                 time_limit_reached = True
                 break
-            materialized = [
-                _materialize_candidate(
-                    problem,
-                    candidate,
-                    reservations_by_node,
-                    link_available,
-                )
-                for candidate in problem.candidates[task.task_id]
-                if candidate.feasible
-            ]
+            materialized = []
+            for candidate in problem.candidates[task.task_id]:
+                if not candidate.feasible:
+                    continue
+                try:
+                    materialized.append(
+                        _materialize_candidate(
+                            problem,
+                            candidate,
+                            reservations_by_node,
+                            link_available,
+                        )
+                    )
+                except CandidateMaterializationError:
+                    continue
             if not materialized:
                 assignments.append(
                     Assignment(
@@ -102,6 +108,8 @@ class HeuristicOptimizer:
                         ),
                         optimizer_id=self.optimizer_id,
                         epoch_id=problem.epoch.epoch_id,
+                        output_size_mb=0.0,
+                        success_probability=0.0,
                     )
                 )
                 continue
@@ -111,23 +119,6 @@ class HeuristicOptimizer:
                 task.task_id,
                 materialized,
             )
-            constraints = resolved_placement_constraints(task)
-            mode = (
-                ExecutionMode.LOCAL
-                if chosen.node_id == task.source_node_id
-                else ExecutionMode.EDGE
-                if chosen.node_kind is NodeKind.EDGE
-                else ExecutionMode.PEER
-                if chosen.node_kind is NodeKind.ROBOT
-                else ExecutionMode.CLOUD
-            )
-            if (
-                mode is ExecutionMode.LOCAL
-                and constraints.preferred_node_kinds
-                and NodeKind.ROBOT not in constraints.preferred_node_kinds
-            ):
-                mode = ExecutionMode.FALLBACK_LOCAL
-
             link_ids = tuple(
                 dict.fromkeys(
                     link_id
@@ -138,7 +129,7 @@ class HeuristicOptimizer:
             assignment = Assignment(
                 task_id=task.task_id,
                 target_node_id=chosen.node_id,
-                execution_mode=mode,
+                execution_mode=execution_mode_for_candidate(task, chosen),
                 estimated_start_ms=chosen.start_ms,
                 estimated_finish_ms=chosen.finish_ms,
                 compute_ms=chosen.compute_ms,
@@ -149,6 +140,8 @@ class HeuristicOptimizer:
                 transfer_link_ids=link_ids,
                 optimizer_id=self.optimizer_id,
                 epoch_id=problem.epoch.epoch_id,
+                output_size_mb=chosen.output_size_mb,
+                success_probability=chosen.success_probability,
             )
             assignments.append(assignment)
             node_reservations.append(
@@ -246,8 +239,11 @@ class HeuristicOptimizer:
 
 
 def built_in_registry() -> OptimizerRegistry:
+    from .binary_offload import BinaryOffloadOptimizer
+
     registry = OptimizerRegistry()
     registry.register(HeuristicOptimizer())
+    registry.register(BinaryOffloadOptimizer())
     return registry
 
 
@@ -346,6 +342,19 @@ def _earliest_resource_start(
     """Find the first interval that satisfies concurrency and capacity."""
 
     node = problem.node_by_id[candidate.node_id]
+    background = background_resource_demand(problem, candidate.node_id)
+    if (
+        background.cpu_units + candidate.resource_demand.cpu_units
+        > node.cpu_capacity + 1e-9
+        or background.gpu_units + candidate.resource_demand.gpu_units
+        > node.gpu_capacity + 1e-9
+        or background.memory_gb + candidate.resource_demand.memory_gb
+        > node.memory_gb + 1e-9
+    ):
+        raise CandidateMaterializationError(
+            f"candidate {candidate.task_id}:{candidate.node_id} exceeds "
+            "capacity after observed background load"
+        )
     duration_ms = candidate.compute_ms
     cursor = max(
         earliest_ms,
@@ -389,13 +398,16 @@ def _earliest_resource_start(
                 feasible = False
                 break
             if (
-                sum(item.demand.cpu_units for item in active)
+                background.cpu_units
+                + sum(item.demand.cpu_units for item in active)
                 + candidate.resource_demand.cpu_units
                 > node.cpu_capacity + 1e-9
-                or sum(item.demand.gpu_units for item in active)
+                or background.gpu_units
+                + sum(item.demand.gpu_units for item in active)
                 + candidate.resource_demand.gpu_units
                 > node.gpu_capacity + 1e-9
-                or sum(item.demand.memory_gb for item in active)
+                or background.memory_gb
+                + sum(item.demand.memory_gb for item in active)
                 + candidate.resource_demand.memory_gb
                 > node.memory_gb + 1e-9
             ):

@@ -15,7 +15,7 @@ from ..domain.artifact import (
     artifacts_from_bindings,
 )
 from ..domain.execution import Assignment, ExecutionMode
-from ..domain.task import TaskInstance
+from ..domain.task import TaskInstance, resolved_placement_constraints
 from ..domain.topology import (
     LinkSnapshot,
     LinkSpec,
@@ -76,6 +76,8 @@ class CandidateEstimate:
     input_locations: tuple[str, ...]
     transfers: tuple[TransferEstimate, ...] = ()
     reason: str = ""
+    output_size_mb: float = 0.0
+    success_probability: float = 1.0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -114,6 +116,20 @@ class CandidateEstimate:
         ) > 1e-6:
             raise ValueError(
                 "candidate communication estimate must equal its transfers"
+            )
+        if (
+            not math.isfinite(self.output_size_mb)
+            or self.output_size_mb < 0.0
+        ):
+            raise ValueError(
+                "candidate output_size_mb must be non-negative"
+            )
+        if (
+            not math.isfinite(self.success_probability)
+            or not 0.0 <= self.success_probability <= 1.0
+        ):
+            raise ValueError(
+                "candidate success_probability must be in [0, 1]"
             )
 
     @property
@@ -518,6 +534,179 @@ class SchedulingProblem:
         return {item.link_id: item for item in self.link_snapshots}
 
 
+@dataclass(frozen=True)
+class ResourceUtilization:
+    """Dimensionless CPU, GPU, and memory utilization at one instant."""
+
+    cpu: float
+    gpu: float
+    memory: float
+
+    def __post_init__(self) -> None:
+        values = (self.cpu, self.gpu, self.memory)
+        if not all(not math.isnan(value) and value >= 0.0 for value in values):
+            raise ValueError(
+                "resource utilization values must be non-negative"
+            )
+
+    @property
+    def maximum(self) -> float:
+        return max(self.cpu, self.gpu, self.memory)
+
+
+class CandidateMaterializationError(ValueError):
+    """A candidate cannot be placed under the captured resource state."""
+
+
+def execution_mode_for_candidate(
+    task: TaskInstance,
+    candidate: CandidateEstimate,
+) -> ExecutionMode:
+    """Map a selected one-hot placement to the canonical execution mode."""
+
+    if candidate.is_source:
+        preferred = resolved_placement_constraints(
+            task
+        ).preferred_node_kinds
+        if preferred and candidate.node_kind not in preferred:
+            return ExecutionMode.FALLBACK_LOCAL
+        return ExecutionMode.LOCAL
+    if candidate.node_kind is NodeKind.EDGE:
+        return ExecutionMode.EDGE
+    if candidate.node_kind is NodeKind.ROBOT:
+        return ExecutionMode.PEER
+    if candidate.node_kind is NodeKind.CLOUD:
+        return ExecutionMode.CLOUD
+    raise ValueError(
+        f"unsupported candidate node kind {candidate.node_kind!r}"
+    )
+
+
+def background_resource_demand(
+    problem: SchedulingProblem,
+    node_id: str,
+) -> ResourceDemand:
+    """Infer non-reserved load from a total observed node snapshot.
+
+    Heartbeats report total utilization, including reservations active at the
+    snapshot time. Subtracting those active reservations avoids double-counting
+    them when a proposed plan is evaluated over the same timeline.
+    """
+
+    node = problem.node_by_id[node_id]
+    snapshot = problem.snapshot_by_id[node_id]
+    now_ms = problem.epoch.now_ms
+    active_existing = tuple(
+        reservation
+        for reservation in problem.existing_node_reservations
+        if (
+            reservation.node_id == node_id
+            and reservation.start_ms <= now_ms < reservation.finish_ms
+        )
+    )
+    def infer_background(observed: float, reserved: float) -> float:
+        if observed + 1e-9 >= reserved:
+            return max(0.0, observed - reserved)
+        # A stale/planned reservation may not yet be visible in the heartbeat.
+        # Treat the observation as external load instead of erasing it.
+        return observed
+
+    return ResourceDemand(
+        cpu_units=infer_background(
+            snapshot.cpu_util * node.cpu_capacity,
+            sum(item.demand.cpu_units for item in active_existing),
+        ),
+        gpu_units=infer_background(
+            snapshot.gpu_util * node.gpu_capacity,
+            sum(item.demand.gpu_units for item in active_existing),
+        ),
+        memory_gb=infer_background(
+            snapshot.memory_util * node.memory_gb,
+            sum(item.demand.memory_gb for item in active_existing),
+        ),
+    )
+
+
+def node_resource_utilization(
+    problem: SchedulingProblem,
+    node_id: str,
+    planned_reservations: tuple[PlannedResourceReservation, ...],
+    at_ms: float,
+) -> ResourceUtilization:
+    """Evaluate total background plus reserved utilization at ``at_ms``."""
+
+    node = problem.node_by_id[node_id]
+    background = background_resource_demand(problem, node_id)
+    active = tuple(
+        reservation
+        for reservation in (
+            *problem.existing_node_reservations,
+            *planned_reservations,
+        )
+        if (
+            reservation.node_id == node_id
+            and reservation.start_ms <= at_ms < reservation.finish_ms
+        )
+    )
+    cpu_units = background.cpu_units + sum(
+        item.demand.cpu_units for item in active
+    )
+    gpu_units = background.gpu_units + sum(
+        item.demand.gpu_units for item in active
+    )
+    memory_gb = background.memory_gb + sum(
+        item.demand.memory_gb for item in active
+    )
+    return ResourceUtilization(
+        cpu=cpu_units / node.cpu_capacity,
+        gpu=(
+            gpu_units / node.gpu_capacity
+            if node.gpu_capacity > 0.0
+            else 0.0 if gpu_units <= 1e-9 else math.inf
+        ),
+        memory=memory_gb / node.memory_gb,
+    )
+
+
+def maximum_resource_utilization(
+    problem: SchedulingProblem,
+    planned_reservations: tuple[PlannedResourceReservation, ...] = (),
+) -> float:
+    """Return peak CPU/GPU/memory utilization over half-open intervals."""
+
+    now_ms = problem.epoch.now_ms
+    reservations = (
+        *problem.existing_node_reservations,
+        *planned_reservations,
+    )
+    peak = 0.0
+    for node in problem.node_specs:
+        boundaries = {
+            now_ms,
+            *(
+                point
+                for reservation in reservations
+                if reservation.node_id == node.node_id
+                for point in (
+                    max(now_ms, reservation.start_ms),
+                    reservation.finish_ms,
+                )
+                if point >= now_ms
+            ),
+        }
+        for point in boundaries:
+            peak = max(
+                peak,
+                node_resource_utilization(
+                    problem,
+                    node.node_id,
+                    planned_reservations,
+                    point,
+                ).maximum,
+            )
+    return peak
+
+
 class SolveStatus(str, enum.Enum):
     FEASIBLE = "feasible"
     OPTIMAL = "optimal"
@@ -765,6 +954,8 @@ def validate_plan(
             assignment.compute_ms,
             assignment.communication_ms,
             assignment.energy_j,
+            assignment.output_size_mb,
+            assignment.success_probability,
         )
         if (
             not all(math.isfinite(value) for value in numeric_estimates)
@@ -825,6 +1016,25 @@ def validate_plan(
                 f"task {assignment.task_id} energy estimate does not "
                 "match its candidate"
             )
+        if (
+            abs(assignment.output_size_mb - candidate.output_size_mb)
+            > 1e-6
+        ):
+            raise PlanValidationError(
+                f"task {assignment.task_id} output size does not "
+                "match its candidate"
+            )
+        if (
+            abs(
+                assignment.success_probability
+                - candidate.success_probability
+            )
+            > 1e-9
+        ):
+            raise PlanValidationError(
+                f"task {assignment.task_id} success probability does not "
+                "match its candidate"
+            )
         if assignment.input_locations != candidate.input_locations:
             raise PlanValidationError(
                 f"task {assignment.task_id} input locations do not "
@@ -843,6 +1053,22 @@ def validate_plan(
             raise PlanValidationError(
                 f"task {assignment.task_id} execution mode does not "
                 "match its selected node"
+            )
+
+    energy_by_node: dict[str, float] = defaultdict(float)
+    for assignment in plan.assignments:
+        if assignment.execution_mode is not ExecutionMode.DROP:
+            energy_by_node[assignment.target_node_id] += assignment.energy_j
+    for node_id, requested_energy in energy_by_node.items():
+        remaining_energy = problem.snapshot_by_id[
+            node_id
+        ].remaining_energy_j
+        if (
+            remaining_energy is not None
+            and requested_energy > remaining_energy + 1e-9
+        ):
+            raise PlanValidationError(
+                f"node {node_id} assignments exceed remaining energy"
             )
 
     reservations_by_task: dict[str, list[PlannedResourceReservation]] = (
@@ -911,11 +1137,6 @@ def validate_plan(
             )
 
     node_by_id = problem.node_by_id
-    existing_by_node: dict[
-        str, list[PlannedResourceReservation]
-    ] = defaultdict(list)
-    for reservation in problem.existing_node_reservations:
-        existing_by_node[reservation.node_id].append(reservation)
     if set(reservation_ids) & {
         item.reservation_id
         for item in problem.existing_node_reservations
@@ -923,18 +1144,19 @@ def validate_plan(
         raise PlanValidationError(
             "new and existing resource reservation ids must be distinct"
         )
-    for node_id in set(existing_by_node) | set(reservations_by_node):
+    for node_id in {
+        *(item.node_id for item in problem.existing_node_reservations),
+        *reservations_by_node,
+    }:
         node = node_by_id.get(node_id)
         if node is None:
             raise PlanValidationError(
                 f"reservation references unknown node {node_id}"
             )
         _validate_node_capacity(
+            problem,
             node,
-            [
-                *existing_by_node[node_id],
-                *reservations_by_node[node_id],
-            ],
+            reservations_by_node[node_id],
         )
 
     _validate_transfer_reservations(
@@ -1004,29 +1226,60 @@ def validate_plan(
 
 
 def _validate_node_capacity(
+    problem: SchedulingProblem,
     node: NodeSpec,
     reservations: list[PlannedResourceReservation],
 ) -> None:
+    all_reservations = [
+        *(
+            item
+            for item in problem.existing_node_reservations
+            if item.node_id == node.node_id
+        ),
+        *reservations,
+    ]
+    now_ms = problem.epoch.now_ms
     boundaries = sorted(
         {
-            point
-            for reservation in reservations
-            for point in (reservation.start_ms, reservation.finish_ms)
+            now_ms,
+            *(
+                point
+                for reservation in all_reservations
+                for point in (
+                    max(now_ms, reservation.start_ms),
+                    reservation.finish_ms,
+                )
+                if point >= now_ms
+            ),
         }
     )
+    background = background_resource_demand(problem, node.node_id)
     for point in boundaries:
+        if not any(
+            item.start_ms <= point < item.finish_ms
+            for item in reservations
+        ):
+            # Carry-in is immutable input. A fresh plan is responsible only
+            # for intervals in which it adds capacity demand.
+            continue
         active = [
             item
-            for item in reservations
+            for item in all_reservations
             if item.start_ms <= point < item.finish_ms
         ]
         if len(active) > node.max_concurrency:
             raise PlanValidationError(
                 f"node {node.node_id} exceeds max_concurrency at {point}"
             )
-        cpu = sum(item.demand.cpu_units for item in active)
-        gpu = sum(item.demand.gpu_units for item in active)
-        memory = sum(item.demand.memory_gb for item in active)
+        cpu = background.cpu_units + sum(
+            item.demand.cpu_units for item in active
+        )
+        gpu = background.gpu_units + sum(
+            item.demand.gpu_units for item in active
+        )
+        memory = background.memory_gb + sum(
+            item.demand.memory_gb for item in active
+        )
         if cpu > node.cpu_capacity + 1e-9:
             raise PlanValidationError(
                 f"node {node.node_id} exceeds CPU capacity at {point}"

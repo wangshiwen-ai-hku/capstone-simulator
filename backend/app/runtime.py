@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Lock
 from uuid import uuid4
 
 from mars.coordinator import CentralCoordinator, CoordinatorReport
 from mars.domain.topology import LinkSnapshot
+from mars.optimizers import OptimizerRegistry
 from mars.runtime import InProcessRuntime
+from mars.workflow_metrics import evaluate_workflow_metrics
 
 from .mars_adapter import (
     build_link_snapshots,
@@ -21,6 +23,7 @@ from .mars_adapter import (
 )
 from .scene_generator import build_deterministic_scene
 from .schemas import GenerateSceneRequest, RuntimeWorkflowRequest
+from .scheduling import SchedulingConfiguration, configure_scheduling
 
 
 @dataclass
@@ -66,7 +69,16 @@ class LocalRuntimeService:
 
     def submit(self, request: RuntimeWorkflowRequest) -> dict[str, object]:
         _validate_runtime_topology(request)
-        coordinator = coordinator_for_scene(request.scene)
+        scheduling = configure_scheduling(
+            request.algorithm,
+            request.optimizer_options,
+            legacy_beta=request.model_dump(include={"beta"}).get("beta"),
+        )
+        coordinator = coordinator_for_scene(
+            request.scene,
+            optimizer_registry=scheduling.registry,
+            fallback_optimizer=scheduling.fallback_optimizer,
+        )
         workflow = build_workflow(request.scene)
         failure_ids: tuple[str, ...] = ()
         if request.inject_first_failure:
@@ -96,6 +108,7 @@ class LocalRuntimeService:
                 workflow,
                 request,
                 failure_ids,
+                scheduling,
             )
         return {
             "run_id": run_id,
@@ -110,18 +123,37 @@ class LocalRuntimeService:
         workflow,
         request: RuntimeWorkflowRequest,
         failure_ids: tuple[str, ...],
+        scheduling: SchedulingConfiguration,
     ) -> CoordinatorReport:
         with self._lock:
             run = self._runs[run_id]
             run.status = "running"
             self._coordinator = coordinator
-        return coordinator.run(
+        report = coordinator.run(
             workflow,
             algorithm=request.algorithm,
             seed=request.seed,
             max_attempts=request.max_attempts,
             fail_first_task_ids=failure_ids,
             deterministic=request.deterministic,
+        )
+        metrics = evaluate_workflow_metrics(
+            report.task_results,
+            workflow,
+            build_node_specs(request.scene),
+            build_node_snapshots(request.scene),
+            coordinator.profile_catalog,
+            weights=scheduling.evaluation_weights,
+        )
+        return replace(
+            report,
+            metrics={**report.metrics, **metrics},
+            workflow={
+                **report.workflow,
+                "requested_algorithm": request.algorithm,
+                "optimizer_options": dict(scheduling.optimizer_options),
+                "metric_schema_version": "mars.workflow-metrics.v1",
+            },
         )
 
     def get_run(self, run_id: str) -> dict[str, object] | None:
@@ -226,6 +258,8 @@ def coordinator_for_scene(
     execution_noise: float = 0.04,
     respect_expected_accuracy: bool = False,
     link_snapshots: tuple[LinkSnapshot, ...] | None = None,
+    optimizer_registry: OptimizerRegistry | None = None,
+    fallback_optimizer: str | None = "heuristic",
 ) -> CentralCoordinator:
     """Build a CentralCoordinator with its RuntimePort implementation."""
 
@@ -241,6 +275,8 @@ def coordinator_for_scene(
             if link_snapshots is None
             else link_snapshots
         ),
+        optimizer_registry=optimizer_registry,
+        fallback_optimizer=fallback_optimizer,
     )
 
 def _validate_runtime_topology(request: RuntimeWorkflowRequest) -> None:

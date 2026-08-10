@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
+import math
 
 from .artifact import ArtifactRef
 from .task import TaskInstance, TaskState
@@ -53,6 +54,8 @@ class Assignment:
     transfer_link_ids: tuple[str, ...] = ()
     optimizer_id: str = ""
     epoch_id: str = ""
+    output_size_mb: float = 0.0
+    success_probability: float = 1.0
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -65,6 +68,18 @@ class Assignment:
             "transfer_link_ids",
             tuple(self.transfer_link_ids),
         )
+        if (
+            not math.isfinite(self.output_size_mb)
+            or self.output_size_mb < 0.0
+        ):
+            raise ValueError("assignment output_size_mb must be non-negative")
+        if (
+            not math.isfinite(self.success_probability)
+            or not 0.0 <= self.success_probability <= 1.0
+        ):
+            raise ValueError(
+                "assignment success_probability must be in [0, 1]"
+            )
 
 
 @dataclass(frozen=True)

@@ -168,6 +168,15 @@ def build_node_snapshots(scene: BenchmarkScene) -> list[NodeSnapshot]:
                 power_w=resource.power_w,
                 network_latency_ms=resource.network_latency_ms,
                 online=resource.online,
+                remaining_energy_j=(
+                    resource.remaining_energy_j
+                    if resource.remaining_energy_j is not None
+                    else (
+                        node.battery_wh * 3600.0
+                        if node.battery_wh is not None
+                        else None
+                    )
+                ),
             )
         )
     return out

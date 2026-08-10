@@ -368,9 +368,11 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             kind="robot",
             display_name=f"Jetson Orin Robot {i+1}",
             architecture="jetson-orin",
-            cpu_capacity=1.0,
+            # Resource profiles express CPU demand in cores.  Keep node
+            # capacity in the same unit so feasibility is target-specific.
+            cpu_capacity=8.0,
             gpu_capacity=1.0,
-            memory_gb=16,
+            memory_gb=32,
             bandwidth_mbps=rng.uniform(40, 120) / factor,
             base_latency_ms=rng.uniform(6, 22) * factor,
             battery_wh=rng.uniform(50, 120),
@@ -395,7 +397,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             kind="edge",
             display_name=f"Edge GPU Agent {i+1}",
             architecture="x86_64-cuda",
-            cpu_capacity=5.0,
+            cpu_capacity=16.0,
             gpu_capacity=4.0,
             memory_gb=64,
             bandwidth_mbps=rng.uniform(500, 1200) / (0.7 + factor * 0.3),

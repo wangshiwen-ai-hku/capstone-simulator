@@ -127,10 +127,18 @@ class MarsAdapterValidationTests(unittest.TestCase):
         }
         robot_id = next(node.id for node in self.scene.nodes if node.kind == "robot")
         self.assertEqual(specs[robot_id].architecture, "jetson-orin")
-        self.assertEqual(specs[robot_id].memory_gb, 16)
+        self.assertEqual(specs[robot_id].cpu_capacity, 8)
+        self.assertEqual(specs[robot_id].memory_gb, 32)
         self.assertEqual(
             snapshots[robot_id].network_latency_ms,
             next(item.network_latency_ms for item in self.scene.initial_resources if item.node_id == robot_id),
+        )
+        battery_wh = next(
+            node.battery_wh for node in self.scene.nodes if node.id == robot_id
+        )
+        self.assertEqual(
+            snapshots[robot_id].remaining_energy_j,
+            battery_wh * 3600.0,
         )
 
     def test_generated_localization_output_fans_out_to_multiple_consumers(self):

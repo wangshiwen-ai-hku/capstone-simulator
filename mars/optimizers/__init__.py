@@ -1,24 +1,34 @@
 """Public optimizer API for MARS."""
 
 from .base import (
+    CandidateMaterializationError,
     CandidateEstimate,
     Optimizer,
     OptimizerRegistry,
     PlannedResourceReservation,
     PlanValidationError,
     ResourceDemand,
+    ResourceUtilization,
     SchedulingEpoch,
     SchedulingPlan,
     SchedulingProblem,
     SchedulingSnapshot,
     SolveStatus,
+    background_resource_demand,
+    execution_mode_for_candidate,
+    maximum_resource_utilization,
+    node_resource_utilization,
     validate_plan,
 )
+from .binary_offload import BinaryOffloadOptimizer
 from .evaluation import (
     candidate_objective_key,
     evaluate_constraints,
     evaluate_objectives,
+    expected_weighted_success_ratio,
+    normalized_communication_ratio,
     objective_key,
+    plan_normalized_communication_ratio,
 )
 from .heuristics import HeuristicOptimizer, built_in_registry
 from .policy import (
@@ -33,11 +43,14 @@ from .policy import (
     SchedulingPolicy,
     SolveLimits,
     algorithm_aliases,
+    binary_offload_policy,
     built_in_policy,
     built_in_policy_ids,
 )
 
 __all__ = [
+    "BinaryOffloadOptimizer",
+    "CandidateMaterializationError",
     "CandidateEstimate",
     "ConstraintEvaluation",
     "ConstraintRelation",
@@ -53,6 +66,7 @@ __all__ = [
     "PlannedResourceReservation",
     "PlanValidationError",
     "ResourceDemand",
+    "ResourceUtilization",
     "SchedulingEpoch",
     "SchedulingPlan",
     "SchedulingPolicy",
@@ -61,12 +75,20 @@ __all__ = [
     "SolveLimits",
     "SolveStatus",
     "algorithm_aliases",
+    "background_resource_demand",
+    "binary_offload_policy",
     "built_in_registry",
     "built_in_policy",
     "built_in_policy_ids",
     "candidate_objective_key",
     "evaluate_constraints",
     "evaluate_objectives",
+    "expected_weighted_success_ratio",
+    "execution_mode_for_candidate",
+    "maximum_resource_utilization",
+    "node_resource_utilization",
+    "normalized_communication_ratio",
     "objective_key",
+    "plan_normalized_communication_ratio",
     "validate_plan",
 ]

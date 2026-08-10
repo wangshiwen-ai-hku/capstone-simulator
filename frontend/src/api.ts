@@ -1,8 +1,10 @@
 import type {
   Algorithm,
+  ArchitectureResponse,
   BenchmarkScene,
   GenerateSceneRequest,
   RuntimeWorkflowRun,
+  SchedulerRunOptions,
   SimulationResponse,
 } from './types';
 
@@ -31,6 +33,10 @@ export function health() {
   }>('/api/health');
 }
 
+export function getArchitecture() {
+  return request<ArchitectureResponse>('/api/architecture');
+}
+
 export function generateScene(payload: GenerateSceneRequest) {
   return request<BenchmarkScene>('/api/generate-scene', {
     method: 'POST',
@@ -38,7 +44,13 @@ export function generateScene(payload: GenerateSceneRequest) {
   });
 }
 
-export function simulate(scene: BenchmarkScene, algorithm: Algorithm, seed: number) {
+export function simulate(
+  scene: BenchmarkScene,
+  algorithm: Algorithm,
+  seed: number,
+  options: SchedulerRunOptions = {},
+) {
+  const optimizerOptions = serializedOptimizerOptions(algorithm, options);
   return request<SimulationResponse>('/api/simulate', {
     method: 'POST',
     body: JSON.stringify({
@@ -47,6 +59,7 @@ export function simulate(scene: BenchmarkScene, algorithm: Algorithm, seed: numb
       network_jitter: 0.12,
       resource_noise: 0.05,
       seed,
+      ...(optimizerOptions ? { optimizer_options: optimizerOptions } : {}),
     }),
   });
 }
@@ -55,7 +68,9 @@ export function submitRuntimeWorkflow(
   scene: BenchmarkScene,
   algorithm: Algorithm,
   seed: number,
+  options: SchedulerRunOptions = {},
 ) {
+  const optimizerOptions = serializedOptimizerOptions(algorithm, options);
   return request<{ run_id: string; workflow_id: string; status: string }>(
     '/api/runtime/workflows',
     {
@@ -64,6 +79,7 @@ export function submitRuntimeWorkflow(
         scene,
         algorithm,
         seed,
+        ...(optimizerOptions ? { optimizer_options: optimizerOptions } : {}),
         max_attempts: 2,
         inject_first_failure: false,
         deterministic: true,
@@ -74,4 +90,17 @@ export function submitRuntimeWorkflow(
 
 export function getRuntimeWorkflow(runId: string) {
   return request<RuntimeWorkflowRun>(`/api/runtime/workflows/${runId}`);
+}
+
+function serializedOptimizerOptions(
+  algorithm: Algorithm,
+  options: SchedulerRunOptions,
+) {
+  if (algorithm !== 'binary_offload' || options.communicationWeight === undefined) {
+    return undefined;
+  }
+  if (!Number.isFinite(options.communicationWeight)) {
+    throw new RangeError('Communication weight must be a finite number.');
+  }
+  return { communication_weight: options.communicationWeight };
 }

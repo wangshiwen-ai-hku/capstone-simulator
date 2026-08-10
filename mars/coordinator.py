@@ -7,6 +7,7 @@ import heapq
 from collections import Counter
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
+from random import SystemRandom
 from typing import Iterable
 
 from .dag import TaskManager, resolve_task_input_bindings
@@ -24,19 +25,20 @@ from .domain.task import (
 from .domain.topology import (
     LinkSnapshot,
     LinkSpec,
-    NodeKind,
     NodeSpec,
 )
 from .domain.transfer import TransferReservation
 from .domain.workflow import FailurePolicy, WorkflowSpec
 from .network import synthesize_legacy_full_mesh
 from .optimizers import (
+    Optimizer,
     OptimizerRegistry,
     PlannedResourceReservation,
     SchedulingEpoch,
     SchedulingPlan,
+    SolveLimits,
 )
-from .profiling import ExecutionProfile, ProfileCatalog
+from .profiling import ProfileCatalog, profile_catalog_from_workloads
 from .runtime import (
     AttemptCompletion,
     DispatchAck,
@@ -46,15 +48,9 @@ from .runtime import (
 )
 from .scheduler import critical_path, plan_scheduling_epoch
 from .synthetic_workloads import (
-    ExecutionTarget,
-    SyntheticSampler,
     SyntheticWorkloadCatalog,
-    UnsupportedTargetError,
     load_default_synthetic_workloads,
 )
-
-_PENDING_COMPLETION_HORIZON_MS = 1_000_000_000_000.0
-
 
 @dataclass(frozen=True)
 class RuntimeEvent:
@@ -118,6 +114,7 @@ class _ActiveAttempt:
     input_bindings: tuple[InputArtifactBinding, ...]
     dispatch_id: str
     completion_future: asyncio.Task[AttemptCompletion]
+    completion_watermark_ms: float | None = None
     injected_error_code: str = ""
 
     @property
@@ -137,6 +134,7 @@ class CentralCoordinator:
         link_specs: Iterable[LinkSpec] | None = None,
         link_snapshots: Iterable[LinkSnapshot] | None = None,
         optimizer_registry: OptimizerRegistry | None = None,
+        fallback_optimizer: str | Optimizer | None = "heuristic",
     ) -> None:
         if not isinstance(runtime, RuntimePort):
             raise TypeError("runtime must implement RuntimePort")
@@ -151,7 +149,7 @@ class CentralCoordinator:
         self.profile_catalog = (
             profile_catalog
             if profile_catalog is not None
-            else _profile_catalog(self.workload_catalog)
+            else profile_catalog_from_workloads(self.workload_catalog)
         )
         self._configured_link_specs = (
             None if link_specs is None else tuple(link_specs)
@@ -160,6 +158,7 @@ class CentralCoordinator:
             None if link_snapshots is None else tuple(link_snapshots)
         )
         self.optimizer_registry = optimizer_registry
+        self.fallback_optimizer = fallback_optimizer
         self._events: list[RuntimeEvent] = []
         self._sequence = 0
         self._started = False
@@ -228,6 +227,8 @@ class CentralCoordinator:
 
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least one")
+        if seed < 0:
+            raise ValueError("seed must be non-negative")
         if self._run_started:
             raise RuntimeError(
                 "CentralCoordinator is one-shot; create a new instance per workflow run"
@@ -239,6 +240,15 @@ class CentralCoordinator:
 
         current_time_ms = 0.0
         failed_once = frozenset(fail_first_task_ids)
+        execution_seed = (
+            seed
+            if deterministic
+            else SystemRandom().randrange(0, 2**63)
+        )
+        solve_limits = SolveLimits(
+            deterministic=deterministic,
+            random_seed=execution_seed,
+        )
         if self._started:
             inventory = await self.runtime.inventory(current_time_ms)
         else:
@@ -284,11 +294,6 @@ class CentralCoordinator:
                 self._configured_link_snapshots or ()
             )
         profiles = self.profile_catalog
-        sampler = SyntheticSampler(
-            self.workload_catalog,
-            seed=seed,
-            deterministic=deterministic,
-        )
 
         node_specs = {node.node_id: node for node in inventory.nodes}
         completion_time: dict[str, float] = {}
@@ -321,6 +326,13 @@ class CentralCoordinator:
         transfer_time_ms = 0.0
         total_energy_j = 0.0
         retry_successes = 0
+        total_solver_time_ms = 0.0
+        max_solver_time_ms = 0.0
+        optimizer_counts: Counter[str] = Counter()
+        policy_counts: Counter[str] = Counter()
+        solve_status_counts: Counter[str] = Counter()
+        termination_reason_counts: Counter[str] = Counter()
+        fallback_count = 0
 
         self._emit(
             current_time_ms,
@@ -357,6 +369,8 @@ class CentralCoordinator:
             dict[str, float],
         ]:
             nonlocal epoch_sequence, inventory, node_specs
+            nonlocal total_solver_time_ms, max_solver_time_ms
+            nonlocal fallback_count
             inventory = await self.runtime.inventory(current_time_ms)
             node_specs = {
                 node.node_id: node for node in inventory.nodes
@@ -384,29 +398,15 @@ class CentralCoordinator:
                 )
                 for task in tasks
             }
-            pending_attempt_ids = {
+            active_attempt_ids = {
                 active.attempt_id
                 for active in active_by_dispatch.values()
-                if not active.completion_future.done()
             }
             carry_in = tuple(
-                replace(
-                    reservation,
-                    finish_ms=max(
-                        reservation.finish_ms,
-                        current_time_ms
-                        + _PENDING_COMPLETION_HORIZON_MS,
-                    ),
-                )
-                if attempt_id in pending_attempt_ids
-                else reservation
+                reservation
                 for attempt_id, reservation
                 in active_resource_reservations.items()
-                if (
-                    attempt_id in pending_attempt_ids
-                    or reservation.finish_ms
-                    > current_time_ms + 1e-9
-                )
+                if attempt_id in active_attempt_ids
             )
             plan = plan_scheduling_epoch(
                 epoch,
@@ -429,8 +429,23 @@ class CentralCoordinator:
                 },
                 profiles=profiles,
                 excluded_node_ids=excluded_node_ids,
+                solve_limits=solve_limits,
                 registry=self.optimizer_registry,
+                fallback_optimizer=self.fallback_optimizer,
             )
+            total_solver_time_ms += plan.solve_elapsed_ms
+            max_solver_time_ms = max(
+                max_solver_time_ms,
+                plan.solve_elapsed_ms,
+            )
+            optimizer_counts[plan.optimizer_id] += 1
+            policy_counts[plan.policy_id] += 1
+            solve_status_counts[plan.solve_status.value] += 1
+            termination_reason_counts[
+                plan.termination_reason or "unspecified"
+            ] += 1
+            if "fallback_optimizer" in plan.diagnostics:
+                fallback_count += 1
             if not plan.assignments:
                 raise RuntimeError(
                     "optimizer deferred every ready task; the runtime "
@@ -557,23 +572,7 @@ class CentralCoordinator:
                 )
                 return
 
-            sampled_failure = False
             injected_error_code = ""
-            try:
-                target = (
-                    ExecutionTarget.EDGE
-                    if node_specs[assignment.target_node_id].kind
-                    is NodeKind.EDGE
-                    else ExecutionTarget.ORIN
-                )
-                sample = sampler.sample(task.spec.task_type, target)
-                sampled_failure = sample.failed
-                if sampled_failure:
-                    injected_error_code = (
-                        "synthetic_profile_failure"
-                    )
-            except (KeyError, UnsupportedTargetError):
-                pass
             injected_failure = (
                 attempt_no == 1
                 and task.task_id in failed_once
@@ -607,10 +606,8 @@ class CentralCoordinator:
                         snapshot_id=plan.snapshot_id,
                         policy_id=plan.policy_id,
                         policy_version=plan.policy_version,
-                        seed=seed,
-                        inject_failure=(
-                            injected_failure or sampled_failure
-                        ),
+                        seed=execution_seed,
+                        inject_failure=injected_failure,
                     )
                 )
             except BaseException:
@@ -689,6 +686,9 @@ class CentralCoordinator:
                     attempt_id=attempt_id,
                     task_id=task.task_id,
                     agent_id=assignment.target_node_id,
+                    require_schedule=(
+                        self.runtime.capabilities.virtual_time
+                    ),
                 )
             except BaseException:
                 await _best_effort_cancel(
@@ -708,21 +708,30 @@ class CentralCoordinator:
             completion_future = asyncio.create_task(
                 self.runtime.receive_completion(ack.dispatch_id)
             )
+            committed_reservation = resource_reservation
+            if ack.scheduled_start_ms is not None:
+                assert ack.scheduled_finish_ms is not None
+                committed_reservation = replace(
+                    resource_reservation,
+                    start_ms=ack.scheduled_start_ms,
+                    finish_ms=ack.scheduled_finish_ms,
+                )
             active = _ActiveAttempt(
                 task=task,
                 attempt_id=attempt_id,
                 attempt_no=attempt_no,
                 assignment=assignment,
-                resource_reservation=resource_reservation,
+                resource_reservation=committed_reservation,
                 transfer_reservations=transfer_reservations,
                 input_bindings=input_bindings,
                 dispatch_id=ack.dispatch_id,
                 completion_future=completion_future,
+                completion_watermark_ms=ack.scheduled_finish_ms,
                 injected_error_code=injected_error_code,
             )
             active_by_dispatch[ack.dispatch_id] = active
             active_resource_reservations[attempt_id] = (
-                resource_reservation
+                committed_reservation
             )
             self._emit(
                 current_time_ms,
@@ -755,6 +764,14 @@ class CentralCoordinator:
                         attempt_id=active.attempt_id,
                         task_id=active.task.task_id,
                         agent_id=active.assignment.target_node_id,
+                        expected_start_ms=(
+                            active.resource_reservation.start_ms
+                            if active.completion_watermark_ms is not None
+                            else None
+                        ),
+                        expected_finish_ms=(
+                            active.completion_watermark_ms
+                        ),
                     )
                 except BaseException:
                     raise
@@ -776,6 +793,24 @@ class CentralCoordinator:
                         completion,
                     ),
                 )
+
+        def unresolved_completion_watermark_ms() -> float:
+            """Earliest event time that an unreceived virtual result may hold."""
+
+            if not self.runtime.capabilities.virtual_time:
+                return float("inf")
+            return min(
+                (
+                    active.completion_watermark_ms
+                    for dispatch_id, active
+                    in active_by_dispatch.items()
+                    if (
+                        dispatch_id not in queued_completions
+                        and active.completion_watermark_ms is not None
+                    )
+                ),
+                default=float("inf"),
+            )
 
         def process_completion(
             dispatch_id: str,
@@ -966,10 +1001,18 @@ class CentralCoordinator:
                     await harvest_completions()
 
                 processed_completion = False
+                completion_watermark_ms = (
+                    unresolved_completion_watermark_ms()
+                )
                 while (
                     completion_heap
                     and completion_heap[0][0]
                     <= current_time_ms + 1e-9
+                    and (
+                        completion_watermark_ms == float("inf")
+                        or completion_heap[0][0]
+                        < completion_watermark_ms - 1e-9
+                    )
                 ):
                     (
                         _,
@@ -1073,37 +1116,55 @@ class CentralCoordinator:
                     if completion_heap
                     else float("inf")
                 )
-                if next_completion_ms <= next_arrival_ms:
-                    if next_completion_ms != float("inf"):
-                        current_time_ms = max(
-                            current_time_ms,
-                            next_completion_ms,
-                        )
-                        continue
-                elif next_arrival_ms != float("inf"):
+                completion_watermark_ms = (
+                    unresolved_completion_watermark_ms()
+                )
+                next_available_event_ms = min(
+                    next_completion_ms,
+                    next_arrival_ms,
+                )
+                if (
+                    next_available_event_ms != float("inf")
+                    and (
+                        completion_watermark_ms == float("inf")
+                        or next_available_event_ms
+                        < completion_watermark_ms - 1e-9
+                    )
+                ):
                     current_time_ms = max(
                         current_time_ms,
-                        next_arrival_ms,
+                        next_available_event_ms,
                     )
                     continue
 
-                pending_receivers = [
-                    active.completion_future
+                pending_receiver_items = [
+                    active
                     for dispatch_id, active
                     in active_by_dispatch.items()
                     if dispatch_id not in queued_completions
                 ]
-                if pending_receivers:
+                if pending_receiver_items:
+                    if completion_watermark_ms != float("inf"):
+                        pending_receiver_items = [
+                            active
+                            for active in pending_receiver_items
+                            if (
+                                active.completion_watermark_ms is not None
+                                and abs(
+                                    active.completion_watermark_ms
+                                    - completion_watermark_ms
+                                )
+                                <= 1e-9
+                            )
+                        ]
                     await asyncio.wait(
-                        pending_receivers,
+                        [
+                            active.completion_future
+                            for active in pending_receiver_items
+                        ],
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     await harvest_completions()
-                    if completion_heap:
-                        current_time_ms = max(
-                            current_time_ms,
-                            completion_heap[0][0],
-                        )
                     continue
                 raise RuntimeError(
                     "workflow is unresolved but has neither ready "
@@ -1159,6 +1220,33 @@ class CentralCoordinator:
             for items in attempts_by_task.values()
         )
         succeeded = states[TaskState.SUCCEEDED.value]
+        skipped = states[TaskState.SKIPPED.value]
+        deadline_missed_by_task = {
+            task_id: bool(
+                attempts_by_task[task_id]
+                and (
+                    attempts_by_task[task_id][-1].finish_time_ms
+                    > manager.get(task_id).deadline_time_ms
+                    or manager.state_of(task_id) is TaskState.TIMEOUT
+                )
+            )
+            for task_id in index.topological_order
+        }
+        executed_task_ids = {
+            task_id
+            for task_id, attempts in attempts_by_task.items()
+            if any(attempt.compute_time_ms > 0.0 for attempt in attempts)
+        }
+        deadline_misses = sum(deadline_missed_by_task.values())
+        executed_deadline_misses = sum(
+            deadline_missed_by_task[task_id]
+            for task_id in executed_task_ids
+        )
+        required_tasks_on_time = sum(
+            manager.state_of(task_id) is TaskState.SUCCEEDED
+            and not deadline_missed_by_task[task_id]
+            for task_id in index.topological_order
+        )
         offloaded = sum(
             item["mode"] == ExecutionMode.EDGE.value
             for item in task_results
@@ -1179,12 +1267,35 @@ class CentralCoordinator:
                 succeeded / max(1, len(task_results)),
                 4,
             ),
+            # Keep the legacy all-task rate for API compatibility. The two
+            # explicit metrics below avoid making skipped work look timely.
+            "deadline_miss_rate": round(
+                deadline_misses / max(1, len(task_results)),
+                4,
+            ),
+            "executed_deadline_miss_rate": round(
+                executed_deadline_misses
+                / max(1, len(executed_task_ids)),
+                4,
+            ),
+            "required_task_on_time_rate": round(
+                required_tasks_on_time / max(1, len(task_results)),
+                4,
+            ),
+            "skipped_task_count": skipped,
             "attempt_count": attempt_count,
             "retry_count": retry_count,
             "retry_success_count": retry_successes,
             "transferred_mb": round(transferred_mb, 6),
             "transfer_time_ms": round(transfer_time_ms, 4),
             "total_energy_j": round(total_energy_j, 6),
+            "total_solver_time_ms": round(
+                total_solver_time_ms,
+                6,
+            ),
+            "max_solver_time_ms": round(max_solver_time_ms, 6),
+            "scheduling_epoch_count": epoch_sequence,
+            "fallback_count": fallback_count,
             "makespan_ms": round(makespan_ms, 4),
             "edge_offload_ratio": round(
                 offloaded / max(1, len(task_results)),
@@ -1208,6 +1319,25 @@ class CentralCoordinator:
                 "critical_path": list(critical_ids),
                 "topological_order": list(index.topological_order),
                 "levels": index.levels,
+                "scheduling": {
+                    "requested_algorithm": algorithm,
+                    "effective_optimizers": dict(optimizer_counts),
+                    "effective_policies": dict(policy_counts),
+                    "solve_statuses": dict(solve_status_counts),
+                    "termination_reasons": dict(
+                        termination_reason_counts
+                    ),
+                    "fallback_count": fallback_count,
+                    "requested_seed": seed,
+                    "deterministic": deterministic,
+                    "execution_seed": execution_seed,
+                    "solve_limits": {
+                        "solve_budget_ms": solve_limits.solve_budget_ms,
+                        "max_iterations": solve_limits.max_iterations,
+                        "deterministic": solve_limits.deterministic,
+                        "random_seed": solve_limits.random_seed,
+                    },
+                },
             },
             metrics=metrics,
             task_results=tuple(task_results),
@@ -1288,6 +1418,7 @@ def _validate_dispatch_ack(
     attempt_id: str,
     task_id: str,
     agent_id: str,
+    require_schedule: bool = False,
 ) -> None:
     expected = (attempt_id, task_id, agent_id)
     actual = (ack.attempt_id, ack.task_id, ack.agent_id)
@@ -1295,6 +1426,10 @@ def _validate_dispatch_ack(
         raise RuntimeError(
             "runtime returned mismatched dispatch acknowledgement: "
             f"{actual!r}"
+        )
+    if require_schedule and ack.scheduled_finish_ms is None:
+        raise RuntimeError(
+            "virtual-time runtime omitted its authoritative dispatch schedule"
         )
 
 
@@ -1305,6 +1440,8 @@ def _validate_completion(
     attempt_id: str,
     task_id: str,
     agent_id: str,
+    expected_start_ms: float | None = None,
+    expected_finish_ms: float | None = None,
 ) -> None:
     expected = (dispatch_id, attempt_id, task_id, agent_id)
     actual = (
@@ -1316,6 +1453,20 @@ def _validate_completion(
     if actual != expected:
         raise RuntimeError(
             f"runtime returned mismatched completion: {actual!r}"
+        )
+    if (
+        expected_start_ms is not None
+        and abs(completion.started_time_ms - expected_start_ms) > 1e-6
+    ):
+        raise RuntimeError(
+            "runtime completion start does not match its dispatch schedule"
+        )
+    if (
+        expected_finish_ms is not None
+        and abs(completion.finished_time_ms - expected_finish_ms) > 1e-6
+    ):
+        raise RuntimeError(
+            "runtime completion finish does not match its dispatch schedule"
         )
 
 
@@ -1334,41 +1485,3 @@ def _violates_safety_contract(
         or bool(constraints.pinned_node_id)
         and target_node_id != constraints.pinned_node_id
     )
-
-
-def _profile_catalog(
-    catalog: SyntheticWorkloadCatalog,
-) -> ProfileCatalog:
-    profiles: list[ExecutionProfile] = []
-    for workload in catalog:
-        for target in ExecutionTarget:
-            profile = workload.profile_for(target)
-            profiles.append(
-                ExecutionProfile(
-                    task_type=workload.task_type,
-                    task_class=workload.task_class,
-                    node_kind=(
-                        NodeKind.ROBOT
-                        if target is ExecutionTarget.ORIN
-                        else NodeKind.EDGE
-                    ),
-                    model_variant=workload.model_variant,
-                    input_shape="synthetic",
-                    precision="synthetic",
-                    batch_size=1,
-                    p50_ms=profile.latency.p50_ms,
-                    p95_ms=profile.latency.p95_ms,
-                    p99_ms=profile.latency.p99_ms,
-                    throughput_per_s=(
-                        1000.0
-                        * profile.max_concurrency
-                        / profile.latency.p50_ms
-                    ),
-                    peak_memory_mb=profile.resources.memory_mb,
-                    energy_j=profile.energy_j.typical,
-                    output_size_mb=profile.output_size_mb.typical,
-                    supported=profile.supported,
-                    provenance="synthetic_workload_catalog",
-                )
-            )
-    return ProfileCatalog(profiles)

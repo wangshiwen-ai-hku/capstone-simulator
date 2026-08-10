@@ -32,6 +32,10 @@ from .optimizers import OptimizerRegistry
 from .profiling import ProfileCatalog
 from .runtime import InProcessRuntime
 from .scheduler import critical_path
+from .workflow_metrics import (
+    WorkflowEvaluationWeights,
+    evaluate_workflow_metrics,
+)
 
 
 @dataclass
@@ -91,9 +95,14 @@ def run_workflow_simulation(
     network_jitter: float = 0.1,
     resource_noise: float = 0.05,
     profiles: ProfileCatalog | None = None,
+    evaluation_weights: WorkflowEvaluationWeights = (
+        WorkflowEvaluationWeights()
+    ),
     link_specs: list[LinkSpec] | None = None,
     link_snapshots: list[LinkSnapshot] | None = None,
     optimizer_registry: OptimizerRegistry | None = None,
+    fallback_optimizer: str | None = "heuristic",
+    fail_first_task_ids: Iterable[str] = (),
 ) -> SimulationReport:
     """Execute a simulation through the coordinator and RuntimePort."""
 
@@ -112,7 +121,7 @@ def run_workflow_simulation(
         node_specs,
         node_snapshots,
         execution_noise=resource_noise,
-        respect_expected_accuracy=True,
+        sample_execution_failures=True,
     )
     coordinator = CentralCoordinator(
         runtime,
@@ -120,13 +129,29 @@ def run_workflow_simulation(
         link_snapshots=resolved_link_snapshots,
         optimizer_registry=optimizer_registry,
         profile_catalog=profiles,
+        fallback_optimizer=fallback_optimizer,
     )
     report = coordinator.run(
         workflow,
         algorithm=algorithm,
         seed=seed,
         max_attempts=1,
+        fail_first_task_ids=fail_first_task_ids,
         deterministic=True,
+    )
+    report = replace(
+        report,
+        metrics={
+            **report.metrics,
+            **evaluate_workflow_metrics(
+                report.task_results,
+                workflow,
+                node_specs,
+                node_snapshots,
+                coordinator.profile_catalog,
+                weights=evaluation_weights,
+            ),
+        },
     )
     return project_coordinator_report(
         report,
@@ -341,6 +366,16 @@ def project_coordinator_report(
             "critical_path": list(
                 report.workflow.get("critical_path", critical_ids)
             ),
+            **{
+                key: report.workflow[key]
+                for key in (
+                    "scheduling",
+                    "requested_algorithm",
+                    "optimizer_options",
+                    "metric_schema_version",
+                )
+                if key in report.workflow
+            },
         },
         task_class_summary=_task_class_summary(records),
         dag={
@@ -434,8 +469,20 @@ def _simulation_metrics(
     ]
     latencies = [record.total_latency_ms for record in completed]
     energies = [record.energy_j for record in completed]
+    executed = [
+        record
+        for record in records
+        if record.compute_time_ms > 0.0
+    ]
     succeeded = sum(record.success for record in records)
     missed = sum(record.deadline_missed for record in records)
+    executed_missed = sum(
+        record.deadline_missed for record in executed
+    )
+    required_on_time = sum(
+        record.success and not record.deadline_missed
+        for record in records
+    )
     makespan_ms = max(
         (record.finish_time_ms for record in records),
         default=0.0,
@@ -453,7 +500,7 @@ def _simulation_metrics(
         for record in records
     )
     levels = dict(report.workflow.get("levels", {}))
-    return {
+    metrics: dict[str, float | int] = {
         "task_count": len(records),
         "success_rate": round(
             succeeded / max(1, len(records)),
@@ -461,6 +508,14 @@ def _simulation_metrics(
         ),
         "deadline_miss_rate": round(
             missed / max(1, len(records)),
+            4,
+        ),
+        "executed_deadline_miss_rate": round(
+            executed_missed / max(1, len(executed)),
+            4,
+        ),
+        "required_task_on_time_rate": round(
+            required_on_time / max(1, len(records)),
             4,
         ),
         "avg_latency_ms": round(
@@ -474,6 +529,17 @@ def _simulation_metrics(
             2,
         ),
         "total_energy_j": round(sum(energies), 2),
+        "total_solver_time_ms": round(
+            _number(report.metrics.get("total_solver_time_ms")),
+            6,
+        ),
+        "max_solver_time_ms": round(
+            _number(report.metrics.get("max_solver_time_ms")),
+            6,
+        ),
+        "scheduling_epoch_count": int(
+            _number(report.metrics.get("scheduling_epoch_count"))
+        ),
         "bandwidth_mb": round(
             _number(report.metrics.get("transferred_mb")),
             2,
@@ -509,6 +575,22 @@ def _simulation_metrics(
         )
         + 1,
     }
+    for key in (
+        "expected_success_reward",
+        "expected_success_ratio",
+        "communication_time_ms",
+        "normalized_communication",
+        "peak_cpu_utilization",
+        "peak_gpu_utilization",
+        "peak_memory_utilization",
+        "maximum_resource_utilization",
+        "workflow_evaluation_objective",
+        "fallback_count",
+    ):
+        if key in report.metrics:
+            value = _number(report.metrics[key])
+            metrics[key] = int(value) if key == "fallback_count" else value
+    return metrics
 
 
 def _task_class_summary(

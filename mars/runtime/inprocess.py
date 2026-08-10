@@ -12,7 +12,7 @@ from ..domain.artifact import (
     InputArtifactBinding,
     artifacts_from_bindings,
 )
-from ..domain.execution import Assignment, task_resource_demand
+from ..domain.execution import Assignment
 from ..domain.task import TaskInstance, resolved_placement_constraints
 from ..domain.topology import (
     NodeKind,
@@ -40,6 +40,10 @@ class _ResourceReservation:
     cpu_units: float
     gpu_units: float
     memory_gb: float
+    energy_j: float = 0.0
+    terminal: bool = False
+    cancelled: bool = False
+    completion_ok: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -84,7 +88,7 @@ class _SimulatedAgent:
         supported_task_types: tuple[str, ...] = (),
         fail_first_task_ids: tuple[str, ...] = (),
         execution_noise: float = 0.04,
-        respect_expected_accuracy: bool = False,
+        sample_execution_failures: bool = False,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least one")
@@ -94,19 +98,17 @@ class _SimulatedAgent:
             raise ValueError("agent snapshot must match node_spec.node_id")
         self._node_spec = node_spec
         self._base_snapshot = snapshot or NodeSnapshot(node_spec.node_id)
+        self._remaining_energy_j = self._base_snapshot.remaining_energy_j
         self.max_concurrency = max_concurrency
         self.supported_task_types = frozenset(supported_task_types)
         self.fail_first_task_ids = frozenset(fail_first_task_ids)
         self.execution_noise = execution_noise
-        self.respect_expected_accuracy = respect_expected_accuracy
+        self.sample_execution_failures = sample_execution_failures
         self.executions: list[ExecutionInvocation] = []
         self._registered = False
         self._heartbeat_sequence = 0
         self._last_heartbeat_ms = 0.0
         self._reservations: dict[str, _ResourceReservation] = {}
-        self._busy_ms = 0.0
-        self._completed_attempts = 0
-        self._failed_attempts = 0
 
     @property
     def node_spec(self) -> NodeSpec:
@@ -120,22 +122,37 @@ class _SimulatedAgent:
 
     def snapshot_at(self, now_ms: float) -> NodeSnapshot:
         cpu, gpu, memory = self._reserved_totals(now_ms)
+        available_energy_j = self._remaining_energy_j
+        if available_energy_j is not None:
+            available_energy_j = max(
+                0.0,
+                available_energy_j
+                - sum(
+                    reservation.energy_j
+                    for reservation in self._reservations.values()
+                    if not reservation.cancelled
+                ),
+            )
         return replace(
             self._base_snapshot,
-            cpu_util=max(
-                self._base_snapshot.cpu_util,
-                min(1.0, cpu / max(1e-9, self.node_spec.cpu_capacity)),
+            cpu_util=min(
+                1.0,
+                self._base_snapshot.cpu_util
+                + cpu / self.node_spec.cpu_capacity,
             ),
-            gpu_util=max(
-                self._base_snapshot.gpu_util,
-                min(1.0, gpu / max(1e-9, self.node_spec.gpu_capacity))
+            gpu_util=min(
+                1.0,
+                self._base_snapshot.gpu_util
+                + gpu / self.node_spec.gpu_capacity
                 if self.node_spec.gpu_capacity > 0
-                else 0.0,
+                else self._base_snapshot.gpu_util,
             ),
-            memory_util=max(
-                self._base_snapshot.memory_util,
-                min(1.0, memory / max(1e-9, self.node_spec.memory_gb)),
+            memory_util=min(
+                1.0,
+                self._base_snapshot.memory_util
+                + memory / self.node_spec.memory_gb,
             ),
+            remaining_energy_j=available_energy_j,
         )
 
     @property
@@ -202,10 +219,6 @@ class _SimulatedAgent:
             return False, "required_capability_unavailable"
         if self.supported_task_types and task.spec.task_type not in self.supported_task_types:
             return False, "task_capability_not_declared"
-        if task.spec.gpu_demand > 0 and self.node_spec.gpu_capacity <= 0:
-            return False, "gpu_unavailable"
-        if task.spec.gpu_demand > self.node_spec.gpu_capacity + 1e-9:
-            return False, "gpu_capacity_insufficient"
         model = task.spec.model_requirement
         if model and self.node_spec.supported_models and model not in self.node_spec.supported_models:
             return False, "model_not_supported"
@@ -217,6 +230,10 @@ class _SimulatedAgent:
         attempt_id: str,
         scheduled_start_ms: float,
         scheduled_finish_ms: float,
+        *,
+        cpu_units: float,
+        gpu_units: float,
+        memory_gb: float,
     ) -> _ResourceReservation | None:
         feasible, _ = self.can_execute(task)
         if not feasible or any(
@@ -225,14 +242,13 @@ class _SimulatedAgent:
             return None
         if scheduled_finish_ms < scheduled_start_ms:
             return None
-        cpu, gpu, memory = self._resource_demand(task)
         duration_ms = scheduled_finish_ms - scheduled_start_ms
         actual_start_ms = self._earliest_feasible_start(
             scheduled_start_ms,
             duration_ms,
-            cpu,
-            gpu,
-            memory,
+            cpu_units,
+            gpu_units,
+            memory_gb,
         )
         if actual_start_ms is None:
             return None
@@ -243,9 +259,9 @@ class _SimulatedAgent:
             node_id=self.node_spec.node_id,
             scheduled_start_ms=actual_start_ms,
             scheduled_finish_ms=actual_start_ms + duration_ms,
-            cpu_units=cpu,
-            gpu_units=gpu,
-            memory_gb=memory,
+            cpu_units=cpu_units,
+            gpu_units=gpu_units,
+            memory_gb=memory_gb,
         )
         self._reservations[reservation.reservation_id] = reservation
         return reservation
@@ -319,32 +335,11 @@ class _SimulatedAgent:
         injected_failure = inject_failure or (
             task.task_id in self.fail_first_task_ids and attempt_no == 1
         )
-        accuracy_failure = False
-        if self.respect_expected_accuracy:
-            thermal_penalty = (
-                0.2 if self._base_snapshot.temperature_c > 93.0 else 0.0
-            )
-            network_penalty = (
-                0.04
-                if assignment.communication_ms
-                > task.spec.latency_budget_ms * 0.5
-                else 0.0
-            )
-            deadline_penalty = (
-                0.25
-                if reservation.scheduled_start_ms + compute_ms
-                > task.deadline_time_ms
-                else 0.0
-            )
-            success_probability = max(
-                0.05,
-                task.expected_accuracy
-                - thermal_penalty
-                - network_penalty
-                - deadline_penalty,
-            )
-            accuracy_failure = rng.random() >= success_probability
-        forced_failure = injected_failure or accuracy_failure
+        sampled_failure = False
+        if self.sample_execution_failures:
+            success_probability = assignment.success_probability
+            sampled_failure = rng.random() >= success_probability
+        forced_failure = injected_failure or sampled_failure
         self.executions.append(
             ExecutionInvocation(
                 attempt_id=reservation.attempt_id,
@@ -354,7 +349,14 @@ class _SimulatedAgent:
                 injected_failure=forced_failure,
             )
         )
-        outputs = () if forced_failure else self._build_outputs(task)
+        outputs = (
+            ()
+            if forced_failure
+            else self._build_outputs(
+                task,
+                output_size_mb=assignment.output_size_mb,
+            )
+        )
         energy_scale = compute_ms / max(1e-9, assignment.compute_ms)
         return _ExecutionResult(
             attempt_id=reservation.attempt_id,
@@ -368,10 +370,24 @@ class _SimulatedAgent:
                 "injected_first_attempt_failure"
                 if injected_failure
                 else "execution_failed"
-                if accuracy_failure
+                if sampled_failure
                 else ""
             ),
         )
+
+    def reserve_execution_energy(
+        self,
+        reservation_id: str,
+        energy_j: float,
+    ) -> _ResourceReservation:
+        reservation = self._reservations.get(reservation_id)
+        if reservation is None or reservation.terminal:
+            raise RuntimeError(
+                "cannot reserve energy for an inactive reservation"
+            )
+        updated = replace(reservation, energy_j=max(0.0, energy_j))
+        self._reservations[reservation_id] = updated
+        return updated
 
     def release(
         self,
@@ -379,25 +395,68 @@ class _SimulatedAgent:
         finished_time_ms: float,
         *,
         ok: bool,
+        consume_energy: bool = False,
     ) -> bool:
-        reservation = self._reservations.pop(reservation_id, None)
-        if reservation is None:
+        reservation = self._reservations.get(reservation_id)
+        if reservation is None or reservation.terminal:
             return False
-        self._busy_ms += max(0.0, finished_time_ms - reservation.scheduled_start_ms)
-        if ok:
-            self._completed_attempts += 1
-        else:
-            self._failed_attempts += 1
+        terminal_finish_ms = max(
+            reservation.scheduled_start_ms,
+            finished_time_ms,
+        )
+        if not consume_energy:
+            terminal_finish_ms = min(
+                reservation.scheduled_finish_ms,
+                terminal_finish_ms,
+            )
+        self._reservations[reservation_id] = replace(
+            reservation,
+            scheduled_finish_ms=terminal_finish_ms,
+            terminal=True,
+            cancelled=not consume_energy,
+            completion_ok=ok if consume_energy else None,
+        )
         return True
 
     def describe(self, makespan_ms: float) -> dict[str, object]:
         active = self._active_reservations(makespan_ms)
+        snapshot = self.snapshot_at(makespan_ms)
         available_cpu, available_gpu, available_memory = (
             self._available_resources(makespan_ms)
         )
+        visible_reservations = tuple(
+            reservation
+            for reservation in self._reservations.values()
+            if reservation.scheduled_start_ms < makespan_ms
+        )
+        busy_ms = sum(
+            max(
+                0.0,
+                min(makespan_ms, reservation.scheduled_finish_ms)
+                - reservation.scheduled_start_ms,
+            )
+            for reservation in visible_reservations
+        )
+        settled = tuple(
+            reservation
+            for reservation in visible_reservations
+            if (
+                reservation.terminal
+                and not reservation.cancelled
+                and reservation.scheduled_finish_ms <= makespan_ms
+            )
+        )
+        completed_attempts = sum(
+            reservation.completion_ok is True
+            for reservation in settled
+        )
+        failed_attempts = sum(
+            reservation.completion_ok is False
+            for reservation in settled
+        )
         capacity_time_ms = max(0.0, makespan_ms) * self.max_concurrency
         utilization = (
-            self._busy_ms / capacity_time_ms
+            busy_ms / capacity_time_ms
             if capacity_time_ms > 0.0
             else 0.0
         )
@@ -411,9 +470,9 @@ class _SimulatedAgent:
             "last_heartbeat_ms": round(self._last_heartbeat_ms, 4),
             "active_reservations": len(active),
             "max_concurrency": self.max_concurrency,
-            "completed_attempts": self._completed_attempts,
-            "failed_attempts": self._failed_attempts,
-            "busy_time_ms": round(self._busy_ms, 4),
+            "completed_attempts": completed_attempts,
+            "failed_attempts": failed_attempts,
+            "busy_time_ms": round(busy_ms, 4),
             "utilization": round(min(1.0, max(0.0, utilization)), 4),
             "capabilities": list(self.node_spec.capabilities),
             "supported_models": list(self.node_spec.supported_models),
@@ -424,11 +483,13 @@ class _SimulatedAgent:
                 "available_cpu": round(available_cpu, 4),
                 "available_gpu": round(available_gpu, 4),
                 "available_memory_gb": round(available_memory, 4),
+                "remaining_energy_j": (
+                    None
+                    if snapshot.remaining_energy_j is None
+                    else round(snapshot.remaining_energy_j, 6)
+                ),
             },
         }
-
-    def _resource_demand(self, task: TaskInstance) -> tuple[float, float, float]:
-        return task_resource_demand(task, self.node_spec)
 
     def _active_reservations(
         self,
@@ -490,9 +551,21 @@ class _SimulatedAgent:
             )
             if len(active) + 1 > self.max_concurrency:
                 return False
-            used_cpu = sum(item.cpu_units for item in active)
-            used_gpu = sum(item.gpu_units for item in active)
-            used_memory = sum(item.memory_gb for item in active)
+            used_cpu = (
+                self._base_snapshot.cpu_util
+                * self.node_spec.cpu_capacity
+                + sum(item.cpu_units for item in active)
+            )
+            used_gpu = (
+                self._base_snapshot.gpu_util
+                * self.node_spec.gpu_capacity
+                + sum(item.gpu_units for item in active)
+            )
+            used_memory = (
+                self._base_snapshot.memory_util
+                * self.node_spec.memory_gb
+                + sum(item.memory_gb for item in active)
+            )
             if used_cpu + cpu_units > self.node_spec.cpu_capacity + 1e-9:
                 return False
             if used_gpu + gpu_units > self.node_spec.gpu_capacity + 1e-9:
@@ -555,12 +628,32 @@ class _SimulatedAgent:
     ) -> tuple[float, float, float]:
         cpu, gpu, memory = self._reserved_totals(now_ms)
         return (
-            max(0.0, self.node_spec.cpu_capacity - cpu),
-            max(0.0, self.node_spec.gpu_capacity - gpu),
-            max(0.0, self.node_spec.memory_gb - memory),
+            max(
+                0.0,
+                self.node_spec.cpu_capacity
+                * (1.0 - self._base_snapshot.cpu_util)
+                - cpu,
+            ),
+            max(
+                0.0,
+                self.node_spec.gpu_capacity
+                * (1.0 - self._base_snapshot.gpu_util)
+                - gpu,
+            ),
+            max(
+                0.0,
+                self.node_spec.memory_gb
+                * (1.0 - self._base_snapshot.memory_util)
+                - memory,
+            ),
         )
 
-    def _build_outputs(self, task: TaskInstance) -> tuple[ArtifactRef, ...]:
+    def _build_outputs(
+        self,
+        task: TaskInstance,
+        *,
+        output_size_mb: float,
+    ) -> tuple[ArtifactRef, ...]:
         ports = task.spec.output_ports
         if not ports:
             return (
@@ -568,12 +661,12 @@ class _SimulatedAgent:
                     artifact_id=f"artifact:{task.workflow_id}:{task.task_id}:result",
                     producer_task_id=task.task_id,
                     node_id=self.node_spec.node_id,
-                    size_mb=task.spec.output_size_mb,
+                    size_mb=output_size_mb,
                     uri=f"agent://{self.node_spec.node_id}/{task.workflow_id}/{task.task_id}/result",
                     producer_port="result",
                 ),
             )
-        size_per_output = task.spec.output_size_mb / max(1, len(ports))
+        size_per_output = output_size_mb / max(1, len(ports))
         return tuple(
             ArtifactRef(
                 artifact_id=f"artifact:{task.workflow_id}:{task.task_id}:{port.name}",
@@ -613,6 +706,7 @@ class InProcessRuntime:
         fail_first_task_ids: Iterable[str] = (),
         execution_noise: float = 0.04,
         respect_expected_accuracy: bool = False,
+        sample_execution_failures: bool | None = None,
     ) -> None:
         if not 0.0 <= execution_noise <= 1.0:
             raise ValueError("execution_noise must be in [0, 1]")
@@ -642,6 +736,21 @@ class InProcessRuntime:
                 f"{sorted(unknown_configuration)}"
             )
 
+        # Backwards-compatible alias: failures are sampled from the selected
+        # Assignment.success_probability, never from task accuracy.
+        if (
+            respect_expected_accuracy
+            and sample_execution_failures is False
+        ):
+            raise ValueError(
+                "conflicting execution failure sampling options"
+            )
+        resolved_failure_sampling = (
+            respect_expected_accuracy
+            if sample_execution_failures is None
+            else sample_execution_failures
+        )
+
         effective_specs = tuple(
             replace(
                 spec,
@@ -662,7 +771,7 @@ class InProcessRuntime:
                 supported_task_types=task_types.get(spec.node_id, ()),
                 fail_first_task_ids=failure_ids,
                 execution_noise=execution_noise,
-                respect_expected_accuracy=respect_expected_accuracy,
+                sample_execution_failures=resolved_failure_sampling,
             )
             for spec in effective_specs
         }
@@ -730,28 +839,14 @@ class InProcessRuntime:
         if not can_execute:
             return self._rejected_ack(command, node_id, reason)
         planned_demand = command.resource_reservation.demand
-        expected_demand = task_resource_demand(task, agent.node_spec)
-        if any(
-            abs(planned - expected) > 1e-9
-            for planned, expected in zip(
-                (
-                    planned_demand.cpu_units,
-                    planned_demand.gpu_units,
-                    planned_demand.memory_gb,
-                ),
-                expected_demand,
-            )
-        ):
-            return self._rejected_ack(
-                command,
-                node_id,
-                "resource_reservation_mismatch",
-            )
         reservation = agent.reserve(
             task,
             command.attempt_id,
             command.resource_reservation.start_ms,
             command.resource_reservation.finish_ms,
+            cpu_units=planned_demand.cpu_units,
+            gpu_units=planned_demand.gpu_units,
+            memory_gb=planned_demand.memory_gb,
         )
         if reservation is None:
             return self._rejected_ack(
@@ -776,6 +871,10 @@ class InProcessRuntime:
                     command.resource_reservation.start_ms
                 ),
                 duration_ms=execution.compute_time_ms,
+            )
+            reservation = agent.reserve_execution_energy(
+                reservation.reservation_id,
+                execution.energy_j,
             )
         except Exception:
             agent.release(
@@ -806,6 +905,8 @@ class InProcessRuntime:
             task_id=task.task_id,
             agent_id=node_id,
             accepted=True,
+            scheduled_start_ms=reservation.scheduled_start_ms,
+            scheduled_finish_ms=reservation.scheduled_finish_ms,
         )
 
     async def receive_completion(self, dispatch_id: str) -> AttemptCompletion:
@@ -819,11 +920,11 @@ class InProcessRuntime:
             reservation.reservation_id,
             completion.finished_time_ms,
             ok=completion.ok,
+            consume_energy=True,
         ):
             raise RuntimeError(
                 f"reservation already released: {reservation.reservation_id}"
             )
-        agent.heartbeat(completion.finished_time_ms)
         self._dispatch_by_attempt.pop(completion.attempt_id, None)
         self._consumed_dispatches.add(dispatch_id)
         self._terminal_attempts.add(completion.attempt_id)
@@ -847,7 +948,6 @@ class InProcessRuntime:
             now_ms,
             ok=False,
         )
-        agent.heartbeat(now_ms)
         self._consumed_dispatches.add(dispatch_id)
         self._terminal_attempts.add(attempt_id)
         self._cancelled_attempts[attempt_id] = reason

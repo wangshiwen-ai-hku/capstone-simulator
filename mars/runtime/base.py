@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Protocol, runtime_checkable
 
 from ..domain.artifact import (
@@ -237,12 +238,46 @@ class DispatchCommand:
 
 @dataclass(frozen=True)
 class DispatchAck:
+    """Acceptance plus the runtime's authoritative execution interval.
+
+    Virtual-time adapters set both scheduled timestamps after any local queue
+    adjustment.  Remote adapters may omit them when they cannot promise an
+    event-time completion watermark.
+    """
+
     dispatch_id: str
     attempt_id: str
     task_id: str
     agent_id: str
     accepted: bool
     error_code: str = ""
+    scheduled_start_ms: float | None = None
+    scheduled_finish_ms: float | None = None
+
+    def __post_init__(self) -> None:
+        timestamps = (
+            self.scheduled_start_ms,
+            self.scheduled_finish_ms,
+        )
+        if (timestamps[0] is None) != (timestamps[1] is None):
+            raise ValueError(
+                "dispatch acknowledgement schedule must provide both "
+                "start and finish timestamps"
+            )
+        if timestamps[0] is None:
+            return
+        start_ms = timestamps[0]
+        finish_ms = timestamps[1]
+        assert start_ms is not None and finish_ms is not None
+        if (
+            not math.isfinite(start_ms)
+            or not math.isfinite(finish_ms)
+            or start_ms < 0
+            or finish_ms < start_ms
+        ):
+            raise ValueError(
+                "dispatch acknowledgement schedule is outside valid ranges"
+            )
 
 
 @dataclass(frozen=True)

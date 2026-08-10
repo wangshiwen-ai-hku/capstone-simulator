@@ -43,7 +43,7 @@ from .optimizers import (
     built_in_registry,
     validate_plan,
 )
-from .profiling import ProfileCatalog
+from .profiling import ExecutionProfile, ProfileCatalog
 
 
 def allowed_nodes(
@@ -143,9 +143,6 @@ def estimate_candidate(
         and task.spec.model_requirement not in node.supported_models
     ):
         return _infeasible(task, node, "model_not_supported")
-    if task.spec.gpu_demand > node.gpu_capacity + 1e-9:
-        return _infeasible(task, node, "gpu_capacity_insufficient")
-
     util_penalty = 1.0 + 2.2 * max(
         snapshot.cpu_util,
         snapshot.gpu_util,
@@ -154,6 +151,13 @@ def estimate_candidate(
     profile = profiles.lookup(task.spec.task_type, node.kind) if profiles is not None else None
     if profile is not None and not profile.supported:
         return _infeasible(task, node, "profile_marks_task_unsupported")
+    resource_demand = _resource_demand(task, node, profile)
+    if resource_demand.cpu_units > node.cpu_capacity + 1e-9:
+        return _infeasible(task, node, "cpu_capacity_insufficient")
+    if resource_demand.gpu_units > node.gpu_capacity + 1e-9:
+        return _infeasible(task, node, "gpu_capacity_insufficient")
+    if resource_demand.memory_gb > node.memory_gb + 1e-9:
+        return _infeasible(task, node, "memory_capacity_insufficient")
     if profile is not None:
         compute_ms = profile.p95_ms * util_penalty
     else:
@@ -238,7 +242,17 @@ def estimate_candidate(
         compute_ms=compute_ms,
         communication_ms=communication_ms,
         energy_j=energy_j,
-        resource_demand=_resource_demand(task, node),
+        resource_demand=resource_demand,
+        output_size_mb=(
+            profile.output_size_mb
+            if profile is not None
+            else task.spec.output_size_mb
+        ),
+        success_probability=(
+            1.0 - profile.failure_rate
+            if profile is not None
+            else 1.0
+        ),
         input_locations=tuple(locations),
         transfers=tuple(transfers),
     )
@@ -603,8 +617,17 @@ def apply_load(node: NodeSnapshot, task: TaskInstance) -> NodeSnapshot:
 def _resource_demand(
     task: TaskInstance,
     node: NodeSpec,
+    profile: ExecutionProfile | None = None,
 ) -> ResourceDemand:
     cpu_units, gpu_units, memory_gb = task_resource_demand(task, node)
+    if profile is not None:
+        cpu_units = (
+            cpu_units if profile.cpu_units is None else profile.cpu_units
+        )
+        gpu_units = (
+            gpu_units if profile.gpu_units is None else profile.gpu_units
+        )
+        memory_gb = profile.peak_memory_mb / 1024.0
     return ResourceDemand(
         cpu_units=cpu_units,
         gpu_units=gpu_units,
@@ -630,6 +653,8 @@ def _infeasible(
         communication_ms=0.0,
         energy_j=0.0,
         resource_demand=ResourceDemand(0.0, 0.0, 0.0),
+        output_size_mb=0.0,
+        success_probability=0.0,
         input_locations=(),
         reason=reason,
     )
@@ -806,7 +831,18 @@ def _resolve_selection(
                 "for an explicit policy"
             )
         return registry.resolve("heuristic"), alias_policy
-    return registry.resolve(optimizer), _resolve_policy(policy)
+    selected = registry.resolve(optimizer)
+    if policy is not None:
+        return selected, _resolve_policy(policy)
+    default_policy = getattr(selected, "default_policy", None)
+    if default_policy is None:
+        return selected, _resolve_policy(None)
+    if not isinstance(default_policy, SchedulingPolicy):
+        raise TypeError(
+            f"optimizer {selected.optimizer_id!r} default_policy must be a "
+            "SchedulingPolicy"
+        )
+    return selected, default_policy
 
 
 def _contract_digest(value: object) -> str:

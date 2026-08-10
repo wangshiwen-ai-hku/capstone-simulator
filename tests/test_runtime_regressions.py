@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from mars.coordinator import CentralCoordinator
@@ -87,6 +89,54 @@ def _pinned_task(
     )
 
 
+def test_coordinator_reports_deadline_and_skip_outcomes_without_dilution() -> None:
+    edge = _node("edge", NodeKind.EDGE)
+    failed = _pinned_task("failed", "edge", NodeKind.EDGE)
+    child = _pinned_task(
+        "child",
+        "edge",
+        NodeKind.EDGE,
+        dependencies=("failed",),
+    )
+
+    report = CentralCoordinator(
+        InProcessRuntime(
+            [edge],
+            [NodeSnapshot("edge")],
+            execution_noise=0,
+        )
+    ).run(
+        WorkflowSpec("wf", (failed, child)),
+        algorithm="greedy_cost",
+        max_attempts=1,
+        fail_first_task_ids=("failed",),
+    )
+
+    assert report.metrics["deadline_miss_rate"] == 0.0
+    assert report.metrics["executed_deadline_miss_rate"] == 0.0
+    assert report.metrics["required_task_on_time_rate"] == 0.0
+    assert report.metrics["skipped_task_count"] == 1
+
+
+class _DelayedQueuedCompletionRuntime(InProcessRuntime):
+    def __init__(self, *args, delayed_task_ids: tuple[str, ...], **kwargs):
+        super().__init__(*args, **kwargs)
+        self._delayed_task_ids = frozenset(delayed_task_ids)
+        self._task_by_dispatch: dict[str, str] = {}
+
+    async def dispatch(self, command):
+        acknowledgement = await super().dispatch(command)
+        self._task_by_dispatch[acknowledgement.dispatch_id] = (
+            command.task.task_id
+        )
+        return acknowledgement
+
+    async def receive_completion(self, dispatch_id):
+        if self._task_by_dispatch[dispatch_id] in self._delayed_task_ids:
+            await asyncio.sleep(0.01)
+        return await super().receive_completion(dispatch_id)
+
+
 def test_engine_preserves_free_capacity_across_scheduling_epochs() -> None:
     edge = _node(
         "edge",
@@ -139,6 +189,180 @@ def test_engine_preserves_free_capacity_across_scheduling_epochs() -> None:
         0 <= utilization <= 1
         for utilization in report.node_utilization.values()
     )
+    scheduling = report.workflow["scheduling"]
+    assert scheduling["requested_algorithm"] == "greedy_cost"
+    assert scheduling["effective_optimizers"] == {
+        "heuristic": report.metrics["scheduling_epoch_count"]
+    }
+    assert scheduling["fallback_count"] == 0
+    assert sum(scheduling["solve_statuses"].values()) == (
+        report.metrics["scheduling_epoch_count"]
+    )
+    assert sum(scheduling["termination_reasons"].values()) == (
+        report.metrics["scheduling_epoch_count"]
+    )
+    assert scheduling["requested_seed"] == 7
+    assert scheduling["deterministic"] is True
+    assert scheduling["execution_seed"] == 7
+    assert scheduling["solve_limits"] == {
+        "solve_budget_ms": 50.0,
+        "max_iterations": 0,
+        "deterministic": True,
+        "random_seed": 7,
+    }
+
+
+def test_remaining_energy_is_deducted_across_scheduling_epochs() -> None:
+    edge = _node("edge", NodeKind.EDGE, cpu=20, max_concurrency=1)
+    parent = _pinned_task(
+        "parent",
+        "edge",
+        NodeKind.EDGE,
+        compute=1,
+    )
+    child = _pinned_task(
+        "child",
+        "edge",
+        NodeKind.EDGE,
+        compute=1,
+        dependencies=("parent",),
+    )
+    initial_energy_j = 10.0
+    runtime = InProcessRuntime(
+        [edge],
+        [
+            NodeSnapshot(
+                "edge",
+                power_w=100,
+                remaining_energy_j=initial_energy_j,
+            )
+        ],
+        execution_noise=0,
+    )
+
+    report = CentralCoordinator(
+        runtime,
+        link_specs=(),
+        link_snapshots=(),
+    ).run(
+        WorkflowSpec("wf", (parent, child)),
+        algorithm="greedy_cost",
+    )
+
+    consumed_energy_j = sum(
+        attempt["energy_j"]
+        for task_result in report.task_results
+        for attempt in task_result["attempts"]
+    )
+    assert report.metrics["scheduling_epoch_count"] >= 2
+    assert consumed_energy_j > 0
+    assert report.agents[0]["resources"]["remaining_energy_j"] == (
+        pytest.approx(initial_energy_j - consumed_energy_j)
+    )
+
+
+def test_virtual_completions_are_processed_in_event_time_order() -> None:
+    edge = _node(
+        "edge",
+        NodeKind.EDGE,
+        cpu=100,
+        gpu=4,
+        max_concurrency=2,
+    )
+    parent = _pinned_task(
+        "a-parent",
+        "edge",
+        NodeKind.EDGE,
+        compute=1,
+    )
+    later = _pinned_task(
+        "b-later",
+        "edge",
+        NodeKind.EDGE,
+        compute=20,
+    )
+    child = _pinned_task(
+        "c-child",
+        "edge",
+        NodeKind.EDGE,
+        compute=1,
+        dependencies=("a-parent",),
+    )
+    runtime = _DelayedQueuedCompletionRuntime(
+        [edge],
+        [NodeSnapshot("edge")],
+        delayed_task_ids=("a-parent",),
+        execution_noise=0,
+    )
+
+    report = CentralCoordinator(
+        runtime,
+        link_specs=(),
+        link_snapshots=(),
+    ).run(
+        WorkflowSpec("wf", (parent, later, child)),
+        algorithm="greedy_cost",
+    )
+
+    by_id = {item["task_id"]: item for item in report.task_results}
+    parent_attempt = by_id["a-parent"]["attempts"][0]
+    later_attempt = by_id["b-later"]["attempts"][0]
+    child_attempt = by_id["c-child"]["attempts"][0]
+    assert parent_attempt["finish_time_ms"] < later_attempt["finish_time_ms"]
+    assert child_attempt["start_time_ms"] == pytest.approx(
+        parent_attempt["finish_time_ms"],
+        abs=0.01,
+    )
+    success_times = [
+        event.time_ms
+        for event in report.events
+        if event.event_type == "attempt_succeeded"
+    ]
+    assert success_times == sorted(success_times)
+
+
+def test_arrival_before_a_delayed_completion_watermark_still_plans() -> None:
+    edge = _node(
+        "edge",
+        NodeKind.EDGE,
+        cpu=100,
+        gpu=4,
+        max_concurrency=2,
+    )
+    running = _pinned_task(
+        "a-running",
+        "edge",
+        NodeKind.EDGE,
+        compute=20,
+    )
+    arriving = _pinned_task(
+        "b-arriving",
+        "edge",
+        NodeKind.EDGE,
+        compute=1,
+        arrival_time_ms=5,
+    )
+    runtime = _DelayedQueuedCompletionRuntime(
+        [edge],
+        [NodeSnapshot("edge")],
+        delayed_task_ids=("a-running",),
+        execution_noise=0,
+    )
+
+    report = CentralCoordinator(
+        runtime,
+        link_specs=(),
+        link_snapshots=(),
+    ).run(
+        WorkflowSpec("wf", (running, arriving)),
+        algorithm="greedy_cost",
+    )
+
+    by_id = {item["task_id"]: item for item in report.task_results}
+    arriving_attempt = by_id["b-arriving"]["attempts"][0]
+    running_attempt = by_id["a-running"]["attempts"][0]
+    assert arriving_attempt["start_time_ms"] == pytest.approx(5.0)
+    assert arriving_attempt["finish_time_ms"] < running_attempt["finish_time_ms"]
 
 
 def test_execution_noise_cannot_overlap_a_single_runtime_slot() -> None:
@@ -184,6 +408,78 @@ def test_execution_noise_cannot_overlap_a_single_runtime_slot() -> None:
     assert report.metrics["makespan_ms"] == max(
         item.finish_time_ms for item in ordered
     )
+
+
+def test_accuracy_failure_replanning_preserves_edge_queue() -> None:
+    edge = _node(
+        "edge",
+        NodeKind.EDGE,
+        cpu=100,
+        gpu=4,
+        max_concurrency=2,
+    )
+    tasks = (
+        _pinned_task(
+            "a-failing",
+            "edge",
+            NodeKind.EDGE,
+            compute=1,
+        ),
+        _pinned_task(
+            "b-queued",
+            "edge",
+            NodeKind.EDGE,
+            compute=20,
+        ),
+        _pinned_task(
+            "c-queued",
+            "edge",
+            NodeKind.EDGE,
+            compute=20,
+        ),
+        _pinned_task(
+            "d-queued",
+            "edge",
+            NodeKind.EDGE,
+            compute=20,
+        ),
+        _pinned_task(
+            "e-queued",
+            "edge",
+            NodeKind.EDGE,
+            compute=20,
+        ),
+    )
+    runtime = _DelayedQueuedCompletionRuntime(
+        [edge],
+        [NodeSnapshot("edge")],
+        delayed_task_ids=(
+            "b-queued",
+            "c-queued",
+            "d-queued",
+            "e-queued",
+        ),
+        execution_noise=0,
+    )
+
+    report = CentralCoordinator(
+        runtime,
+        link_specs=(),
+        link_snapshots=(),
+    ).run(
+        WorkflowSpec("wf", tasks),
+        algorithm="greedy_cost",
+        seed=0,
+        max_attempts=2,
+        fail_first_task_ids=("a-failing",),
+    )
+
+    by_id = {item["task_id"]: item for item in report.task_results}
+    assert by_id["a-failing"]["attempt_count"] == 2
+    assert by_id["b-queued"]["state"] == "succeeded"
+    assert by_id["c-queued"]["state"] == "succeeded"
+    assert by_id["d-queued"]["state"] == "succeeded"
+    assert by_id["e-queued"]["state"] == "succeeded"
 
 
 @pytest.mark.parametrize("optimizer_id", ["greedy_cost", "dag_deadline"])
@@ -576,7 +872,6 @@ def test_fail_fast_execution_failure_does_not_start_sibling_work() -> None:
         "robot",
         NodeKind.ROBOT,
         compute=1,
-        expected_accuracy=0,
     )
     sibling = _pinned_task(
         "b-sibling",
@@ -598,6 +893,7 @@ def test_fail_fast_execution_failure_does_not_start_sibling_work() -> None:
         resource_noise=0,
         link_specs=[],
         link_snapshots=[],
+        fail_first_task_ids=("a-failing",),
     )
     by_id = {item.task_id: item for item in report.task_results}
 
