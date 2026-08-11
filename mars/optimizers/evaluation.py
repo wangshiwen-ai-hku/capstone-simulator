@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-from ..domain.execution import ExecutionMode
+from ..domain.execution import Assignment, ExecutionMode
 from ..domain.task import TaskInstance, resolved_placement_constraints
 from ..domain.topology import NodeKind
-from .base import CandidateEstimate, SchedulingPlan, SchedulingProblem
+from .base import (
+    CandidateEstimate,
+    PlannedResourceReservation,
+    SchedulingPlan,
+    SchedulingProblem,
+    maximum_resource_utilization,
+)
 from .policy import (
     ConstraintEvaluation,
     ConstraintRelation,
@@ -207,6 +213,36 @@ def _candidate_metric_value(
         return float(_preference_rank(task, candidate))
     if metric is ObjectiveMetric.RULE_MISMATCH_COUNT:
         return float(_rule_mismatch(problem, task, candidate))
+    if metric is ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO:
+        weights, total_weight = _task_priority_weights(problem)
+        return (
+            weights[task_id]
+            * candidate.success_probability
+            / total_weight
+        )
+    if metric is ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO:
+        return normalized_communication_ratio(
+            candidate.communication_ms,
+            task.spec.latency_budget_ms,
+        )
+    if metric is ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION:
+        finish_ms = candidate.finish_ms
+        compute_start = max(
+            candidate.ready_time_ms,
+            finish_ms - candidate.compute_ms,
+        )
+        reservation = PlannedResourceReservation(
+            reservation_id=(
+                f"candidate-metric:{task_id}:{candidate.node_id}"
+            ),
+            epoch_id=problem.epoch.epoch_id,
+            task_id=task_id,
+            node_id=candidate.node_id,
+            start_ms=compute_start,
+            finish_ms=finish_ms,
+            demand=candidate.resource_demand,
+        )
+        return maximum_resource_utilization(problem, (reservation,))
     raise ValueError(f"unsupported objective metric {metric.value!r}")
 
 
@@ -330,7 +366,72 @@ def _plan_metric_value(
                 for assignment in non_drop
             )
         )
+    if metric is ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO:
+        return expected_weighted_success_ratio(problem, non_drop)
+    if metric is ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO:
+        return plan_normalized_communication_ratio(
+            problem,
+            non_drop,
+        )
+    if metric is ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION:
+        return maximum_resource_utilization(
+            problem,
+            plan.node_reservations,
+        )
     raise ValueError(f"unsupported objective metric {metric.value!r}")
+
+
+def _task_priority_weights(
+    problem: SchedulingProblem,
+) -> tuple[dict[str, float], float]:
+    weights = {
+        task.task_id: max(0.0, float(task.priority))
+        for task in problem.epoch.ready_tasks
+    }
+    total = sum(weights.values())
+    return weights, max(1.0, total)
+
+
+def normalized_communication_ratio(
+    communication_ms: float,
+    latency_budget_ms: float,
+) -> float:
+    """Normalize communication time by the declared latency budget."""
+
+    return communication_ms / max(1.0, latency_budget_ms)
+
+
+def expected_weighted_success_ratio(
+    problem: SchedulingProblem,
+    assignments: tuple[Assignment, ...],
+) -> float:
+    """Return priority-weighted nominal success over all ready tasks."""
+
+    weights, total_weight = _task_priority_weights(problem)
+    return sum(
+        weights[item.task_id] * item.success_probability
+        for item in assignments
+        if item.execution_mode is not ExecutionMode.DROP
+    ) / total_weight
+
+
+def plan_normalized_communication_ratio(
+    problem: SchedulingProblem,
+    assignments: tuple[Assignment, ...],
+) -> float:
+    """Normalize planned communication by all ready-task latency budgets."""
+
+    return normalized_communication_ratio(
+        sum(
+            item.communication_ms
+            for item in assignments
+            if item.execution_mode is not ExecutionMode.DROP
+        ),
+        sum(
+            max(1.0, task.spec.latency_budget_ms)
+            for task in problem.epoch.ready_tasks
+        ),
+    )
 
 
 def _selected_candidates(

@@ -1,4 +1,5 @@
 from enum import Enum
+import math
 from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -95,6 +96,7 @@ class ResourceSnapshot(BaseModel):
     power_w: float
     network_latency_ms: float
     online: bool = True
+    remaining_energy_j: Optional[float] = Field(default=None, ge=0)
 
 
 class PlacementConstraintsSpec(BaseModel):
@@ -359,20 +361,75 @@ class BenchmarkScene(BaseModel):
 
 class SimulateRequest(BaseModel):
     scene: BenchmarkScene
-    algorithm: Literal["dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
+    algorithm: Literal["binary_offload", "dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
+    optimizer_options: Dict[str, float] = Field(default_factory=dict)
+    beta: Optional[float] = Field(
+        default=None,
+        ge=0,
+        deprecated=True,
+        description=(
+            "Deprecated normalized alias for binary_offload "
+            "optimizer_options.communication_weight; ignored by other "
+            "algorithms."
+        ),
+    )
     network_jitter: float = Field(default=0.1, ge=0, le=1)
     resource_noise: float = Field(default=0.05, ge=0, le=0.5)
     seed: int = Field(default=7, ge=0)
 
+    @field_validator("optimizer_options")
+    @classmethod
+    def validate_optimizer_options(
+        cls,
+        options: Dict[str, float],
+    ) -> Dict[str, float]:
+        return _validate_optimizer_options(options)
+
 
 class RuntimeWorkflowRequest(BaseModel):
     scene: BenchmarkScene
-    algorithm: Literal["dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
+    algorithm: Literal["binary_offload", "dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
+    optimizer_options: Dict[str, float] = Field(default_factory=dict)
+    beta: Optional[float] = Field(
+        default=None,
+        ge=0,
+        deprecated=True,
+        description=(
+            "Deprecated normalized alias for binary_offload "
+            "optimizer_options.communication_weight; ignored by other "
+            "algorithms."
+        ),
+    )
     seed: int = Field(default=7, ge=0)
     max_attempts: int = Field(default=2, ge=1, le=5)
     inject_first_failure: bool = False
     failure_task_type: str = "local_llm_7b"
     deterministic: bool = True
+
+    @field_validator("optimizer_options")
+    @classmethod
+    def validate_optimizer_options(
+        cls,
+        options: Dict[str, float],
+    ) -> Dict[str, float]:
+        return _validate_optimizer_options(options)
+
+
+def _validate_optimizer_options(
+    options: Dict[str, float],
+) -> Dict[str, float]:
+    normalized: Dict[str, float] = {}
+    for key, value in options.items():
+        name = key.strip()
+        if not name:
+            raise ValueError("optimizer option names must be non-blank")
+        resolved = float(value)
+        if not math.isfinite(resolved) or resolved < 0:
+            raise ValueError(
+                "optimizer option values must be finite and non-negative"
+            )
+        normalized[name] = resolved
+    return normalized
 
 
 class TaskRunResult(BaseModel):
@@ -405,6 +462,8 @@ class SimulationMetrics(BaseModel):
     task_count: int
     success_rate: float
     deadline_miss_rate: float
+    executed_deadline_miss_rate: float = 0.0
+    required_task_on_time_rate: float = 0.0
     avg_latency_ms: float
     p95_latency_ms: float
     p99_latency_ms: float
@@ -418,6 +477,19 @@ class SimulationMetrics(BaseModel):
     workflow_success_rate: float
     critical_path_ms: float
     dag_depth: int
+    total_solver_time_ms: float = 0.0
+    max_solver_time_ms: float = 0.0
+    scheduling_epoch_count: int = 0
+    expected_success_reward: float = 0.0
+    expected_success_ratio: float = 0.0
+    communication_time_ms: float = 0.0
+    normalized_communication: float = 0.0
+    peak_cpu_utilization: float = 0.0
+    peak_gpu_utilization: float = 0.0
+    peak_memory_utilization: float = 0.0
+    maximum_resource_utilization: float = 0.0
+    workflow_evaluation_objective: float = 0.0
+    fallback_count: int = 0
 
 
 class WorkflowSummary(BaseModel):
@@ -428,6 +500,10 @@ class WorkflowSummary(BaseModel):
     deadline_missed: bool
     state_counts: Dict[str, int]
     critical_path: List[str]
+    scheduling: Dict[str, object] = Field(default_factory=dict)
+    requested_algorithm: Optional[str] = None
+    optimizer_options: Dict[str, float] = Field(default_factory=dict)
+    metric_schema_version: Optional[str] = None
 
 
 class TaskClassMetrics(BaseModel):

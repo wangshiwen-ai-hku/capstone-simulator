@@ -34,6 +34,15 @@ class ObjectiveMetric(str, enum.Enum):
     NON_EDGE_ASSIGNMENTS = "non_edge_assignments"
     PLACEMENT_PREFERENCE_PENALTY = "placement_preference_penalty"
     RULE_MISMATCH_COUNT = "rule_mismatch_count"
+    EXPECTED_WEIGHTED_SUCCESS_RATIO = (
+        "expected_weighted_success_ratio"
+    )
+    NORMALIZED_COMMUNICATION_RATIO = (
+        "normalized_communication_ratio"
+    )
+    MAXIMUM_RESOURCE_UTILIZATION = (
+        "maximum_resource_utilization"
+    )
 
 
 class ConstraintRelation(str, enum.Enum):
@@ -217,8 +226,73 @@ def _objective(
     )
 
 
+def binary_offload_policy(
+    *,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+    gamma: float = 2.0,
+) -> SchedulingPolicy:
+    """Build the dimensionless policy solved by binary offloading.
+
+    Binary refers to the one-hot placement decision for each task, rather than
+    restricting the eligible target kinds to a local/edge pair.
+    """
+
+    weights = (alpha, beta, gamma)
+    if not all(
+        math.isfinite(value) and value >= 0.0 for value in weights
+    ):
+        raise ValueError(
+            "binary-offload weights must be finite and non-negative"
+        )
+    if not any(value > 0.0 for value in weights):
+        raise ValueError(
+            "binary-offload requires at least one positive weight"
+        )
+    objectives = []
+    if alpha > 0.0:
+        objectives.append(
+            ObjectiveSpec(
+                objective_id=(
+                    ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO.value
+                ),
+                metric=ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO,
+                direction=OptimizationDirection.MAXIMIZE,
+                weight=alpha,
+            )
+        )
+    if beta > 0.0:
+        objectives.append(
+            ObjectiveSpec(
+                objective_id=(
+                    ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO.value
+                ),
+                metric=ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO,
+                weight=beta,
+            )
+        )
+    if gamma > 0.0:
+        objectives.append(
+            ObjectiveSpec(
+                objective_id=(
+                    ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION.value
+                ),
+                metric=ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION,
+                weight=gamma,
+            )
+        )
+    return SchedulingPolicy(
+        policy_id="binary_offload",
+        version="2",
+        objectives=tuple(objectives),
+        constraints=(_AVOID_DROPS,),
+        objective_aggregation=ObjectiveAggregation.WEIGHTED_SUM,
+    )
+
+
 _BUILT_IN_POLICIES: Mapping[str, SchedulingPolicy] = MappingProxyType(
     {
+        "binary_offload": binary_offload_policy(),
         "dag_deadline": SchedulingPolicy(
             policy_id="dag_deadline",
             version="1",
@@ -299,11 +373,18 @@ _BUILT_IN_POLICIES: Mapping[str, SchedulingPolicy] = MappingProxyType(
 )
 
 _POLICY_ORDER = (
+    "binary_offload",
     "dag_deadline",
     "rule_based",
     "local_first",
     "edge_first",
     "greedy_cost",
+)
+
+_ALGORITHM_ALIAS_ORDER = tuple(
+    policy_id
+    for policy_id in _POLICY_ORDER
+    if policy_id != "binary_offload"
 )
 
 
@@ -328,5 +409,5 @@ def algorithm_aliases() -> dict[str, dict[str, str]]:
             "optimizer_id": "heuristic",
             "policy_id": policy_id,
         }
-        for policy_id in _POLICY_ORDER
+        for policy_id in _ALGORITHM_ALIAS_ORDER
     }

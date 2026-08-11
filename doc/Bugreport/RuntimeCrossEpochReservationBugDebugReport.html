@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Runtime 跨调度轮次预约提前释放 Bug Debug 报告</title>
+  <style>
+    body { max-width: 1050px; margin: 36px auto; padding: 0 24px 48px; color: #202124; font: 16px/1.75 system-ui, "Microsoft YaHei", sans-serif; }
+    h1, h2, h3 { line-height: 1.35; color: #17324d; }
+    h1 { border-bottom: 3px solid #3b82f6; padding-bottom: 12px; }
+    h2 { margin-top: 34px; border-left: 5px solid #3b82f6; padding-left: 12px; }
+    code { font-family: Consolas, monospace; }
+    pre { overflow-x: auto; padding: 16px; border-radius: 8px; background: #f4f6f8; border: 1px solid #d8dee4; line-height: 1.5; }
+    .summary { padding: 16px 20px; background: #eef6ff; border: 1px solid #9ec5fe; border-radius: 8px; }
+    .bad { background: #fff1f0; border-color: #ffb3ad; }
+    .good { background: #effaf3; border-color: #91d5a8; }
+    table { width: 100%; border-collapse: collapse; margin: 14px 0; }
+    th, td { border: 1px solid #cfd7df; padding: 9px 12px; text-align: left; vertical-align: top; }
+    th { background: #edf2f7; }
+    .result { font-weight: 700; color: #176b35; }
+  </style>
+</head>
+<body>
+  <h1>Runtime 跨调度轮次预约提前释放 Bug Debug 报告</h1>
+  <p><strong>范围：</strong>InProcessRuntime 提前删除虚拟未来仍然有效的预约，导致跨调度轮次并发检查缺少旧任务。</p>
+  <p><strong>平台修改文件：</strong><code>mars/runtime/inprocess.py</code></p>
+  <p><strong>新增回归测试：</strong><code>tests/test_runtime_cross_epoch_reservations.py</code></p>
+
+  <div class="summary">
+    <strong>一句话结论：</strong>Runtime可以立即计算任务未来的完成时间，但不能立即删除该任务在未来时间段内的资源预约；修复后，预约保留到虚拟结束时间，跨轮次任务也会参与CPU、GPU、内存和并发校验。
+  </div>
+
+  <h2>1. Bug成因</h2>
+  <h3>1.1 两套预约表发生分裂</h3>
+  <p>Coordinator通过完成事件堆和<code>active_resource_reservations</code>保留未完成任务；Runtime通过内部<code>_ResourceReservation</code>检查真实派发是否符合资源和并发上限。</p>
+  <p>原版<code>receive_completion()</code>不等待虚拟结束时间，立即调用<code>agent.release()</code>。而<code>release()</code>直接执行：</p>
+  <pre><code>reservation = self._reservations.pop(reservation_id, None)</code></pre>
+  <p>因此，Coordinator仍认为任务尚未到完成时间，Runtime却已经忘记了它。</p>
+
+  <h3>1.2 为什么同批次检查有效、跨批次失效</h3>
+  <p>同一批任务会连续完成<code>dispatch()</code>，之后事件循环才运行<code>receive_completion()</code>。所以同一批后派发任务仍能看到先派发任务。事件循环让出控制权后，本批预约被提前删除，下一批任务便看不到上一批仍在虚拟执行的任务。</p>
+
+  <h2>2. 固定复现场景</h2>
+  <table>
+    <tr><th>项目</th><th>固定值</th></tr>
+    <tr><td>场景</td><td><code>multi_robot_mapping</code></td></tr>
+    <tr><td>随机种子</td><td>47</td></tr>
+    <tr><td>策略</td><td><code>edge_first</code></td></tr>
+    <tr><td>执行时间噪声</td><td><code>resource_noise=0.05</code></td></tr>
+    <tr><td>Edge并发上限</td><td>4</td></tr>
+    <tr><td>失败点</td><td>576.6980429224418ms</td></tr>
+  </table>
+  <p>三个早期轮次的数据压缩任务在Runtime中被提前删除；第二批定位任务因此忽略这三个占用。Noise使两个定位任务短暂重叠，Coordinator最终看到<code>3 + 2 = 5</code>，超过并发上限4。</p>
+  <div class="summary bad">
+    <strong>修复前测试结果：</strong><code>PlanValidationError: node edge-1 exceeds max_concurrency at 576.6980429224418</code>
+  </div>
+
+  <h2>3. 最小Diff</h2>
+  <h3>3.1 修改前</h3>
+  <pre><code>def release(self, reservation_id, finished_time_ms, *, ok):
+    reservation = self._reservations.pop(reservation_id, None)
+    ...
+
+async def receive_completion(self, dispatch_id):
+    ...
+    agent.release(
+        reservation.reservation_id,
+        completion.finished_time_ms,
+        ok=completion.ok,
+    )</code></pre>
+
+  <h3>3.2 修改后</h3>
+  <pre><code>def release(
+    self,
+    reservation_id,
+    finished_time_ms,
+    *,
+    ok,
+    retain_until_finish=False,
+):
+    reservation = self._reservations.get(reservation_id)
+    if not retain_until_finish:
+        self._reservations.pop(reservation_id, None)
+    ...
+
+async def receive_completion(self, dispatch_id):
+    ...
+    agent.release(
+        reservation.reservation_id,
+        completion.finished_time_ms,
+        ok=completion.ok,
+        retain_until_finish=True,
+    )</code></pre>
+  <p>正常虚拟完成只记录结果，保留预约时间段；取消、派发失败和异常完成仍立即删除预约。</p>
+
+  <h3>3.3 过期记录清理</h3>
+  <pre><code>def _discard_expired_reservations(self, now_ms):
+    删除 scheduled_finish_ms &lt;= now_ms 的预约</code></pre>
+  <p>新一轮<code>inventory(now_ms)</code>及最终报告时清理过期记录。即使尚未物理删除，时间已经超过<code>finish_ms</code>的记录也不会被资源检查算作占用。</p>
+
+  <h2>4. 回归测试说明</h2>
+  <p>新增独立测试文件<code>tests/test_runtime_cross_epoch_reservations.py</code>，测试函数：</p>
+  <pre><code>test_edge_first_keeps_cross_epoch_runtime_reservations()</code></pre>
+  <p>它直接使用正式Benchmark相同的场景构造、设备、Profile、策略、Noise和随机种子。修复前稳定抛出并发超限；修复后完整返回SimulationReport，并确认存在多个调度轮次。</p>
+  <div class="summary good">
+    <p><strong>固定回归测试：</strong><span class="result">1 passed</span></p>
+    <p><strong>Runtime、Coordinator、Optimizer等相关测试：</strong><span class="result">105 passed</span></p>
+  </div>
+
+  <h2>5. 正式实验状态</h2>
+  <p>完整脚本已重新启动，并成功越过原来的<code>multi_robot_mapping / seed=47 / edge_first</code>并发冲突。随后在另一组合<code>high_load / seed=27 / binary_offload</code>遇到<code>binary offload problem has no feasible assignment</code>。该问题属于Optimizer可行解处理，不是本Bug复发。</p>
+  <p>为避免暗中修改Optimizer、fallback或正式参数，本轮没有用不完整数据覆盖正式CSV/JSON结果。需要单独确认该Optimizer问题后才能完成正式结果更新。</p>
+
+  <h2>6. 最终结论</h2>
+  <p>Bug2已用最小范围修复：平台只修改InProcessRuntime内部预约生命周期，没有修改Coordinator、Scheduler、Engine、Optimizer或数学目标函数；跨轮次任务现在共享同一份有效的Runtime时间表。</p>
+</body>
+</html>

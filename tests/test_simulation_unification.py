@@ -94,6 +94,8 @@ def test_web_simulation_uses_canonical_coordinator_runtime_path(
         execution_noise: float = 0.04,
         respect_expected_accuracy: bool = False,
         link_snapshots=None,
+        optimizer_registry=None,
+        fallback_optimizer="heuristic",
     ) -> CentralCoordinator:
         runtime = _RecordingRuntime(
             build_node_specs(scene_arg),
@@ -111,6 +113,8 @@ def test_web_simulation_uses_canonical_coordinator_runtime_path(
             runtime,
             link_specs=build_link_specs(scene_arg),
             link_snapshots=effective_links,
+            optimizer_registry=optimizer_registry,
+            fallback_optimizer=fallback_optimizer,
             report_sink=lambda report: captured.__setitem__(
                 "report",
                 report,

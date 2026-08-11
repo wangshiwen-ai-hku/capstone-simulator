@@ -575,8 +575,14 @@ class EngineTests(unittest.TestCase):
         self.assertGreaterEqual(result["future"].start_time_ms, 1000)
         self.assertLess(result["child"].finish_time_ms, result["future"].start_time_ms)
 
-    def test_early_execution_failure_is_not_a_deadline_miss(self):
-        workflow = WorkflowSpec("wf", (task("failure", accuracy=0.0, deadline=5000),))
+    def test_failure_and_skipped_child_are_not_counted_as_on_time(self):
+        workflow = WorkflowSpec(
+            "wf",
+            (
+                task("failure", deadline=5000),
+                task("child", dependencies=("failure",), deadline=5000),
+            ),
+        )
         report = run_workflow_simulation(
             workflow,
             [node_specs()[0]],
@@ -584,11 +590,18 @@ class EngineTests(unittest.TestCase):
             seed=2,
             network_jitter=0,
             resource_noise=0,
+            fail_first_task_ids=("failure",),
         )
         result = report.task_results[0]
         self.assertFalse(result.success)
         self.assertFalse(result.deadline_missed)
         self.assertEqual(report.metrics["deadline_miss_rate"], 0.0)
+        self.assertEqual(
+            report.metrics["executed_deadline_miss_rate"],
+            0.0,
+        )
+        self.assertEqual(report.metrics["required_task_on_time_rate"], 0.0)
+        self.assertEqual(report.metrics["skipped_task_count"], 1)
 
     def test_report_preserves_measured_profile_provenance(self):
         catalog = ProfileCatalog(

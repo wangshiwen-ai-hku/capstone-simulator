@@ -21,6 +21,7 @@ from mars.optimizers import (
     PlannedResourceReservation,
     ResourceDemand,
     SchedulingEpoch,
+    background_resource_demand,
 )
 from mars.runtime import DispatchCommand, InProcessRuntime, RuntimePort
 from mars.scheduler import build_scheduling_problem, plan_scheduling_epoch
@@ -93,6 +94,16 @@ class BlockingCompletionRuntime(InProcessRuntime):
     async def receive_completion(self, dispatch_id):
         self.receive_started.set()
         await asyncio.get_running_loop().create_future()
+
+
+class SeedCapturingRuntime(InProcessRuntime):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.dispatch_seeds: list[int] = []
+
+    async def dispatch(self, command):
+        self.dispatch_seeds.append(command.seed)
+        return await super().dispatch(command)
 
 
 def _command(
@@ -258,11 +269,11 @@ class RuntimePortTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-    async def test_runtime_rejects_a_forged_resource_demand(self):
+    async def test_runtime_uses_the_validated_reservation_demand(self):
         runtime = _runtime()
         await runtime.start(0.0)
         command = _command()
-        forged = replace(
+        profile_derived = replace(
             command,
             resource_reservation=replace(
                 command.resource_reservation,
@@ -273,16 +284,226 @@ class RuntimePortTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        ack = await runtime.dispatch(forged)
+        ack = await runtime.dispatch(profile_derived)
+
+        self.assertTrue(ack.accepted)
+        resources = (await runtime.describe(0.0))[0]["resources"]
+        self.assertAlmostEqual(resources["available_cpu"], 0.1)
+        await runtime.receive_completion(ack.dispatch_id)
+
+    async def test_inventory_does_not_release_a_pending_attempt_by_time(self):
+        runtime = _runtime()
+        await runtime.start(0.0)
+        ack = await runtime.dispatch(_command())
+        self.assertTrue(ack.accepted)
+        self.assertIsNotNone(ack.scheduled_finish_ms)
+
+        await runtime.inventory(float(ack.scheduled_finish_ms) + 100.0)
+        completion = await runtime.receive_completion(ack.dispatch_id)
+
+        self.assertEqual(completion.attempt_id, ack.attempt_id)
+        self.assertEqual(
+            (await runtime.describe(completion.finished_time_ms))[0][
+                "active_reservations"
+            ],
+            0,
+        )
+
+    async def test_delivered_completion_keeps_its_virtual_capacity_interval(self):
+        node = _node_spec()
+        runtime = InProcessRuntime(
+            (node,),
+            (NodeSnapshot(node.node_id, cpu_util=0.2),),
+            execution_noise=0.0,
+        )
+        await runtime.start(0.0)
+        first = _command("wf:yolo:first")
+        first = replace(
+            first,
+            resource_reservation=replace(
+                first.resource_reservation,
+                demand=replace(
+                    first.resource_reservation.demand,
+                    cpu_units=0.7,
+                ),
+            ),
+        )
+        first_ack = await runtime.dispatch(first)
+        self.assertTrue(first_ack.accepted)
+
+        # The coroutine result may be delivered before virtual time reaches
+        # the scheduled finish. Its historical interval must still be visible.
+        await runtime.receive_completion(first_ack.dispatch_id)
+        between = await runtime.inventory(2.0)
+        self.assertAlmostEqual(
+            between.snapshots[node.node_id].cpu_util,
+            0.9,
+        )
+        after = await runtime.inventory(5.0)
+        self.assertAlmostEqual(
+            after.snapshots[node.node_id].cpu_util,
+            0.2,
+        )
+
+        second = _command("wf:yolo:second")
+        second = replace(
+            second,
+            assignment=replace(
+                second.assignment,
+                estimated_start_ms=2.0,
+                estimated_finish_ms=7.0,
+            ),
+            resource_reservation=replace(
+                second.resource_reservation,
+                reservation_id="plan:test-epoch:yolo:second",
+                start_ms=2.0,
+                finish_ms=7.0,
+                demand=replace(
+                    second.resource_reservation.demand,
+                    cpu_units=0.2,
+                ),
+            ),
+        )
+        second_ack = await runtime.dispatch(second)
+        self.assertTrue(second_ack.accepted)
+        self.assertGreaterEqual(
+            float(second_ack.scheduled_start_ms),
+            float(first_ack.scheduled_finish_ms),
+        )
+        await runtime.receive_completion(second_ack.dispatch_id)
+
+    async def test_heartbeat_reports_background_plus_managed_reservations(self):
+        node = _node_spec()
+        base_snapshot = NodeSnapshot(node.node_id, cpu_util=0.5)
+        runtime = InProcessRuntime((node,), (base_snapshot,))
+        await runtime.start(0.0)
+        command = _command()
+        demand = replace(
+            command.resource_reservation.demand,
+            cpu_units=0.25,
+        )
+        command = replace(
+            command,
+            resource_reservation=replace(
+                command.resource_reservation,
+                demand=demand,
+            ),
+        )
+
+        ack = await runtime.dispatch(command)
+        self.assertTrue(ack.accepted)
+        inventory = await runtime.inventory(0.0)
+        self.assertAlmostEqual(
+            inventory.snapshots[node.node_id].cpu_util,
+            0.75,
+        )
+
+        committed = replace(
+            command.resource_reservation,
+            start_ms=float(ack.scheduled_start_ms),
+            finish_ms=float(ack.scheduled_finish_ms),
+        )
+        problem = build_scheduling_problem(
+            SchedulingEpoch("background-contract", 0, (command.task,)),
+            node_specs={node.node_id: node},
+            node_snapshots=inventory.snapshots,
+            parent_artifacts={},
+            ready_time_ms={command.task.task_id: 0},
+            link_specs=(),
+            link_snapshots=(),
+            existing_node_reservations=(committed,),
+        )
+        background = background_resource_demand(problem, node.node_id)
+        self.assertAlmostEqual(background.cpu_units, 0.5)
+        self.assertAlmostEqual(
+            background.cpu_units + committed.demand.cpu_units,
+            0.75,
+        )
+        await runtime.receive_completion(ack.dispatch_id)
+
+    async def test_dispatch_rejects_demand_exceeding_background_capacity(self):
+        node = _node_spec()
+        runtime = InProcessRuntime(
+            (node,),
+            (NodeSnapshot(node.node_id, cpu_util=0.8),),
+        )
+        await runtime.start(0.0)
+        command = _command()
+        command = replace(
+            command,
+            resource_reservation=replace(
+                command.resource_reservation,
+                demand=replace(
+                    command.resource_reservation.demand,
+                    cpu_units=0.5,
+                ),
+            ),
+        )
+
+        ack = await runtime.dispatch(command)
 
         self.assertFalse(ack.accepted)
-        self.assertEqual(
-            ack.error_code,
-            "resource_reservation_mismatch",
+        self.assertEqual(ack.error_code, "resources_unavailable")
+
+    async def test_terminal_execution_consumes_dynamic_energy_budget(self):
+        node = _node_spec()
+        for inject_failure in (False, True):
+            with self.subTest(inject_failure=inject_failure):
+                runtime = InProcessRuntime(
+                    (node,),
+                    (
+                        NodeSnapshot(
+                            node.node_id,
+                            remaining_energy_j=3.0,
+                        ),
+                    ),
+                    execution_noise=0.0,
+                )
+                await runtime.start(0.0)
+                command = replace(
+                    _command(),
+                    inject_failure=inject_failure,
+                )
+
+                ack = await runtime.dispatch(command)
+                self.assertTrue(ack.accepted)
+                pending = await runtime.inventory(0.0)
+                self.assertAlmostEqual(
+                    pending.snapshots[node.node_id].remaining_energy_j,
+                    2.0,
+                )
+
+                completion = await runtime.receive_completion(
+                    ack.dispatch_id
+                )
+                self.assertEqual(completion.ok, not inject_failure)
+                finished = await runtime.inventory(
+                    completion.finished_time_ms
+                )
+                self.assertAlmostEqual(
+                    finished.snapshots[node.node_id].remaining_energy_j,
+                    2.0,
+                )
+
+        cancelled_runtime = InProcessRuntime(
+            (node,),
+            (NodeSnapshot(node.node_id, remaining_energy_j=3.0),),
+            execution_noise=0.0,
         )
-        self.assertEqual(
-            (await runtime.describe(0.0))[0]["active_reservations"],
-            0,
+        await cancelled_runtime.start(0.0)
+        cancelled_ack = await cancelled_runtime.dispatch(_command())
+        self.assertTrue(cancelled_ack.accepted)
+        self.assertTrue(
+            await cancelled_runtime.cancel(
+                cancelled_ack.attempt_id,
+                "test_cancel",
+                0.0,
+            )
+        )
+        restored = await cancelled_runtime.inventory(0.0)
+        self.assertAlmostEqual(
+            restored.snapshots[node.node_id].remaining_energy_j,
+            3.0,
         )
 
     async def test_concurrency_override_is_advertised_consistently(self):
@@ -318,6 +539,29 @@ class RuntimePortTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.metrics["task_count"], 1)
         with self.assertRaisesRegex(RuntimeError, "one-shot"):
             await coordinator.run_async(workflow)
+
+    async def test_nondeterministic_run_uses_one_auditable_execution_seed(self):
+        runtime = _runtime(runtime_type=SeedCapturingRuntime)
+        coordinator = CentralCoordinator(runtime)
+
+        report = await coordinator.run_async(
+            WorkflowSpec("wf", (task("yolo"),)),
+            seed=11,
+            deterministic=False,
+        )
+
+        scheduling = report.workflow["scheduling"]
+        self.assertEqual(scheduling["requested_seed"], 11)
+        self.assertFalse(scheduling["deterministic"])
+        self.assertEqual(
+            runtime.dispatch_seeds,
+            [scheduling["execution_seed"]],
+        )
+        self.assertFalse(scheduling["solve_limits"]["deterministic"])
+        self.assertEqual(
+            scheduling["solve_limits"]["random_seed"],
+            scheduling["execution_seed"],
+        )
 
     async def test_coordinator_describe_reads_an_immutable_cached_view(self):
         runtime = _runtime()
@@ -368,7 +612,12 @@ class RuntimePortTests(unittest.IsolatedAsyncioTestCase):
             await coordinator.run_async(WorkflowSpec("wf", (task("yolo"),)))
 
         self.assertEqual(runtime.cancelled_attempts, ["wf:yolo:attempt:1"])
-        self.assertEqual((await runtime.describe(1.0))[0]["active_reservations"], 0)
+        self.assertEqual(
+            (await runtime.describe(1_000_000.0))[0][
+                "active_reservations"
+            ],
+            0,
+        )
 
     async def test_coordinator_cancellation_releases_the_active_attempt(self):
         runtime = _runtime(runtime_type=BlockingCompletionRuntime)

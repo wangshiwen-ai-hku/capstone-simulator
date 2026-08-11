@@ -45,7 +45,7 @@ class CoordinatorTests(unittest.TestCase):
         failed_task_id = next(
             task.task_id
             for task in self.workflow.tasks
-            if task.spec.task_type == "local_llm_7b"
+            if task.spec.task_type == "object_detection"
         )
         report = CentralCoordinator(self.runtime).run(
             self.workflow,
@@ -115,7 +115,7 @@ class CoordinatorTests(unittest.TestCase):
         failed_task_id = next(
             task.task_id
             for task in self.workflow.tasks
-            if task.spec.task_type == "local_llm_7b"
+            if task.spec.task_type == "object_detection"
         )
         for algorithm in (
             "dag_deadline",

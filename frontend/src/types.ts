@@ -1,7 +1,49 @@
 export type Difficulty = 'easy' | 'medium' | 'hard' | 'stress';
 export type ScenarioType = 'warehouse' | 'hospital' | 'campus' | 'factory' | 'disaster' | 'custom';
-export type Algorithm = 'dag_deadline' | 'rule_based' | 'local_first' | 'edge_first' | 'greedy_cost';
+export type Algorithm = 'dag_deadline' | 'rule_based' | 'local_first' | 'edge_first' | 'greedy_cost' | 'binary_offload';
 export type TaskClass = 'local_safety' | 'realtime_offloadable' | 'edge_heavy';
+export type NodeKind = 'robot' | 'edge' | 'cloud';
+
+export interface SchedulerRunOptions {
+  communicationWeight?: number;
+}
+
+export interface NumericSchedulingParameter {
+  type: 'number';
+  label: string;
+  default: number;
+  minimum: number;
+  maximum?: number;
+  step: number;
+  description: string;
+}
+
+export interface SchedulingAlgorithmCapability {
+  id: string;
+  label: string;
+  kind: string;
+  stability: string;
+  execution_paths: string[];
+  parameters: {
+    communication_weight?: NumericSchedulingParameter;
+  };
+  compatibility: {
+    supported_node_kinds: NodeKind[];
+    supports_multiple_nodes: boolean;
+    requires_source_candidate: boolean;
+    max_ready_tasks?: number;
+  };
+}
+
+export interface SchedulingCapabilities {
+  schema_version: string | number;
+  algorithms: SchedulingAlgorithmCapability[];
+}
+
+export interface ArchitectureResponse {
+  scheduling_capabilities?: SchedulingCapabilities;
+  [key: string]: unknown;
+}
 
 export const TASK_CATEGORIES = [
   'obstacle_avoidance',
@@ -34,7 +76,7 @@ export interface GenerateSceneRequest {
 
 export interface NodeSpec {
   id: string;
-  kind: 'robot' | 'edge' | 'cloud';
+  kind: NodeKind;
   display_name: string;
   architecture: string;
   cpu_capacity: number;
@@ -58,13 +100,14 @@ export interface ResourceSnapshot {
   power_w: number;
   network_latency_ms: number;
   online: boolean;
+  remaining_energy_j?: number | null;
 }
 
 export interface PlacementConstraintsSpec {
   pinned_node_id: string;
   pin_to_source: boolean;
-  allowed_node_kinds: Array<'robot' | 'edge' | 'cloud'>;
-  preferred_node_kinds: Array<'robot' | 'edge' | 'cloud'>;
+  allowed_node_kinds: NodeKind[];
+  preferred_node_kinds: NodeKind[];
   required_capabilities: string[];
   allow_source_node: boolean;
   allow_other_robots: boolean;
@@ -159,6 +202,8 @@ export interface SimulationMetrics {
   task_count: number;
   success_rate: number;
   deadline_miss_rate: number;
+  executed_deadline_miss_rate?: number;
+  required_task_on_time_rate?: number;
   avg_latency_ms: number;
   p95_latency_ms: number;
   p99_latency_ms: number;
@@ -172,6 +217,19 @@ export interface SimulationMetrics {
   workflow_success_rate: number;
   critical_path_ms: number;
   dag_depth: number;
+  total_solver_time_ms?: number;
+  max_solver_time_ms?: number;
+  scheduling_epoch_count?: number;
+  expected_success_reward?: number;
+  expected_success_ratio?: number;
+  communication_time_ms?: number;
+  normalized_communication?: number;
+  peak_cpu_utilization?: number;
+  peak_gpu_utilization?: number;
+  peak_memory_utilization?: number;
+  maximum_resource_utilization?: number;
+  workflow_evaluation_objective?: number;
+  fallback_count?: number;
 }
 
 export interface TaskRunResult {
@@ -214,6 +272,10 @@ export interface SimulationResponse {
     deadline_missed: boolean;
     state_counts: Record<string, number>;
     critical_path: string[];
+    scheduling?: RuntimeSchedulingProvenance;
+    requested_algorithm?: string;
+    optimizer_options?: Record<string, number>;
+    metric_schema_version?: string;
   };
   task_class_summary: Partial<Record<TaskClass, {
     task_count: number;
@@ -232,7 +294,7 @@ export interface SimulationResponse {
 
 export interface RuntimeAgent {
   agent_id: string;
-  kind: 'robot' | 'edge';
+  kind: Exclude<NodeKind, 'cloud'>;
   architecture: string;
   registered: boolean;
   online: boolean;
@@ -314,6 +376,15 @@ export interface RuntimeEvent {
   agent_id: string;
 }
 
+export interface RuntimeSchedulingProvenance {
+  requested_algorithm?: string;
+  effective_optimizers?: Record<string, number>;
+  effective_policies?: Record<string, number>;
+  solve_statuses?: Record<string, number>;
+  termination_reasons?: Record<string, number>;
+  fallback_count?: number;
+}
+
 export interface RuntimeReport {
   workflow: {
     workflow_id: string;
@@ -323,6 +394,10 @@ export interface RuntimeReport {
     critical_path: string[];
     topological_order: string[];
     levels: Record<string, number>;
+    scheduling?: RuntimeSchedulingProvenance;
+    requested_algorithm?: string;
+    optimizer_options?: Record<string, number>;
+    metric_schema_version?: string;
   };
   metrics: Record<string, number>;
   task_results: RuntimeTaskResult[];

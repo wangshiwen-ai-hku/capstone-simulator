@@ -5,11 +5,12 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import App, { slotUtilization, taskPlayback } from './App';
 import {
   generateScene,
+  getArchitecture,
   getRuntimeWorkflow,
   health,
   submitRuntimeWorkflow,
 } from './api';
-import type { BenchmarkScene } from './types';
+import type { BenchmarkScene, SchedulingAlgorithmCapability } from './types';
 
 const { scene } = vi.hoisted(() => ({ scene: {
   id: 'scene-test',
@@ -84,6 +85,31 @@ const { scene } = vi.hoisted(() => ({ scene: {
   generation_note: '',
 } as BenchmarkScene }));
 
+const binaryCapability = {
+  id: 'binary_offload',
+  label: 'Binary offload',
+  kind: 'optimizer',
+  stability: 'beta',
+  execution_paths: ['simulation', 'runtime'],
+  parameters: {
+    communication_weight: {
+      type: 'number',
+      label: 'Communication weight',
+      default: 0.25,
+      minimum: 0,
+      maximum: 2,
+      step: 0.05,
+      description: 'Balances expected success against communication time.',
+    },
+  },
+  compatibility: {
+    supported_node_kinds: ['robot', 'edge'],
+    supports_multiple_nodes: true,
+    requires_source_candidate: false,
+    max_ready_tasks: 32,
+  },
+} satisfies SchedulingAlgorithmCapability;
+
 vi.mock('./api', () => ({
   health: vi.fn().mockResolvedValue({
     status: 'ok',
@@ -94,6 +120,7 @@ vi.mock('./api', () => ({
     mars_version: 'test',
   }),
   generateScene: vi.fn().mockResolvedValue(scene),
+  getArchitecture: vi.fn().mockResolvedValue({}),
   getRuntimeWorkflow: vi.fn(),
   submitRuntimeWorkflow: vi.fn(),
 }));
@@ -117,6 +144,7 @@ beforeEach(() => {
     mars_version: 'test',
   });
   vi.mocked(generateScene).mockReset().mockResolvedValue(scene);
+  vi.mocked(getArchitecture).mockReset().mockResolvedValue({});
   vi.mocked(getRuntimeWorkflow).mockReset();
   vi.mocked(submitRuntimeWorkflow).mockReset();
 });
@@ -139,6 +167,17 @@ describe('MARS Studio', () => {
     expect(
       (screen.getByRole('checkbox', { name: 'Use LLM scene generation' }) as HTMLInputElement).disabled,
     ).toBe(true);
+    expect(screen.getByLabelText('Scheduling method')).toBeTruthy();
+  });
+
+  it('keeps the five stable methods when capability discovery fails', async () => {
+    vi.mocked(getArchitecture).mockRejectedValue(new Error('old backend'));
+    render(<App />);
+
+    await screen.findByText('Warehouse test scene');
+    const method = screen.getByLabelText('Scheduling method') as HTMLSelectElement;
+    expect(method.options).toHaveLength(5);
+    expect(screen.queryByRole('option', { name: 'Binary offload' })).toBeNull();
   });
 
   it('passes the backend-owned LLM selection into scene generation', async () => {
@@ -216,6 +255,105 @@ describe('MARS Studio', () => {
       expect(screen.getAllByText('failed').length).toBeGreaterThan(0);
     });
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('discovers binary offload, uses its advertised default, and renders available metrics', async () => {
+    vi.mocked(getArchitecture).mockResolvedValue({
+      scheduling_capabilities: {
+        schema_version: '1',
+        algorithms: [binaryCapability],
+      },
+    });
+    vi.mocked(submitRuntimeWorkflow).mockResolvedValue({
+      run_id: 'run-binary',
+      workflow_id: scene.workflow_id,
+      status: 'accepted',
+    });
+    vi.mocked(getRuntimeWorkflow).mockResolvedValue({
+      run_id: 'run-binary',
+      workflow_id: scene.workflow_id,
+      status: 'succeeded',
+      error: '',
+      result: {
+        workflow: {
+          workflow_id: scene.workflow_id,
+          state: 'succeeded',
+          failure_policy: 'fail_fast',
+          state_counts: { succeeded: 1 },
+          critical_path: ['task_1'],
+          topological_order: ['task_1'],
+          levels: { task_1: 0 },
+          scheduling: {
+            requested_algorithm: 'binary_offload',
+            effective_optimizers: { binary_offload: 5, heuristic: 1 },
+            effective_policies: { binary_offload: 6 },
+            solve_statuses: { optimal: 5, time_limit: 1 },
+            fallback_count: 1,
+          },
+        },
+        metrics: {
+          makespan_ms: 0,
+          success_rate: 1,
+          required_task_on_time_rate: 0.75,
+          executed_deadline_miss_rate: 0.25,
+          skipped_task_count: 1,
+          total_solver_time_ms: 3.5,
+          scheduling_epoch_count: 2,
+          expected_success_reward: 4,
+          workflow_evaluation_objective: -0.75,
+        },
+        task_results: [{
+          task_id: 'task_1',
+          task_name: 'Localization',
+          task_type: 'localization',
+          task_class: 'realtime_offloadable',
+          state: 'succeeded',
+          source_node_id: 'robot_1',
+          target_node_id: 'robot_1',
+          mode: 'local',
+          dependencies: [],
+          attempt_count: 0,
+          attempts: [],
+          outputs: [],
+        }],
+        agents: [],
+        data_edges: [],
+        events: [],
+        logs: [],
+      },
+    });
+    render(<App />);
+
+    const method = await screen.findByLabelText('Scheduling method');
+    await screen.findByRole('option', { name: 'Binary offload' });
+    fireEvent.change(method, { target: { value: 'binary_offload' } });
+
+    const weight = await screen.findByLabelText('Communication weight');
+    expect((weight as HTMLInputElement).value).toBe('0.25');
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    await waitFor(() => {
+      expect(submitRuntimeWorkflow).toHaveBeenCalledWith(
+        expect.objectContaining({ id: scene.id }),
+        'binary_offload',
+        7,
+        { communicationWeight: 0.25 },
+      );
+    });
+    expect(await screen.findByLabelText('Runtime metrics')).toBeTruthy();
+    expect(screen.getByText('Total solve')).toBeTruthy();
+    expect(screen.getByText('3.50 ms')).toBeTruthy();
+    expect(screen.getByText('Expected reward')).toBeTruthy();
+    expect(screen.getByText('4.000')).toBeTruthy();
+    expect(screen.getByText('Required tasks on time')).toBeTruthy();
+    expect(screen.getByText('75.0%')).toBeTruthy();
+    expect(screen.getByText('Executed deadline misses')).toBeTruthy();
+    expect(screen.getByText('25.0%')).toBeTruthy();
+    expect(screen.getByText('Skipped tasks')).toBeTruthy();
+    expect(screen.getByText('Scheduling audit')).toBeTruthy();
+    expect(screen.getByText('binary offload x 5, heuristic x 1')).toBeTruthy();
+    expect(screen.getByText('Fallbacks')).toBeTruthy();
+    expect(screen.queryByText('Longest solve')).toBeNull();
   });
 });
 
