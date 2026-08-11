@@ -1,6 +1,6 @@
 """Run the fixed Stage 4-6 MARS benchmark and write every result under doc/."""
 
-# ruff: noqa: E402 -- direct execution adds the repository root to sys.path.
+# ruff: noqa: E402 -- direct script execution bootstraps repository imports.
 
 from __future__ import annotations
 
@@ -15,7 +15,10 @@ from statistics import mean, stdev
 from time import perf_counter
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+if __package__ in {None, ""}:
+    root_path = str(ROOT)
+    if root_path not in sys.path:
+        sys.path.insert(0, root_path)
 
 from backend.app.mars_adapter import (
     build_link_snapshots,

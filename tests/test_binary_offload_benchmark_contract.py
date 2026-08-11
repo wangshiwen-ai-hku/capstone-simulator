@@ -1,8 +1,41 @@
 import json
+import subprocess
+import sys
 
 import pytest
 
 from scripts import run_binary_offload_benchmark as benchmark
+
+
+def test_package_import_does_not_mutate_sys_path():
+    probe = """
+import importlib
+import json
+import sys
+
+before = list(sys.path)
+module = importlib.import_module("scripts.run_binary_offload_benchmark")
+after_import = list(sys.path)
+importlib.reload(module)
+after_reload = list(sys.path)
+
+print(json.dumps({
+    "import_unchanged": after_import == before,
+    "reload_unchanged": after_reload == after_import,
+}))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=benchmark.ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "import_unchanged": True,
+        "reload_unchanged": True,
+    }
 
 
 def test_single_case_uses_production_metrics_and_auditable_solver_metadata():
