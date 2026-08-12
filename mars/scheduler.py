@@ -8,6 +8,7 @@ import enum
 import hashlib
 import json
 import math
+from time import perf_counter
 
 from .dag import DagIndex
 from .domain.artifact import (
@@ -29,6 +30,7 @@ from .optimizers import (
     CandidateEstimate,
     Optimizer,
     OptimizerRegistry,
+    OptimizerSolveState,
     PlanValidationError,
     PlannedResourceReservation,
     ResourceDemand,
@@ -38,6 +40,10 @@ from .optimizers import (
     SchedulingProblem,
     SchedulingSnapshot,
     SolveLimits,
+    SolveStatus,
+    SolveTraceContext,
+    SolveTracePhase,
+    StatefulOptimizer,
     algorithm_aliases,
     built_in_policy,
     built_in_registry,
@@ -469,6 +475,7 @@ def plan_scheduling_epoch(
     solve_budget_ms: float | None = None,
     registry: OptimizerRegistry | None = None,
     fallback_optimizer: str | Optimizer | None = "heuristic",
+    solve_state: OptimizerSolveState | None = None,
 ) -> SchedulingPlan:
     """Solve and validate one epoch through a replaceable optimizer.
 
@@ -505,7 +512,11 @@ def plan_scheduling_epoch(
         solve_budget_ms=solve_budget_ms,
     )
     try:
-        return _solve_validated(problem, selected)
+        return _solve_validated(
+            problem,
+            selected,
+            solve_state=solve_state,
+        )
     except Exception as rejected:
         if fallback_optimizer is None:
             raise
@@ -516,7 +527,11 @@ def plan_scheduling_epoch(
         if fallback is selected:
             raise
         try:
-            repaired = _solve_validated(problem, fallback)
+            repaired = _solve_validated(
+                problem,
+                fallback,
+                solve_state=solve_state,
+            )
         except Exception as fallback_error:
             raise RuntimeError(
                 f"optimizer {selected.optimizer_id!r} failed and fallback "
@@ -663,13 +678,171 @@ def _infeasible(
 def _solve_validated(
     problem: SchedulingProblem,
     optimizer: Optimizer,
+    *,
+    solve_state: OptimizerSolveState | None = None,
 ) -> SchedulingPlan:
-    plan = optimizer.solve(problem)
-    if plan.optimizer_id != optimizer.optimizer_id:
-        raise PlanValidationError(
-            "plan optimizer_id does not match the selected optimizer"
+    solve_started = perf_counter()
+    generic_context = None
+    optimizer_version = str(getattr(optimizer, "optimizer_version", ""))
+    use_stateful_api = (
+        solve_state is not None
+        and isinstance(optimizer, StatefulOptimizer)
+    )
+    if solve_state is not None:
+        generic_context = solve_state.begin(
+            problem,
+            optimizer_id=optimizer.optimizer_id,
+            optimizer_version=optimizer_version,
+            work_unit=str(
+                getattr(optimizer, "solve_work_unit", "iteration")
+            ),
         )
-    return validate_plan(problem, plan)
+
+    try:
+        if use_stateful_api:
+            assert solve_state is not None
+            assert generic_context is not None
+            plan = optimizer.solve_with_state(
+                problem,
+                solve_state,
+                context=generic_context,
+            )
+        else:
+            plan = optimizer.solve(problem)
+    except Exception as exc:
+        if solve_state is not None:
+            context = solve_state.latest_context(
+                problem.problem_id,
+                optimizer.optimizer_id,
+            )
+            latest = next(
+                (
+                    entry
+                    for entry in reversed(solve_state.entries)
+                    if context is not None
+                    and entry.context.solve_id == context.solve_id
+                ),
+                None,
+            )
+            already_failed = (
+                latest is not None
+                and latest.phase is SolveTracePhase.FAILED
+            )
+            if not already_failed:
+                if generic_context is None:
+                    generic_context = context
+                assert generic_context is not None
+                solve_state.record(
+                    generic_context,
+                    SolveTracePhase.FAILED,
+                    elapsed_ms=(perf_counter() - solve_started) * 1000.0,
+                    solve_status=SolveStatus.ERROR,
+                    termination_reason=f"{type(exc).__name__}: {exc}",
+                    details={
+                        "ready_task_count": len(problem.epoch.ready_tasks),
+                    },
+                )
+        raise
+
+    if solve_state is not None and not use_stateful_api:
+        assert generic_context is not None
+        _record_plan_trace(
+            solve_state,
+            generic_context,
+            SolveTracePhase.COMPLETED,
+            plan,
+            problem,
+        )
+
+    try:
+        if plan.optimizer_id != optimizer.optimizer_id:
+            raise PlanValidationError(
+                "plan optimizer_id does not match the selected optimizer"
+            )
+        validated = validate_plan(problem, plan)
+    except Exception as exc:
+        if solve_state is not None:
+            context = generic_context
+            if context is None:
+                context = solve_state.latest_context(
+                    problem.problem_id,
+                    optimizer.optimizer_id,
+                )
+            if context is not None:
+                _record_plan_trace(
+                    solve_state,
+                    context,
+                    SolveTracePhase.REJECTED,
+                    plan,
+                    problem,
+                    termination_reason=(
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                )
+        raise
+
+    if solve_state is not None:
+        context = generic_context
+        if context is None:
+            context = solve_state.latest_context(
+                problem.problem_id,
+                optimizer.optimizer_id,
+            )
+        if context is not None:
+            _record_plan_trace(
+                solve_state,
+                context,
+                SolveTracePhase.VALIDATED,
+                validated,
+                problem,
+            )
+    return validated
+
+
+def _record_plan_trace(
+    state: OptimizerSolveState,
+    context: SolveTraceContext,
+    phase: SolveTracePhase,
+    plan: SchedulingPlan,
+    problem: SchedulingProblem,
+    *,
+    termination_reason: str | None = None,
+) -> None:
+    total_combinations = plan.diagnostics.get("total_combinations")
+    state.record(
+        context,
+        phase,
+        iteration=plan.iteration_count,
+        elapsed_ms=plan.solve_elapsed_ms,
+        solve_status=plan.solve_status,
+        termination_reason=(
+            plan.termination_reason
+            if termination_reason is None
+            else termination_reason
+        ),
+        has_incumbent=bool(plan.assignments),
+        evaluated_work_units=plan.iteration_count,
+        total_work_units=(
+            int(total_combinations)
+            if isinstance(total_combinations, int)
+            else None
+        ),
+        objective_key=plan.objective_key,
+        objective_components={
+            item.objective_id: item.raw_value
+            for item in plan.objective_evaluations
+        },
+        selected_targets={
+            item.task_id: item.target_node_id
+            for item in plan.assignments
+        },
+        details={
+            "ready_task_count": len(problem.epoch.ready_tasks),
+            "communication_time_ms": sum(
+                item.communication_ms for item in plan.assignments
+            ),
+        },
+    )
 
 
 def _resolve_fallback(

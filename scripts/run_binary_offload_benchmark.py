@@ -474,22 +474,53 @@ def scheduling_audit(report) -> dict[str, object]:
     }
 
 
+def optimizer_invocation_summaries(
+    report,
+) -> tuple[Mapping[str, object], ...]:
+    """Read caller-owned optimizer summaries emitted by the coordinator."""
+
+    scheduling = report.workflow.get("scheduling")
+    if not isinstance(scheduling, Mapping):
+        raise RuntimeError("workflow.scheduling is missing")
+    solve_state = scheduling.get("optimizer_solve_state")
+    if not isinstance(solve_state, Mapping):
+        raise RuntimeError(
+            "workflow.scheduling.optimizer_solve_state is missing"
+        )
+    raw_summaries = solve_state.get("invocation_summaries")
+    if not isinstance(raw_summaries, (list, tuple)):
+        raise RuntimeError(
+            "optimizer_solve_state.invocation_summaries is missing"
+        )
+    if any(not isinstance(item, Mapping) for item in raw_summaries):
+        raise RuntimeError("optimizer invocation summaries must be mappings")
+    return tuple(raw_summaries)
+
+
 def solver_audit(
     requested_algorithm: str,
-    binary_optimizer: BinaryOffloadOptimizer,
+    invocation_summaries: tuple[Mapping[str, object], ...],
 ) -> dict[str, object]:
     """Describe requested binary solves without confusing them with fallback."""
 
-    history = (
-        tuple(binary_optimizer.solve_history)
+    summaries = (
+        tuple(
+            item
+            for item in invocation_summaries
+            if item.get("optimizer_id") == "binary_offload"
+        )
         if requested_algorithm == "binary_offload"
         else ()
     )
-    budgets = sorted({float(item["solve_budget_ms"]) for item in history})
-    iteration_limits = sorted({int(item["max_iterations"]) for item in history})
-    if history:
-        statuses = _json_counter(item["solve_status"] for item in history)
-        reasons = _json_counter(item["termination_reason"] for item in history)
+    budgets = sorted({float(item["solve_budget_ms"]) for item in summaries})
+    iteration_limits = sorted(
+        {int(item["max_iterations"]) for item in summaries}
+    )
+    if summaries:
+        statuses = _json_counter(item["solve_status"] for item in summaries)
+        reasons = _json_counter(
+            item["termination_reason"] for item in summaries
+        )
     elif requested_algorithm == "binary_offload":
         statuses = "{}"
         reasons = "{}"
@@ -497,7 +528,8 @@ def solver_audit(
         statuses = "not_exposed_for_policy_alias"
         reasons = "not_exposed_for_policy_alias"
     return {
-        "requested_solver_history_epochs": len(history),
+        "requested_solver_invocations": len(summaries),
+        "requested_solver_history_epochs": len(summaries),
         "requested_solver_statuses": statuses,
         "requested_termination_reasons": reasons,
         "observed_solve_budgets_ms": json.dumps(
@@ -509,8 +541,11 @@ def solver_audit(
             separators=(",", ":"),
         ),
         "requested_placement_search_exhaustive": (
-            all(bool(item["placement_search_exhaustive"]) for item in history)
-            if history
+            all(
+                bool(item["placement_search_exhaustive"])
+                for item in summaries
+            )
+            if summaries
             else ""
         ),
         "search_scope": (
@@ -569,6 +604,7 @@ def run_benchmark_case(
     )
     elapsed_ms = (perf_counter() - started) * 1000.0
     audit = scheduling_audit(report)
+    invocation_summaries = optimizer_invocation_summaries(report)
     if audit["requested_algorithm"] != requested_algorithm:
         raise RuntimeError(
             "coordinator scheduling audit does not match requested algorithm: "
@@ -603,7 +639,8 @@ def run_benchmark_case(
             "fallback_enabled": True,
             **item,
         }
-        for item in binary_optimizer.solve_history
+        for item in invocation_summaries
+        if item.get("optimizer_id") == "binary_offload"
     ]
     row = {
         **report.metrics,
@@ -615,7 +652,7 @@ def run_benchmark_case(
         "nominal_optimizer": optimizer,
         "nominal_policy": policy or "binary_offload",
         **audit,
-        **solver_audit(requested_algorithm, binary_optimizer),
+        **solver_audit(requested_algorithm, invocation_summaries),
         "evaluation_success_weight": case_weights.success,
         "evaluation_communication_weight": case_weights.communication,
         "evaluation_utilization_weight": case_weights.utilization,

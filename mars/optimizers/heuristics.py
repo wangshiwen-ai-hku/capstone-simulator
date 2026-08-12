@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import replace
 from time import perf_counter
 
 from ..domain.execution import Assignment, ExecutionMode
@@ -16,16 +15,21 @@ from .base import (
     SchedulingPlan,
     SchedulingProblem,
     SolveStatus,
-    background_resource_demand,
-    execution_mode_for_candidate,
 )
-from .evaluation import candidate_objective_key
+from .evaluation import candidate_proxy_key
+from .materialization import (
+    build_assignment,
+    build_node_reservation,
+    materialize_candidate,
+)
 
 
 class HeuristicOptimizer:
     """Deterministic solver that follows the policy carried by the problem."""
 
     optimizer_id = "heuristic"
+    optimizer_version = "1"
+    solve_work_unit = "ready_task"
 
     def solve(self, problem: SchedulingProblem) -> SchedulingPlan:
         solve_started = perf_counter()
@@ -76,7 +80,7 @@ class HeuristicOptimizer:
                     continue
                 try:
                     materialized.append(
-                        _materialize_candidate(
+                        materialize_candidate(
                             problem,
                             candidate,
                             reservations_by_node,
@@ -119,43 +123,23 @@ class HeuristicOptimizer:
                 task.task_id,
                 materialized,
             )
-            link_ids = tuple(
-                dict.fromkeys(
-                    link_id
-                    for transfer in chosen.transfers
-                    for link_id in transfer.path_link_ids
-                )
-            )
-            assignment = Assignment(
-                task_id=task.task_id,
-                target_node_id=chosen.node_id,
-                execution_mode=execution_mode_for_candidate(task, chosen),
-                estimated_start_ms=chosen.start_ms,
-                estimated_finish_ms=chosen.finish_ms,
-                compute_ms=chosen.compute_ms,
-                communication_ms=chosen.communication_ms,
-                energy_j=chosen.energy_j,
-                reason=_reason(problem.policy.policy_id),
-                input_locations=chosen.input_locations,
-                transfer_link_ids=link_ids,
+            assignment = build_assignment(
+                problem,
+                chosen,
+                reservations,
                 optimizer_id=self.optimizer_id,
-                epoch_id=problem.epoch.epoch_id,
-                output_size_mb=chosen.output_size_mb,
-                success_probability=chosen.success_probability,
+                reason=_reason(problem.policy.policy_id),
             )
             assignments.append(assignment)
             node_reservations.append(
-                resource_reservation := PlannedResourceReservation(
+                resource_reservation := build_node_reservation(
+                    problem,
+                    chosen,
+                    compute_start_ms=compute_start,
                     reservation_id=(
                         f"plan:{problem.epoch.epoch_id}:"
                         f"{task.task_id}:{chosen.node_id}"
                     ),
-                    epoch_id=problem.epoch.epoch_id,
-                    task_id=task.task_id,
-                    node_id=chosen.node_id,
-                    start_ms=compute_start,
-                    finish_ms=chosen.finish_ms,
-                    demand=chosen.resource_demand,
                 )
             )
             reservations_by_node[chosen.node_id].append(
@@ -175,7 +159,7 @@ class HeuristicOptimizer:
             policy_version=problem.policy.version,
             epoch_id=problem.epoch.epoch_id,
             optimizer_id=self.optimizer_id,
-            optimizer_version="1",
+            optimizer_version=self.optimizer_version,
             solve_status=(
                 SolveStatus.TIME_LIMIT
                 if time_limit_reached
@@ -228,7 +212,7 @@ class HeuristicOptimizer:
         return min(
             materialized,
             key=lambda item: (
-                *candidate_objective_key(
+                *candidate_proxy_key(
                     problem,
                     task_id,
                     item[0],
@@ -260,169 +244,6 @@ def _task_order(
         )
         return (slack, -task.priority, task.task_id)
     return (task.arrival_time_ms, -task.priority, task.task_id)
-
-
-def _materialize_candidate(
-    problem: SchedulingProblem,
-    candidate: CandidateEstimate,
-    reservations_by_node: dict[
-        str, list[PlannedResourceReservation]
-    ],
-    link_available: dict[str, float],
-) -> tuple[
-    CandidateEstimate,
-    tuple[TransferReservation, ...],
-    dict[str, float],
-    float,
-]:
-    cursor = max(problem.epoch.now_ms, candidate.ready_time_ms)
-    next_links = dict(link_available)
-    reservations: list[TransferReservation] = []
-    for index, transfer in enumerate(candidate.transfers):
-        if not transfer.path_link_ids or transfer.transfer_time_ms <= 0:
-            continue
-        transfer_start = max(
-            cursor,
-            *(
-                next_links.get(link_id, problem.epoch.now_ms)
-                for link_id in transfer.path_link_ids
-            ),
-        )
-        transfer_finish = transfer_start + transfer.transfer_time_ms
-        reservation = TransferReservation(
-            reservation_id=(
-                f"transfer:{problem.epoch.epoch_id}:{candidate.task_id}:"
-                f"{index}:{candidate.node_id}"
-            ),
-            epoch_id=problem.epoch.epoch_id,
-            task_id=candidate.task_id,
-            transfer_id=transfer.transfer_id,
-            path_link_ids=transfer.path_link_ids,
-            start_ms=transfer_start,
-            finish_ms=transfer_finish,
-            size_mb=transfer.size_mb,
-        )
-        reservations.append(reservation)
-        for link_id in transfer.path_link_ids:
-            next_links[link_id] = transfer_finish
-        cursor = transfer_finish
-
-    compute_start = _earliest_resource_start(
-        problem,
-        candidate,
-        cursor,
-        reservations_by_node.get(candidate.node_id, []),
-    )
-    start_ms = (
-        reservations[0].start_ms if reservations else compute_start
-    )
-    finish_ms = compute_start + candidate.compute_ms
-    communication_ms = sum(
-        item.finish_ms - item.start_ms for item in reservations
-    )
-    return (
-        replace(
-            candidate,
-            start_ms=start_ms,
-            finish_ms=finish_ms,
-            communication_ms=communication_ms,
-        ),
-        tuple(reservations),
-        next_links,
-        compute_start,
-    )
-
-
-def _earliest_resource_start(
-    problem: SchedulingProblem,
-    candidate: CandidateEstimate,
-    earliest_ms: float,
-    existing: list[PlannedResourceReservation],
-) -> float:
-    """Find the first interval that satisfies concurrency and capacity."""
-
-    node = problem.node_by_id[candidate.node_id]
-    background = background_resource_demand(problem, candidate.node_id)
-    if (
-        background.cpu_units + candidate.resource_demand.cpu_units
-        > node.cpu_capacity + 1e-9
-        or background.gpu_units + candidate.resource_demand.gpu_units
-        > node.gpu_capacity + 1e-9
-        or background.memory_gb + candidate.resource_demand.memory_gb
-        > node.memory_gb + 1e-9
-    ):
-        raise CandidateMaterializationError(
-            f"candidate {candidate.task_id}:{candidate.node_id} exceeds "
-            "capacity after observed background load"
-        )
-    duration_ms = candidate.compute_ms
-    cursor = max(
-        earliest_ms,
-        problem.node_available_ms.get(
-            candidate.node_id,
-            problem.epoch.now_ms,
-        ),
-    )
-    while True:
-        finish = cursor + duration_ms
-        overlapping = [
-            reservation
-            for reservation in existing
-            if reservation.start_ms < finish - 1e-9
-            and reservation.finish_ms > cursor + 1e-9
-        ]
-        boundaries = sorted(
-            {
-                cursor,
-                *(
-                    max(cursor, reservation.start_ms)
-                    for reservation in overlapping
-                ),
-                *(
-                    min(finish, reservation.finish_ms)
-                    for reservation in overlapping
-                ),
-            }
-        )
-        feasible = True
-        for point in boundaries:
-            if point >= finish - 1e-9:
-                continue
-            active = [
-                reservation
-                for reservation in overlapping
-                if reservation.start_ms <= point + 1e-9
-                and reservation.finish_ms > point + 1e-9
-            ]
-            if len(active) + 1 > node.max_concurrency:
-                feasible = False
-                break
-            if (
-                background.cpu_units
-                + sum(item.demand.cpu_units for item in active)
-                + candidate.resource_demand.cpu_units
-                > node.cpu_capacity + 1e-9
-                or background.gpu_units
-                + sum(item.demand.gpu_units for item in active)
-                + candidate.resource_demand.gpu_units
-                > node.gpu_capacity + 1e-9
-                or background.memory_gb
-                + sum(item.demand.memory_gb for item in active)
-                + candidate.resource_demand.memory_gb
-                > node.memory_gb + 1e-9
-            ):
-                feasible = False
-                break
-        if feasible:
-            return cursor
-        releases = [
-            reservation.finish_ms
-            for reservation in overlapping
-            if reservation.finish_ms > cursor + 1e-9
-        ]
-        if not releases:
-            return cursor
-        cursor = min(releases)
 
 
 def _reason(policy_id: str) -> str:

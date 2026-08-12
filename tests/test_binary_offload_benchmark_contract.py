@@ -78,6 +78,7 @@ def test_single_case_uses_production_metrics_and_auditable_solver_metadata():
     assert row["global_workflow_exact"] is False
     assert row["search_scope"] == "receding_horizon_ready_epoch"
     assert row["requested_placement_search_exhaustive"] is True
+    assert row["requested_solver_invocations"] == 2
     assert json.loads(row["requested_solver_statuses"]) == {"optimal": 2}
     assert json.loads(row["effective_solver_statuses"]) == {"optimal": 2}
     assert json.loads(row["effective_termination_reasons"]) == {

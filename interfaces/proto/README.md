@@ -37,6 +37,12 @@ configuration remain optimizer-local. `SchedulingPlan` carries
 `problem_id`, `snapshot_id`, policy identity, and optimizer identity so a
 result can be reproduced and compared.
 
+Iteration traces and warm-start continuations are currently caller-owned
+`OptimizerSolveState` data included in the in-process coordinator report; they
+are intentionally outside the v1 PC-to-agent runtime contract. A future remote
+optimizer transport must add a versioned mapping instead of serializing an
+optimizer-specific payload implicitly.
+
 `SchedulingPlan.objective_key` is the comparison value: one component for a
 weighted sum, or one component per lexicographic priority group. Soft
 constraint penalties enter their declared priority group. The legacy
@@ -84,6 +90,10 @@ negotiated optimizer capability can execute them. An adapter must map all
 fields explicitly; generated Proto classes must not replace domain validation.
 Changes that affect both representations require mapping contract tests before
 a transport is enabled.
+
+The ObjectiveMetric contract test compares the complete Python and Proto
+catalogs and locks existing numeric wire assignments; adding a metric therefore
+requires an executable `MetricDefinition` and an explicit Proto value together.
 
 Presence-aware scalar fields use Proto `optional`: absence maps to the
 documented domain default, while an explicitly supplied `false` or zero is

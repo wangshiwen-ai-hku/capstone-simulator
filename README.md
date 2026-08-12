@@ -50,6 +50,13 @@ that port.
   this is the input contract shared by every optimizer.
 - A policy declares objectives and constraints. An optimizer is the replaceable
   solver that consumes those declarations and returns a `SchedulingPlan`.
+- `MetricDefinition` is the immutable built-in catalog behind stable
+  `ObjectiveMetric` wire IDs. It versions each metric's unit, scope, canonical
+  plan evaluator, and optional candidate proxy without putting executable
+  behavior into a policy or Proto message.
+- `candidate_proxy_key` is explicitly a local heuristic ranking aid; registry
+  fidelity marks it as exact, proxy, or unsupported. Committed Plans are always
+  scored again with the canonical plan evaluator.
 - Plans are validated against candidates, node capacity, concurrency, and link
   reservations before commit; shared evaluation recomputes policy objectives
   and constraints rather than trusting solver-reported values.
@@ -93,6 +100,7 @@ READY task batch
   -> Optimizer
   -> SchedulingPlan
   -> shared objective/constraint evaluation and plan validation
+  -> caller-owned OptimizerSolveState trace
   -> optional fallback solve using the same Problem and Policy
   -> node and link reservations
   -> runtime commit
@@ -126,6 +134,18 @@ the same result envelope. `INFEASIBLE` and `ERROR` Plans are never committable;
 time- or iteration-limited Plans must still contain a fully validated feasible
 incumbent for every assignment they return.
 
+The coordinator owns one `OptimizerSolveState` per workflow and carries it
+across rolling-horizon epochs. Every solver is traced through the common
+started/completed/failed/validated/rejected lifecycle; a solver may additionally
+implement `solve_with_state` to record incumbents or keep a typed, versioned
+continuation for warm starts. Optimizer instances remain stateless and safe to
+reuse. The complete recorded trace and continuation history are included in the
+coordinator scheduling report; each solver controls checkpoint cadence, so an
+enumerative solver can record incumbent changes without logging every rejected
+combination.
+If a workflow run raises before a report can be returned, the same state remains
+available through `CentralCoordinator.optimizer_solve_state` for diagnosis.
+
 `CentralCoordinator` owns the only scheduling event loop. Its optimizer sees
 the complete ready batch. The coordinator commits validated assignments through
 `RuntimePort`, consumes correlated completions, updates DAG state, and replans
@@ -143,7 +163,9 @@ continue to be accepted as policy aliases. Each resolves to the `heuristic`
 optimizer and the policy with the same name. Additional solvers implement the
 `Optimizer` protocol and are registered through `OptimizerRegistry`; they
 consume the same `SchedulingProblem` and do not change the coordinator, task
-model, or runtime interface.
+model, or runtime interface. Solvers that need incumbent tracing or cross-frame
+warm starts additionally implement the optional `StatefulOptimizer` protocol;
+existing stateless plug-ins continue to use `solve(problem)` unchanged.
 
 ## Quick start
 
@@ -308,7 +330,10 @@ mars/
   optimizers/base.py           snapshot, problem, plan, registry, invariant validation
   optimizers/policy.py         objectives, constraints, solve limits, policy presets
   optimizers/evaluation.py     shared objective and constraint evaluation
+  optimizers/materialization.py shared candidate timing and reservation construction
+  optimizers/state.py          cross-frame solve trace and continuation state
   optimizers/heuristics.py     built-in heuristic optimizer
+  optimizers/binary_offload.py exhaustive ready-batch placement optimizer
   coordinator.py               central runtime orchestration, attempts, retry, report
   runtime/base.py              sole asynchronous control-plane runtime contract
   runtime/inprocess.py         process-local simulated runtime adapter

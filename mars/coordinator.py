@@ -33,6 +33,7 @@ from .network import synthesize_legacy_full_mesh
 from .optimizers import (
     Optimizer,
     OptimizerRegistry,
+    OptimizerSolveState,
     PlannedResourceReservation,
     SchedulingEpoch,
     SchedulingPlan,
@@ -163,6 +164,7 @@ class CentralCoordinator:
         self._sequence = 0
         self._started = False
         self._run_started = False
+        self._optimizer_solve_state: OptimizerSolveState | None = None
         self._runtime_loop: asyncio.AbstractEventLoop | None = None
         self._runtime_view: dict[str, object] = {
             "scheduler_id": "mars-central",
@@ -175,6 +177,12 @@ class CentralCoordinator:
         """Return the latest cached view without touching the runtime adapter."""
 
         return deepcopy(self._runtime_view)
+
+    @property
+    def optimizer_solve_state(self) -> OptimizerSolveState | None:
+        """Expose the workflow solve trace, including after a failed run."""
+
+        return self._optimizer_solve_state
 
     async def describe_async(self) -> dict[str, object]:
         return self.describe()
@@ -249,6 +257,10 @@ class CentralCoordinator:
             deterministic=deterministic,
             random_seed=execution_seed,
         )
+        optimizer_solve_state = OptimizerSolveState(
+            session_id=f"workflow:{workflow.workflow_id}",
+        )
+        self._optimizer_solve_state = optimizer_solve_state
         if self._started:
             inventory = await self.runtime.inventory(current_time_ms)
         else:
@@ -432,6 +444,7 @@ class CentralCoordinator:
                 solve_limits=solve_limits,
                 registry=self.optimizer_registry,
                 fallback_optimizer=self.fallback_optimizer,
+                solve_state=optimizer_solve_state,
             )
             total_solver_time_ms += plan.solve_elapsed_ms
             max_solver_time_ms = max(
@@ -1337,6 +1350,9 @@ class CentralCoordinator:
                         "deterministic": solve_limits.deterministic,
                         "random_seed": solve_limits.random_seed,
                     },
+                    "optimizer_solve_state": (
+                        optimizer_solve_state.as_dict()
+                    ),
                 },
             },
             metrics=metrics,

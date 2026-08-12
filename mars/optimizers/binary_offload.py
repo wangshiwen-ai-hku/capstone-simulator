@@ -17,24 +17,31 @@ from .base import (
     SchedulingPlan,
     SchedulingProblem,
     SolveStatus,
-    execution_mode_for_candidate,
-    maximum_resource_utilization,
 )
 from .evaluation import (
     evaluate_constraints,
     evaluate_objectives,
-    expected_weighted_success_ratio,
     objective_key,
-    plan_normalized_communication_ratio,
 )
-from .heuristics import _materialize_candidate
+from .materialization import (
+    build_assignment,
+    build_node_reservation,
+    materialize_candidate,
+)
 from .policy import binary_offload_policy
+from .state import (
+    OptimizerSolveState,
+    SolveTraceContext,
+    SolveTracePhase,
+)
 
 
 class BinaryOffloadOptimizer:
     """Enumerate one feasible placement target for every ready task."""
 
     optimizer_id = "binary_offload"
+    optimizer_version = "3"
+    solve_work_unit = "placement_combination"
 
     def __init__(
         self,
@@ -48,54 +55,77 @@ class BinaryOffloadOptimizer:
             beta=beta,
             gamma=gamma,
         )
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
-        self.solve_history: list[dict[str, object]] = []
 
     def solve(self, problem: SchedulingProblem) -> SchedulingPlan:
-        """Return the best complete incumbent within the declared limits."""
+        """Return a plan without retaining state on the optimizer instance."""
+
+        state = OptimizerSolveState(
+            session_id=f"standalone:{problem.problem_id}"
+        )
+        return self.solve_with_state(problem, state)
+
+    def solve_with_state(
+        self,
+        problem: SchedulingProblem,
+        state: OptimizerSolveState,
+        *,
+        context: SolveTraceContext | None = None,
+    ) -> SchedulingPlan:
+        """Solve while appending an auditable trace to caller-owned state."""
 
         solve_started = perf_counter()
-        history: dict[str, object] = {
-            "epoch_id": problem.epoch.epoch_id,
-            "ready_task_count": len(problem.epoch.ready_tasks),
-            "alpha": self.alpha,
-            "beta": self.beta,
-            "gamma": self.gamma,
-            "solve_status": SolveStatus.ERROR.value,
-            "termination_reason": "solve_raised_before_completion",
-            "has_incumbent": False,
-            "solve_elapsed_ms": 0.0,
-            "enumerated_combinations": 0,
-            "evaluated_combinations": 0,
-            "total_combinations": 0,
-            "solve_budget_ms": problem.solve_budget_ms,
-            "max_iterations": problem.solve_limits.max_iterations,
-        }
-        self.solve_history.append(history)
+        if context is None:
+            context = state.begin(
+                problem,
+                optimizer_id=self.optimizer_id,
+                optimizer_version=self.optimizer_version,
+                work_unit=self.solve_work_unit,
+            )
+        elif (
+            context.problem_id != problem.problem_id
+            or context.optimizer_id != self.optimizer_id
+        ):
+            raise ValueError(
+                "solve trace context does not match problem and optimizer"
+            )
         try:
-            return self._solve(problem, solve_started, history)
+            return self._solve(
+                problem,
+                solve_started,
+                state,
+                context,
+            )
         except Exception as exc:
-            if history["termination_reason"] == "solve_raised_before_completion":
-                history["solve_status"] = (
-                    SolveStatus.INFEASIBLE.value
-                    if isinstance(exc, ValueError)
-                    and "no feasible" in str(exc).lower()
-                    else SolveStatus.ERROR.value
-                )
-                history["termination_reason"] = (
-                    f"{type(exc).__name__}: {exc}"
+            if not any(
+                entry.context.solve_id == context.solve_id
+                and entry.phase is SolveTracePhase.FAILED
+                for entry in state.entries
+            ):
+                state.record(
+                    context,
+                    SolveTracePhase.FAILED,
+                    elapsed_ms=self._elapsed_ms(solve_started),
+                    solve_status=(
+                        SolveStatus.INFEASIBLE
+                        if isinstance(exc, ValueError)
+                        and "no feasible" in str(exc).lower()
+                        else SolveStatus.ERROR
+                    ),
+                    termination_reason=f"{type(exc).__name__}: {exc}",
+                    details={
+                        "ready_task_count": len(
+                            problem.epoch.ready_tasks
+                        )
+                    },
                 )
             raise
-        finally:
-            history["solve_elapsed_ms"] = self._elapsed_ms(solve_started)
 
     def _solve(
         self,
         problem: SchedulingProblem,
         solve_started: float,
-        history: dict[str, object],
+        state: OptimizerSolveState,
+        context: SolveTraceContext,
     ) -> SchedulingPlan:
         tasks = tuple(problem.epoch.ready_tasks)
         candidate_options = tuple(
@@ -105,10 +135,8 @@ class BinaryOffloadOptimizer:
         total_combinations = math.prod(
             len(options) for options in candidate_options
         )
-        history["total_combinations"] = total_combinations
         best_key: tuple[float, ...] | None = None
         best_tie_break: tuple[str, ...] | None = None
-        best_selection: tuple[CandidateEstimate, ...] | None = None
         best_plan: SchedulingPlan | None = None
         evaluated = 0
         bounded_status: SolveStatus | None = None
@@ -125,8 +153,6 @@ class BinaryOffloadOptimizer:
                 break
 
             evaluated += 1
-            history["enumerated_combinations"] = evaluated
-            history["evaluated_combinations"] = evaluated
             if not self._is_feasible(problem, selection):
                 continue
             try:
@@ -163,8 +189,6 @@ class BinaryOffloadOptimizer:
             ):
                 best_key = evaluated_key
                 best_tie_break = tie_break
-                best_selection = selection
-                history["has_incumbent"] = True
                 best_plan = replace(
                     draft,
                     objective_value=(
@@ -174,29 +198,65 @@ class BinaryOffloadOptimizer:
                     objective_evaluations=objective_evaluations,
                     constraint_evaluations=constraint_evaluations,
                 )
+                state.record(
+                    context,
+                    SolveTracePhase.INCUMBENT,
+                    iteration=evaluated,
+                    elapsed_ms=self._elapsed_ms(solve_started),
+                    has_incumbent=True,
+                    evaluated_work_units=evaluated,
+                    total_work_units=total_combinations,
+                    objective_key=evaluated_key,
+                    objective_components={
+                        item.objective_id: item.raw_value
+                        for item in objective_evaluations
+                    },
+                    selected_targets={
+                        item.task_id: item.node_id for item in selection
+                    },
+                    details={
+                        "ready_task_count": len(tasks),
+                    },
+                )
 
-        if best_selection is None or best_plan is None or best_key is None:
+        if best_plan is None or best_key is None:
             if bounded_status is SolveStatus.TIME_LIMIT:
-                history["solve_status"] = SolveStatus.TIME_LIMIT.value
-                history["termination_reason"] = (
-                    "solve_budget_reached_without_incumbent"
+                self._record_failure(
+                    state,
+                    context,
+                    solve_started,
+                    status=SolveStatus.TIME_LIMIT,
+                    reason="solve_budget_reached_without_incumbent",
+                    evaluated=evaluated,
+                    total=total_combinations,
+                    ready_task_count=len(tasks),
                 )
                 raise TimeoutError(
                     "binary offload solve budget expired before an incumbent"
                 )
             if bounded_status is SolveStatus.ITERATION_LIMIT:
-                history["solve_status"] = (
-                    SolveStatus.ITERATION_LIMIT.value
-                )
-                history["termination_reason"] = (
-                    "max_iterations_reached_without_incumbent"
+                self._record_failure(
+                    state,
+                    context,
+                    solve_started,
+                    status=SolveStatus.ITERATION_LIMIT,
+                    reason="max_iterations_reached_without_incumbent",
+                    evaluated=evaluated,
+                    total=total_combinations,
+                    ready_task_count=len(tasks),
                 )
                 raise RuntimeError(
                     "binary offload iteration limit reached before an incumbent"
                 )
-            history["solve_status"] = SolveStatus.INFEASIBLE.value
-            history["termination_reason"] = (
-                "exhaustive_search_found_no_feasible_assignment"
+            self._record_failure(
+                state,
+                context,
+                solve_started,
+                status=SolveStatus.INFEASIBLE,
+                reason="exhaustive_search_found_no_feasible_assignment",
+                evaluated=evaluated,
+                total=total_combinations,
+                ready_task_count=len(tasks),
             )
             raise ValueError(
                 "binary offload problem has no feasible complete assignment"
@@ -231,60 +291,62 @@ class BinaryOffloadOptimizer:
                 for item in best_plan.assignments
             ),
             diagnostics={
-                "alpha": self.alpha,
-                "beta": self.beta,
-                "gamma": self.gamma,
-                "binary_objective_value": best_key[0],
-                "enumerated_combinations": evaluated,
                 "total_combinations": total_combinations,
-                "placement_search_exhaustive": int(exhaustive),
-                "solve_budget_ms": problem.solve_budget_ms,
-                "max_iterations": problem.solve_limits.max_iterations,
             },
         )
-        success_ratio = expected_weighted_success_ratio(
-            problem,
-            final_plan.assignments,
-        )
-        communication_ratio = plan_normalized_communication_ratio(
-            problem,
-            final_plan.assignments,
-        )
-        maximum_utilization = maximum_resource_utilization(
-            problem,
-            final_plan.node_reservations,
-        )
-        communication_ms = sum(
-            item.communication_ms for item in final_plan.assignments
-        )
-        history.update(
-            {
-                "epoch_id": problem.epoch.epoch_id,
+        state.record(
+            context,
+            SolveTracePhase.COMPLETED,
+            iteration=evaluated,
+            elapsed_ms=elapsed_ms,
+            solve_status=solve_status,
+            termination_reason=termination_reason,
+            has_incumbent=True,
+            evaluated_work_units=evaluated,
+            total_work_units=total_combinations,
+            objective_key=best_key,
+            objective_components={
+                item.objective_id: item.raw_value
+                for item in final_plan.objective_evaluations
+            },
+            selected_targets={
+                item.task_id: item.target_node_id
+                for item in final_plan.assignments
+            },
+            details={
                 "ready_task_count": len(tasks),
-                "alpha": self.alpha,
-                "beta": self.beta,
-                "gamma": self.gamma,
-                "success_reward": success_ratio,
-                "expected_weighted_success_ratio": success_ratio,
-                "communication_time_ms": communication_ms,
-                "normalized_communication_ratio": communication_ratio,
-                "maximum_resource_utilization": maximum_utilization,
-                "objective_value": best_key[0],
-                "solve_elapsed_ms": elapsed_ms,
-                "enumerated_combinations": evaluated,
-                "total_combinations": total_combinations,
-                "placement_search_exhaustive": exhaustive,
-                "has_incumbent": True,
-                "solve_status": solve_status.value,
-                "termination_reason": termination_reason,
-                "solve_budget_ms": problem.solve_budget_ms,
-                "max_iterations": problem.solve_limits.max_iterations,
-                "assignments": {
-                    item.task_id: item.node_id for item in best_selection
-                },
-            }
+                "communication_time_ms": sum(
+                    item.communication_ms
+                    for item in final_plan.assignments
+                ),
+            },
         )
         return final_plan
+
+    def _record_failure(
+        self,
+        state: OptimizerSolveState,
+        context: SolveTraceContext,
+        solve_started: float,
+        *,
+        status: SolveStatus,
+        reason: str,
+        evaluated: int,
+        total: int,
+        ready_task_count: int,
+    ) -> None:
+        state.record(
+            context,
+            SolveTracePhase.FAILED,
+            iteration=evaluated,
+            elapsed_ms=self._elapsed_ms(solve_started),
+            solve_status=status,
+            termination_reason=reason,
+            has_incumbent=False,
+            evaluated_work_units=evaluated,
+            total_work_units=total,
+            details={"ready_task_count": ready_task_count},
+        )
 
     @staticmethod
     def _elapsed_ms(solve_started: float) -> float:
@@ -352,7 +414,7 @@ class BinaryOffloadOptimizer:
             policy_version=problem.policy.version,
             epoch_id=problem.epoch.epoch_id,
             optimizer_id=self.optimizer_id,
-            optimizer_version="2",
+            optimizer_version=self.optimizer_version,
             solve_status=SolveStatus.FEASIBLE,
             iteration_count=iteration_count,
             assignments=assignments,
@@ -380,13 +442,12 @@ class BinaryOffloadOptimizer:
         transfer_reservations: list[TransferReservation] = []
 
         for candidate in selection:
-            task = problem.task_by_id[candidate.task_id]
             (
                 materialized,
                 task_transfers,
                 next_links,
                 compute_start,
-            ) = _materialize_candidate(
+            ) = materialize_candidate(
                 problem,
                 candidate,
                 reservations_by_node,
@@ -394,48 +455,23 @@ class BinaryOffloadOptimizer:
             )
             link_available.update(next_links)
             transfer_reservations.extend(task_transfers)
-            link_ids = tuple(
-                dict.fromkeys(
-                    link_id
-                    for reservation in task_transfers
-                    for link_id in reservation.path_link_ids
-                )
-            )
             assignments.append(
-                Assignment(
-                    task_id=candidate.task_id,
-                    target_node_id=candidate.node_id,
-                    execution_mode=execution_mode_for_candidate(
-                        task,
-                        candidate,
-                    ),
-                    estimated_start_ms=materialized.start_ms,
-                    estimated_finish_ms=materialized.finish_ms,
-                    compute_ms=materialized.compute_ms,
-                    communication_ms=materialized.communication_ms,
-                    energy_j=materialized.energy_j,
-                    reason="one-hot placement candidate",
-                    input_locations=materialized.input_locations,
-                    transfer_link_ids=link_ids,
+                build_assignment(
+                    problem,
+                    materialized,
+                    task_transfers,
                     optimizer_id=self.optimizer_id,
-                    epoch_id=problem.epoch.epoch_id,
-                    output_size_mb=materialized.output_size_mb,
-                    success_probability=(
-                        materialized.success_probability
-                    ),
+                    reason="one-hot placement candidate",
                 )
             )
-            node_reservation = PlannedResourceReservation(
+            node_reservation = build_node_reservation(
+                problem,
+                materialized,
+                compute_start_ms=compute_start,
                 reservation_id=(
                     f"binary-node:{problem.epoch.epoch_id}:"
                     f"{candidate.task_id}:{candidate.node_id}"
                 ),
-                epoch_id=problem.epoch.epoch_id,
-                task_id=candidate.task_id,
-                node_id=candidate.node_id,
-                start_ms=compute_start,
-                finish_ms=materialized.finish_ms,
-                demand=materialized.resource_demand,
             )
             node_reservations.append(node_reservation)
             reservations_by_node[candidate.node_id].append(node_reservation)
