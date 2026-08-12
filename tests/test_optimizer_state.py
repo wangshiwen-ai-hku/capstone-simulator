@@ -1,5 +1,7 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import enum
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +21,9 @@ from mars.optimizers import (
     OptimizerContinuation,
     OptimizerRegistry,
     OptimizerSolveState,
+    SolveTraceContext,
+    SolveTraceEntry,
+    SolveTracePhase,
 )
 from mars.runtime import InProcessRuntime
 
@@ -29,11 +34,40 @@ class _WarmStart:
     primal: tuple[float, ...]
 
 
+@dataclass
+class _MutableWarmStart:
+    cursor: int
+
+
+@dataclass(frozen=True)
+class _HiddenMutableWarmStart:
+    cursor: int
+    hidden: list[int] = field(default_factory=list, init=False)
+
+
 class _WrongIdentityOptimizer:
     optimizer_id = "wrong-identity"
 
     def solve(self, problem):
         return HeuristicOptimizer().solve(problem)
+
+
+class _InvalidStateEnum(enum.Enum):
+    NAN = float("nan")
+    OPAQUE = object()
+
+
+def _fake_problem():
+    return SimpleNamespace(
+        problem_id="problem",
+        snapshot=SimpleNamespace(snapshot_id="snapshot"),
+        epoch=SimpleNamespace(epoch_id="epoch"),
+        policy=SimpleNamespace(policy_id="policy", version="1"),
+        solve_limits=SimpleNamespace(
+            solve_budget_ms=10.0,
+            max_iterations=0,
+        ),
+    )
 
 
 def test_optimizer_solve_state_serializes_typed_continuation() -> None:
@@ -58,7 +92,7 @@ def test_optimizer_solve_state_serializes_typed_continuation() -> None:
     state.set_continuation(continuation)
     state.set_continuation(next_continuation)
 
-    assert state.continuation_for("milp") is next_continuation
+    assert state.continuation_for("milp") == next_continuation
     assert state.as_dict()["continuations"]["milp"] == {
         "optimizer_id": "milp",
         "schema_version": "milp.warm-start.v1",
@@ -81,6 +115,180 @@ def test_optimizer_solve_state_serializes_typed_continuation() -> None:
     )
     with pytest.raises(TypeError, match="dataclass or JSON-like"):
         state.set_continuation(unsupported)
+
+
+def test_continuation_history_snapshots_mutable_payloads() -> None:
+    payload = {"cursor": 1, "nested": [1]}
+    state = OptimizerSolveState(session_id="mutable-snapshot")
+    continuation = OptimizerContinuation(
+        optimizer_id="milp",
+        schema_version="milp.state.v1",
+        updated_problem_id="problem-1",
+        payload=payload,
+    )
+
+    state.set_continuation(continuation)
+    payload["cursor"] = 99
+    payload["nested"].append(2)
+
+    archived = state.as_dict()["continuation_history"][0]["payload"]
+    assert archived == {"cursor": 1, "nested": [1]}
+    current = state.continuation_for("milp")
+    assert current is not None
+    with pytest.raises(TypeError):
+        current.payload["cursor"] = 7
+    with pytest.raises(AttributeError):
+        current.payload["nested"].append(3)
+    assert state.as_dict()["continuation_history"][0]["payload"] == {
+        "cursor": 1,
+        "nested": [1],
+    }
+    state.set_continuation(current)
+    assert state.continuation_for("milp") == current
+    with pytest.raises(TypeError, match="mapping keys must be strings"):
+        state.set_continuation(
+            OptimizerContinuation(
+                optimizer_id="bad-map",
+                schema_version="bad-map.v1",
+                updated_problem_id="problem-1",
+                payload={1: "integer", "1": "string"},
+            )
+        )
+
+    dataclass_payload = _WarmStart(iteration=4, primal=(0.0, 1.0))
+    state.set_continuation(
+        OptimizerContinuation(
+            optimizer_id="typed",
+            schema_version="typed.v1",
+            updated_problem_id="problem-1",
+            payload=dataclass_payload,
+        )
+    )
+    assert state.continuation_for("typed").payload == dataclass_payload
+    with pytest.raises(TypeError, match="must be frozen"):
+        state.set_continuation(
+            OptimizerContinuation(
+                optimizer_id="mutable-dataclass",
+                schema_version="mutable.v1",
+                updated_problem_id="problem-1",
+                payload=_MutableWarmStart(cursor=1),
+            )
+        )
+    with pytest.raises(TypeError, match="fields must all use init=True"):
+        state.set_continuation(
+            OptimizerContinuation(
+                optimizer_id="hidden-field-dataclass",
+                schema_version="hidden.v1",
+                updated_problem_id="problem-1",
+                payload=_HiddenMutableWarmStart(cursor=1),
+            )
+        )
+
+
+def test_restored_continuations_are_independent_frozen_snapshots() -> None:
+    payload = {"cursor": 1, "nested": [1]}
+    continuation = OptimizerContinuation(
+        optimizer_id="milp",
+        schema_version="milp.state.v1",
+        updated_problem_id="problem-1",
+        payload=payload,
+    )
+    state = OptimizerSolveState(
+        session_id="restored-state",
+        continuations={"milp": continuation},
+        continuation_history=[continuation],
+    )
+
+    payload["cursor"] = 9
+    payload["nested"].append(2)
+
+    assert state.as_dict()["continuations"]["milp"]["payload"] == {
+        "cursor": 1,
+        "nested": [1],
+    }
+    assert state.as_dict()["continuation_history"][0]["payload"] == {
+        "cursor": 1,
+        "nested": [1],
+    }
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    (
+        (_InvalidStateEnum.NAN, ValueError),
+        (_InvalidStateEnum.OPAQUE, TypeError),
+    ),
+)
+def test_continuation_enum_values_must_be_json_safe(
+    payload,
+    error,
+) -> None:
+    state = OptimizerSolveState(session_id="invalid-enum")
+
+    with pytest.raises(error):
+        state.set_continuation(
+            OptimizerContinuation(
+                optimizer_id="invalid-enum",
+                schema_version="invalid-enum.v1",
+                updated_problem_id="problem",
+                payload=payload,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("values", "error"),
+    (
+        ({"termination_reason": object()}, TypeError),
+        ({"has_incumbent": "yes"}, TypeError),
+        ({"iteration": True}, ValueError),
+        ({"evaluated_work_units": False}, ValueError),
+    ),
+)
+def test_trace_top_level_values_are_strictly_serializable(
+    values,
+    error,
+) -> None:
+    state = OptimizerSolveState(session_id="invalid-trace")
+    context = state.begin(_fake_problem(), optimizer_id="optimizer")
+
+    with pytest.raises(error):
+        state.record(context, SolveTracePhase.ITERATION, **values)
+
+
+def test_sparse_restored_trace_does_not_reuse_a_solve_id() -> None:
+    original_context = SolveTraceContext(
+        solve_id="sparse:solve:2",
+        frame_index=1,
+        problem_id="problem",
+        snapshot_id="snapshot",
+        epoch_id="epoch",
+        policy_id="policy",
+        policy_version="1",
+        optimizer_id="optimizer",
+        optimizer_version="",
+        work_unit="iteration",
+        solve_budget_ms=10.0,
+        max_iterations=0,
+    )
+    state = OptimizerSolveState(
+        session_id="sparse",
+        trace_entries=[
+            SolveTraceEntry(
+                sequence=1,
+                context=original_context,
+                phase=SolveTracePhase.STARTED,
+            )
+        ],
+    )
+
+    next_context = state.begin(
+        _fake_problem(),
+        optimizer_id="optimizer",
+    )
+
+    assert next_context.solve_id == "sparse:solve:3"
+    assert state.as_dict()["solve_count"] == 2
 
 
 def test_coordinator_records_validated_solves_across_epochs() -> None:
@@ -198,7 +406,7 @@ def test_stateless_plugin_rejection_and_fallback_are_both_traced() -> None:
     assert [item["frame_index"] for item in summaries] == [1, 1]
     assert [item["terminal_phase"] for item in summaries] == [
         "rejected",
-        "validated",
+        "fallback",
     ]
     assert report.workflow["scheduling"]["fallback_count"] == 1
 

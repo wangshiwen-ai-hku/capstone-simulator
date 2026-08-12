@@ -28,9 +28,14 @@ from .domain.topology import (
 from .network import NetworkTopology, synthesize_legacy_full_mesh
 from .optimizers import (
     CandidateEstimate,
+    FormulatedOptimizer,
+    FormulationCompatibilityError,
+    FormulationRegistry,
+    SchedulingFormulation,
     Optimizer,
     OptimizerRegistry,
     OptimizerSolveState,
+    ONE_HOT_PLACEMENT_SPEC,
     PlanValidationError,
     PlannedResourceReservation,
     ResourceDemand,
@@ -44,9 +49,15 @@ from .optimizers import (
     SolveTraceContext,
     SolveTracePhase,
     StatefulOptimizer,
+    StatefulFormulatedOptimizer,
     algorithm_aliases,
     built_in_policy,
     built_in_registry,
+    built_in_formulation_registry,
+    build_solve_request,
+    compile_solve_request,
+    formulation_failure_status,
+    metric_contract_id,
     validate_plan,
 )
 from .profiling import ExecutionProfile, ProfileCatalog
@@ -316,6 +327,7 @@ def build_scheduling_problem(
             )
         )
     )
+    resolved_metric_contract_id = metric_contract_id(resolved_policy)
     if (link_specs is None) != (link_snapshots is None):
         raise ValueError(
             "link_specs and link_snapshots must both be provided or omitted"
@@ -438,6 +450,7 @@ def build_scheduling_problem(
             "schema_version": "mars.scheduling-problem.v1",
             "snapshot_id": snapshot_id,
             "policy": resolved_policy,
+            "metric_contract_id": resolved_metric_contract_id,
             "solve_limits": resolved_solve_limits,
         }
     )
@@ -446,6 +459,7 @@ def build_scheduling_problem(
         snapshot=snapshot,
         policy=resolved_policy,
         solve_limits=resolved_solve_limits,
+        metric_contract_id=resolved_metric_contract_id,
     )
 
 
@@ -471,9 +485,11 @@ def plan_scheduling_epoch(
     profiles: ProfileCatalog | None = None,
     excluded_node_ids: Mapping[str, frozenset[str]] | None = None,
     policy: str | SchedulingPolicy | None = None,
+    formulation: str | SchedulingFormulation | None = None,
     solve_limits: SolveLimits | None = None,
     solve_budget_ms: float | None = None,
     registry: OptimizerRegistry | None = None,
+    formulation_registry: FormulationRegistry | None = None,
     fallback_optimizer: str | Optimizer | None = "heuristic",
     solve_state: OptimizerSolveState | None = None,
 ) -> SchedulingPlan:
@@ -487,10 +503,21 @@ def plan_scheduling_epoch(
     active_registry = built_in_registry()
     if registry is not None:
         active_registry.extend(registry, replace=True)
+    active_formulation_registry = built_in_formulation_registry()
+    if formulation_registry is not None:
+        active_formulation_registry.extend(
+            formulation_registry,
+            replace=True,
+        )
     selected, resolved_policy = _resolve_selection(
         optimizer,
         policy,
         active_registry,
+    )
+    resolved_formulation = _resolve_formulation(
+        selected,
+        formulation,
+        active_formulation_registry,
     )
     problem = build_scheduling_problem(
         epoch,
@@ -511,11 +538,16 @@ def plan_scheduling_epoch(
         solve_limits=solve_limits,
         solve_budget_ms=solve_budget_ms,
     )
+    orchestration_deadline = (
+        perf_counter() + problem.solve_limits.solve_budget_ms / 1000.0
+    )
     try:
         return _solve_validated(
             problem,
             selected,
+            formulation=resolved_formulation,
             solve_state=solve_state,
+            orchestration_deadline=orchestration_deadline,
         )
     except Exception as rejected:
         if fallback_optimizer is None:
@@ -524,20 +556,107 @@ def plan_scheduling_epoch(
             fallback_optimizer,
             active_registry,
         )
-        if fallback is selected:
+        same_optimizer_contract = (
+            fallback.optimizer_id == selected.optimizer_id
+            and str(getattr(fallback, "optimizer_version", ""))
+            == str(getattr(selected, "optimizer_version", ""))
+            and str(getattr(fallback, "optimizer_config_digest", ""))
+            == str(getattr(selected, "optimizer_config_digest", ""))
+        )
+        if same_optimizer_contract and resolved_formulation is None:
             raise
+        fallback_candidates: list[SchedulingFormulation | None] = []
+        preservation_error: Exception | None = None
+        if resolved_formulation is not None and not same_optimizer_contract:
+            try:
+                fallback_candidates.append(
+                    _resolve_formulation(
+                        fallback,
+                        resolved_formulation,
+                        active_formulation_registry,
+                    )
+                )
+            except Exception as exc:
+                preservation_error = exc
         try:
-            repaired = _solve_validated(
-                problem,
+            fallback_default = _resolve_formulation(
                 fallback,
-                solve_state=solve_state,
+                None,
+                active_formulation_registry,
             )
-        except Exception as fallback_error:
+        except Exception as exc:
+            fallback_default = None
+            if preservation_error is None:
+                preservation_error = exc
+        else:
+            duplicates_rejected_stack = (
+                same_optimizer_contract
+                and _formulation_identity(fallback_default)
+                == _formulation_identity(resolved_formulation)
+            )
+            if not duplicates_rejected_stack and (
+                not fallback_candidates
+                or _formulation_identity(fallback_candidates[-1])
+                != _formulation_identity(fallback_default)
+            ):
+                fallback_candidates.append(fallback_default)
+
+        fallback_errors: list[Exception] = []
+        repaired = None
+        fallback_formulation = None
+        for candidate_formulation in fallback_candidates:
+            if perf_counter() >= orchestration_deadline:
+                fallback_errors.append(
+                    TimeoutError(
+                        "shared scheduling-epoch solve budget expired before "
+                        "fallback"
+                    )
+                )
+                break
+            try:
+                repaired = _solve_validated(
+                    problem,
+                    fallback,
+                    formulation=candidate_formulation,
+                    solve_state=solve_state,
+                    orchestration_deadline=orchestration_deadline,
+                )
+            except Exception as fallback_error:
+                fallback_errors.append(fallback_error)
+                continue
+            fallback_formulation = candidate_formulation
+            break
+        if repaired is None:
+            fallback_error = (
+                fallback_errors[-1]
+                if fallback_errors
+                else preservation_error
+                if preservation_error is not None
+                else rejected
+            )
             raise RuntimeError(
                 f"optimizer {selected.optimizer_id!r} failed and fallback "
                 f"{fallback.optimizer_id!r} also failed"
             ) from fallback_error
-        return replace(
+        requested_formulation_id = _formulation_identity(
+            resolved_formulation
+        )
+        fallback_formulation_id = _formulation_identity(
+            fallback_formulation
+        )
+        formulation_changed = (
+            requested_formulation_id != fallback_formulation_id
+        )
+        # The built-in transition from exact one-hot to the legacy heuristic's
+        # unformulated domain admits DROP/defer decisions and is a real domain
+        # relaxation. Other future domain changes are only classified as
+        # changed until a formulation relation contract exists.
+        formulation_relaxed = bool(
+            resolved_formulation is not None
+            and resolved_formulation.spec == ONE_HOT_PLACEMENT_SPEC
+            and fallback_formulation is None
+        )
+        audited = replace(
             repaired,
             diagnostics={
                 **repaired.diagnostics,
@@ -546,8 +665,97 @@ def plan_scheduling_epoch(
                     f"{type(rejected).__name__}: {rejected}"
                 ),
                 "fallback_optimizer": fallback.optimizer_id,
+                "repaired_from_formulation": (
+                    resolved_formulation.spec.formulation_id
+                    if resolved_formulation is not None
+                    else ""
+                ),
+                "fallback_formulation": (
+                    fallback_formulation.spec.formulation_id
+                    if fallback_formulation is not None
+                    else ""
+                ),
+                "repaired_from_formulation_version": (
+                    resolved_formulation.spec.formulation_version
+                    if resolved_formulation is not None
+                    else ""
+                ),
+                "repaired_from_formulation_digest": requested_formulation_id,
+                "fallback_formulation_version": (
+                    fallback_formulation.spec.formulation_version
+                    if fallback_formulation is not None
+                    else ""
+                ),
+                "fallback_formulation_digest": fallback_formulation_id,
+                "fallback_attempt_count": len(fallback_errors) + 1,
+                "formulation_relaxed": formulation_relaxed,
+                "formulation_changed": formulation_changed,
+                "formulation_fallback_mode": (
+                    "preserved"
+                    if not formulation_changed
+                    else "fallback_default"
+                ),
             },
         )
+        if solve_state is not None:
+            fallback_request_id = audited.solve_request_id
+            context = solve_state.latest_context(
+                problem.problem_id,
+                fallback.optimizer_id,
+                fallback_request_id,
+            )
+            if context is not None:
+                solve_state.record(
+                    context,
+                    SolveTracePhase.FALLBACK,
+                    iteration=audited.iteration_count,
+                    elapsed_ms=audited.solve_elapsed_ms,
+                    solve_status=audited.solve_status,
+                    termination_reason="fallback_solution_selected",
+                    has_incumbent=bool(audited.assignments),
+                    evaluated_work_units=audited.iteration_count,
+                    total_work_units=(
+                        int(audited.diagnostics["total_combinations"])
+                        if isinstance(
+                            audited.diagnostics.get("total_combinations"),
+                            int,
+                        )
+                        else None
+                    ),
+                    objective_key=audited.objective_key,
+                    objective_components={
+                        item.objective_id: item.raw_value
+                        for item in audited.objective_evaluations
+                    },
+                    selected_targets={
+                        item.task_id: item.target_node_id
+                        for item in audited.assignments
+                    },
+                    details={
+                        "ready_task_count": len(problem.epoch.ready_tasks),
+                        "repaired_from_optimizer": selected.optimizer_id,
+                        "repaired_from_formulation_digest": (
+                            requested_formulation_id
+                        ),
+                        "fallback_formulation_digest": (
+                            fallback_formulation_id
+                        ),
+                        "formulation_relaxed": formulation_relaxed,
+                        "formulation_changed": formulation_changed,
+                        "fallback_attempt_count": len(fallback_errors) + 1,
+                        "formulation_exhausted": bool(
+                            audited.diagnostics.get(
+                                "formulation_exhausted",
+                                False,
+                            )
+                        ),
+                        "communication_time_ms": sum(
+                            item.communication_ms
+                            for item in audited.assignments
+                        ),
+                    },
+                )
+        return audited
 
 
 def choose_assignment(
@@ -679,13 +887,40 @@ def _solve_validated(
     problem: SchedulingProblem,
     optimizer: Optimizer,
     *,
+    formulation: SchedulingFormulation | None = None,
     solve_state: OptimizerSolveState | None = None,
+    orchestration_deadline: float | None = None,
 ) -> SchedulingPlan:
     solve_started = perf_counter()
+    if (
+        orchestration_deadline is not None
+        and solve_started >= orchestration_deadline
+    ):
+        raise TimeoutError(
+            "shared scheduling-epoch solve budget expired before optimizer "
+            "invocation"
+        )
     generic_context = None
     optimizer_version = str(getattr(optimizer, "optimizer_version", ""))
+    solve_request = (
+        build_solve_request(problem, optimizer, formulation)
+        if formulation is not None
+        else None
+    )
+    trusted_domain_validator = (
+        formulation.validate_plan_domain
+        if formulation is not None
+        else None
+    )
+    prepared = None
+    use_stateful_formulated_api = (
+        solve_request is not None
+        and solve_state is not None
+        and isinstance(optimizer, StatefulFormulatedOptimizer)
+    )
     use_stateful_api = (
-        solve_state is not None
+        solve_request is None
+        and solve_state is not None
         and isinstance(optimizer, StatefulOptimizer)
     )
     if solve_state is not None:
@@ -696,10 +931,36 @@ def _solve_validated(
             work_unit=str(
                 getattr(optimizer, "solve_work_unit", "iteration")
             ),
+            solve_request=(
+                solve_request
+            ),
         )
 
     try:
-        if use_stateful_api:
+        if formulation is not None:
+            assert solve_request is not None
+            prepared = compile_solve_request(
+                solve_request,
+                formulation,
+                solve_deadline_monotonic=orchestration_deadline,
+            )
+        if use_stateful_formulated_api:
+            assert solve_state is not None
+            assert generic_context is not None
+            plan = optimizer.solve_formulated_with_state(
+                prepared,
+                solve_state,
+                context=generic_context,
+            )
+        elif solve_request is not None:
+            assert prepared is not None
+            if not isinstance(optimizer, FormulatedOptimizer):
+                raise FormulationCompatibilityError(
+                    f"optimizer {optimizer.optimizer_id!r} does not support "
+                    "compiled formulations"
+                )
+            plan = optimizer.solve_formulated(prepared)
+        elif use_stateful_api:
             assert solve_state is not None
             assert generic_context is not None
             plan = optimizer.solve_with_state(
@@ -709,11 +970,39 @@ def _solve_validated(
             )
         else:
             plan = optimizer.solve(problem)
+        actual_elapsed_ms = (perf_counter() - solve_started) * 1000.0
+        if actual_elapsed_ms > plan.solve_elapsed_ms:
+            plan = replace(plan, solve_elapsed_ms=actual_elapsed_ms)
+        shared_deadline_exceeded = (
+            orchestration_deadline is not None
+            and perf_counter() >= orchestration_deadline
+        )
+        # A TIME_LIMIT incumbent may consume its own invocation budget, but it
+        # may not cross the single budget shared by the primary and every
+        # fallback attempt. Accepting a late incumbent would make fallback
+        # multiply the caller's declared scheduling-epoch deadline.
+        invocation_budget_exceeded = (
+            actual_elapsed_ms >= problem.solve_limits.solve_budget_ms
+        )
+        if shared_deadline_exceeded or (
+            invocation_budget_exceeded
+            and plan.solve_status is not SolveStatus.TIME_LIMIT
+        ):
+            raise TimeoutError(
+                f"optimizer {optimizer.optimizer_id!r} exceeded the shared "
+                f"solve budget: elapsed_ms={actual_elapsed_ms:.3f}, "
+                f"budget_ms={problem.solve_limits.solve_budget_ms:.3f}"
+            )
     except Exception as exc:
         if solve_state is not None:
             context = solve_state.latest_context(
                 problem.problem_id,
                 optimizer.optimizer_id,
+                (
+                    solve_request.solve_request_id
+                    if solve_request is not None
+                    else ""
+                ),
             )
             latest = next(
                 (
@@ -736,7 +1025,7 @@ def _solve_validated(
                     generic_context,
                     SolveTracePhase.FAILED,
                     elapsed_ms=(perf_counter() - solve_started) * 1000.0,
-                    solve_status=SolveStatus.ERROR,
+                    solve_status=formulation_failure_status(exc),
                     termination_reason=f"{type(exc).__name__}: {exc}",
                     details={
                         "ready_task_count": len(problem.epoch.ready_tasks),
@@ -744,7 +1033,11 @@ def _solve_validated(
                 )
         raise
 
-    if solve_state is not None and not use_stateful_api:
+    if (
+        solve_state is not None
+        and not use_stateful_api
+        and not use_stateful_formulated_api
+    ):
         assert generic_context is not None
         _record_plan_trace(
             solve_state,
@@ -759,7 +1052,36 @@ def _solve_validated(
             raise PlanValidationError(
                 "plan optimizer_id does not match the selected optimizer"
             )
-        validated = validate_plan(problem, plan)
+        # ``validate_plan(problem, plan)`` remains compatible with direct
+        # formulated optimizer calls, where the caller has no request object.
+        # The orchestrator does know the selected mode, so it must reject an
+        # unformulated plug-in that invents otherwise unverifiable provenance.
+        if solve_request is None and any(
+            (
+                plan.solve_request_id,
+                plan.formulation_id,
+                plan.formulation_version,
+                plan.formulation_digest,
+            )
+        ):
+            raise PlanValidationError(
+                "an unformulated plan cannot claim formulation provenance"
+            )
+        if formulation is not None:
+            assert prepared is not None
+            assert trusted_domain_validator is not None
+            trusted_domain_validator(
+                problem,
+                prepared.model,
+                plan,
+            )
+        validated = validate_plan(
+            problem,
+            plan,
+            solve_request=(
+                solve_request
+            ),
+        )
     except Exception as exc:
         if solve_state is not None:
             context = generic_context
@@ -767,6 +1089,11 @@ def _solve_validated(
                 context = solve_state.latest_context(
                     problem.problem_id,
                     optimizer.optimizer_id,
+                    (
+                        solve_request.solve_request_id
+                        if solve_request is not None
+                        else ""
+                    ),
                 )
             if context is not None:
                 _record_plan_trace(
@@ -787,6 +1114,11 @@ def _solve_validated(
             context = solve_state.latest_context(
                 problem.problem_id,
                 optimizer.optimizer_id,
+                (
+                    solve_request.solve_request_id
+                    if solve_request is not None
+                    else ""
+                ),
             )
         if context is not None:
             _record_plan_trace(
@@ -809,12 +1141,18 @@ def _record_plan_trace(
     termination_reason: str | None = None,
 ) -> None:
     total_combinations = plan.diagnostics.get("total_combinations")
+    reported_status = plan.solve_status
+    effective_status = (
+        SolveStatus.ERROR
+        if phase is SolveTracePhase.REJECTED
+        else reported_status
+    )
     state.record(
         context,
         phase,
         iteration=plan.iteration_count,
         elapsed_ms=plan.solve_elapsed_ms,
-        solve_status=plan.solve_status,
+        solve_status=effective_status,
         termination_reason=(
             plan.termination_reason
             if termination_reason is None
@@ -838,6 +1176,14 @@ def _record_plan_trace(
         },
         details={
             "ready_task_count": len(problem.epoch.ready_tasks),
+            **(
+                {"reported_solve_status": reported_status.value}
+                if phase is SolveTracePhase.REJECTED
+                else {}
+            ),
+            "formulation_exhausted": bool(
+                plan.diagnostics.get("formulation_exhausted", False)
+            ),
             "communication_time_ms": sum(
                 item.communication_ms for item in plan.assignments
             ),
@@ -857,6 +1203,60 @@ def _resolve_fallback(
         return registry.resolve(optimizer)
     except KeyError:
         return built_in_registry().resolve(optimizer)
+
+
+def _resolve_formulation(
+    optimizer: Optimizer,
+    formulation: str | SchedulingFormulation | None,
+    registry: FormulationRegistry,
+) -> SchedulingFormulation | None:
+    selected = formulation
+    if selected is None:
+        selected = getattr(optimizer, "default_formulation_id", None)
+    if selected is None:
+        selected = getattr(optimizer, "default_formulation", None)
+    if selected is None:
+        return None
+    resolved = registry.resolve(selected)
+    if not isinstance(optimizer, FormulatedOptimizer):
+        raise FormulationCompatibilityError(
+            f"optimizer {optimizer.optimizer_id!r} does not implement the "
+            "formulated optimizer contract"
+        )
+    supported = optimizer.supported_formulation_ids
+    if not isinstance(supported, frozenset) or any(
+        not isinstance(item, str) or not item.strip()
+        for item in supported
+    ):
+        raise FormulationCompatibilityError(
+            f"optimizer {optimizer.optimizer_id!r} has an invalid "
+            "supported_formulation_ids contract"
+        )
+    supports = optimizer.supports_formulation(resolved.spec)
+    if not isinstance(supports, bool):
+        raise FormulationCompatibilityError(
+            f"optimizer {optimizer.optimizer_id!r} supports_formulation "
+            "must return bool"
+        )
+    if not supports:
+        raise FormulationCompatibilityError(
+            f"optimizer {optimizer.optimizer_id!r} does not support "
+            f"formulation contract {resolved.spec.formulation_id!r} "
+            f"version={resolved.spec.formulation_version!r} "
+            f"digest={resolved.spec.formulation_digest!r}; supported ids="
+            f"{sorted(supported)}"
+        )
+    return resolved
+
+
+def _formulation_identity(
+    formulation: SchedulingFormulation | None,
+) -> str:
+    return (
+        formulation.spec.formulation_digest
+        if formulation is not None
+        else ""
+    )
 
 
 def _resolve_policy(

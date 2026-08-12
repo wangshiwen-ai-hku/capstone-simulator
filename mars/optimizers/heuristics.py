@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
+from itertools import product
+import math
 from time import perf_counter
 
 from ..domain.execution import Assignment, ExecutionMode
@@ -17,6 +20,12 @@ from .base import (
     SolveStatus,
 )
 from .evaluation import candidate_proxy_key
+from .formulation import FormulationError, FormulationSpec, PreparedSolve
+from .formulations.one_hot import (
+    ONE_HOT_PLACEMENT_SPEC,
+    OneHotPlacementFormulation,
+    OneHotPlacementModel,
+)
 from .materialization import (
     build_assignment,
     build_node_reservation,
@@ -28,8 +37,16 @@ class HeuristicOptimizer:
     """Deterministic solver that follows the policy carried by the problem."""
 
     optimizer_id = "heuristic"
+    # The legacy greedy algorithm is unchanged; formulation support is an
+    # additive interface, so retain its public version for compatibility.
     optimizer_version = "1"
+    optimizer_config_digest = "deterministic-greedy.v1"
     solve_work_unit = "ready_task"
+    supported_formulation_ids = frozenset({"one_hot_placement"})
+
+    @staticmethod
+    def supports_formulation(spec: FormulationSpec) -> bool:
+        return spec == ONE_HOT_PLACEMENT_SPEC
 
     def solve(self, problem: SchedulingProblem) -> SchedulingPlan:
         solve_started = perf_counter()
@@ -189,6 +206,192 @@ class HeuristicOptimizer:
                 "solve_budget_ms": problem.solve_budget_ms,
                 "policy_id": problem.policy.policy_id,
             },
+        )
+
+    def solve_formulated(self, prepared: PreparedSolve) -> SchedulingPlan:
+        """Return a feasible decision in the selected formulation domain.
+
+        This is primarily the recovery path for a bounded solver.  It ranks
+        candidates with the shared policy proxy, but every returned schedule is
+        decoded by the formulation and later receives authoritative validation.
+        """
+
+        if not isinstance(prepared.model, OneHotPlacementModel) or not isinstance(
+            prepared.formulation,
+            OneHotPlacementFormulation,
+        ):
+            raise TypeError(
+                "heuristic currently supports only one-hot placement"
+            )
+        if prepared.request.optimizer_id != self.optimizer_id:
+            raise ValueError(
+                "prepared solve optimizer identity does not match heuristic"
+            )
+        if (
+            prepared.request.optimizer_version != self.optimizer_version
+            or prepared.request.optimizer_config_digest
+            != self.optimizer_config_digest
+        ):
+            raise ValueError(
+                "prepared solve optimizer version/config does not match "
+                "heuristic"
+            )
+        if not self.supports_formulation(
+            prepared.request.formulation_spec
+        ):
+            raise ValueError(
+                "heuristic does not support the selected formulation "
+                "version or materializer contract"
+            )
+        problem = prepared.problem
+        model = prepared.model
+        formulation = prepared.formulation
+        solve_started = (
+            perf_counter() - prepared.compilation_elapsed_ms / 1000.0
+        )
+        ranked_options = tuple(
+            tuple(
+                sorted(
+                    options,
+                    key=lambda candidate: (
+                        *candidate_proxy_key(
+                            problem,
+                            task_id,
+                            candidate,
+                        ),
+                        candidate.node_id,
+                    ),
+                )
+            )
+            for task_id, options in zip(
+                model.ordered_task_ids,
+                model.candidate_options,
+                strict=True,
+            )
+        )
+        evaluated = 0
+        for selection in product(*ranked_options):
+            if (
+                problem.solve_limits.max_iterations
+                and evaluated >= problem.solve_limits.max_iterations
+            ):
+                raise RuntimeError(
+                    "heuristic iteration limit reached before a one-hot "
+                    "incumbent"
+                )
+            if prepared.time_limit_reached(
+                now_monotonic=perf_counter(),
+                solve_started_monotonic=solve_started,
+            ):
+                raise TimeoutError(
+                    "heuristic solve budget expired before a one-hot incumbent"
+                )
+            evaluated += 1
+            decision = formulation.decision(model, selection)
+            if not formulation.is_decision_feasible(
+                problem,
+                model,
+                decision,
+            ):
+                if prepared.time_limit_reached(
+                    now_monotonic=perf_counter(),
+                    solve_started_monotonic=solve_started,
+                ):
+                    raise TimeoutError(
+                        "heuristic solve budget expired before a one-hot "
+                        "incumbent"
+                    )
+                continue
+            try:
+                materialized = formulation.materialize(
+                    problem,
+                    model,
+                    decision,
+                    optimizer_id=self.optimizer_id,
+                )
+            except CandidateMaterializationError:
+                if prepared.time_limit_reached(
+                    now_monotonic=perf_counter(),
+                    solve_started_monotonic=solve_started,
+                ):
+                    raise TimeoutError(
+                        "heuristic solve budget expired before a one-hot "
+                        "incumbent"
+                    )
+                continue
+            spec = prepared.request.formulation_spec
+            draft = SchedulingPlan(
+                problem_id=problem.problem_id,
+                snapshot_id=problem.snapshot.snapshot_id,
+                policy_id=problem.policy.policy_id,
+                policy_version=problem.policy.version,
+                epoch_id=problem.epoch.epoch_id,
+                optimizer_id=self.optimizer_id,
+                optimizer_version=self.optimizer_version,
+                solve_request_id=prepared.request.solve_request_id,
+                metric_contract_id=problem.metric_contract_id,
+                formulation_id=spec.formulation_id,
+                formulation_version=spec.formulation_version,
+                formulation_digest=spec.formulation_digest,
+                assignments=materialized.assignments,
+                node_reservations=materialized.node_reservations,
+                transfer_reservations=(
+                    materialized.transfer_reservations
+                ),
+            )
+            evaluation = formulation.evaluate(
+                problem,
+                model,
+                draft,
+            )
+            if prepared.time_limit_reached(
+                now_monotonic=perf_counter(),
+                solve_started_monotonic=solve_started,
+            ):
+                raise TimeoutError(
+                    "heuristic solve budget expired before a one-hot incumbent"
+                )
+            if evaluation.has_hard_violation or any(
+                not math.isfinite(value)
+                for value in evaluation.objective_key
+            ):
+                continue
+            elapsed_ms = (perf_counter() - solve_started) * 1000.0
+            return SchedulingPlan(
+                problem_id=problem.problem_id,
+                snapshot_id=problem.snapshot.snapshot_id,
+                policy_id=problem.policy.policy_id,
+                policy_version=problem.policy.version,
+                epoch_id=problem.epoch.epoch_id,
+                optimizer_id=self.optimizer_id,
+                optimizer_version=self.optimizer_version,
+                solve_request_id=prepared.request.solve_request_id,
+                metric_contract_id=problem.metric_contract_id,
+                formulation_id=spec.formulation_id,
+                formulation_version=spec.formulation_version,
+                formulation_digest=spec.formulation_digest,
+                solve_status=SolveStatus.FEASIBLE,
+                solve_elapsed_ms=elapsed_ms,
+                iteration_count=evaluated,
+                termination_reason="greedy_one_hot_incumbent_found",
+                assignments=tuple(
+                    replace(
+                        assignment,
+                        reason="greedy feasible one-hot placement",
+                    )
+                    for assignment in materialized.assignments
+                ),
+                node_reservations=materialized.node_reservations,
+                transfer_reservations=(
+                    materialized.transfer_reservations
+                ),
+                diagnostics={
+                    "total_combinations": model.total_decisions,
+                    "formulation_exhausted": False,
+                },
+            )
+        raise FormulationError(
+            "heuristic found no feasible one-hot placement assignment"
         )
 
     def _choose(

@@ -125,11 +125,12 @@ def test_architecture_reports_the_pluggable_optimizer_pipeline() -> None:
     )
     assert payload["policies"] == list(built_in_policy_ids())
     assert payload["algorithm_aliases"] == algorithm_aliases()
-    assert payload["planning_pipeline"][2:9] == [
+    assert payload["planning_pipeline"][2:10] == [
         "immutable_scheduling_snapshot",
         "scheduling_policy",
         "solve_limits",
         "scheduling_problem",
+        "formulation",
         "optimizer",
         "shared_objective_constraint_evaluation",
         "plan_validation_or_fallback",

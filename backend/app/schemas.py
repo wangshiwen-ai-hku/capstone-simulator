@@ -369,6 +369,14 @@ class BenchmarkScene(BaseModel):
 class SimulateRequest(BaseModel):
     scene: BenchmarkScene
     algorithm: Literal["binary_offload", "dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
+    formulation: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Decision formulation selected independently of optimizer "
+            "strategy; support is advertised per scheduling capability."
+        ),
+    )
     optimizer_options: Dict[str, float] = Field(default_factory=dict)
     beta: Optional[float] = Field(
         default=None,
@@ -396,6 +404,14 @@ class SimulateRequest(BaseModel):
 class RuntimeWorkflowRequest(BaseModel):
     scene: BenchmarkScene
     algorithm: Literal["binary_offload", "dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
+    formulation: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Decision formulation selected independently of optimizer "
+            "strategy; support is advertised per scheduling capability."
+        ),
+    )
     optimizer_options: Dict[str, float] = Field(default_factory=dict)
     beta: Optional[float] = Field(
         default=None,
@@ -509,6 +525,7 @@ class WorkflowSummary(BaseModel):
     critical_path: List[str]
     scheduling: Dict[str, object] = Field(default_factory=dict)
     requested_algorithm: Optional[str] = None
+    formulation: Optional[str] = None
     optimizer_options: Dict[str, float] = Field(default_factory=dict)
     metric_schema_version: Optional[str] = None
 

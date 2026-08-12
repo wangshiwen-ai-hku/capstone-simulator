@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import enum
+import hashlib
+import json
 from types import MappingProxyType
 from typing import Callable, Mapping
 
@@ -97,6 +99,45 @@ class MetricDefinition:
             raise ValueError(
                 "UNSUPPORTED candidate fidelity requires no candidate proxy"
             )
+
+
+def metric_contract_id(policy: SchedulingPolicy) -> str:
+    """Fingerprint the metric semantics referenced by one policy.
+
+    A policy carries stable metric IDs, while the registry owns their executable
+    semantics.  Binding the referenced semantic versions into the Problem ID
+    prevents an evaluator change from silently reusing an old problem identity.
+    Metrics that the policy does not reference intentionally do not affect the
+    fingerprint.
+    """
+
+    referenced = sorted(
+        {
+            item.metric
+            for item in (*policy.objectives, *policy.constraints)
+        },
+        key=lambda metric: metric.value,
+    )
+    payload = {
+        "schema_version": "mars.metric-contract.v1",
+        "metrics": [
+            {
+                "metric": metric.value,
+                "semantics_version": _metric_definition(
+                    metric
+                ).semantics_version,
+            }
+            for metric in referenced
+        ],
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"metric-contract:{hashlib.sha256(encoded).hexdigest()[:20]}"
 
 
 def candidate_proxy_key(

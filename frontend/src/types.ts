@@ -4,8 +4,11 @@ export type Algorithm = 'dag_deadline' | 'rule_based' | 'local_first' | 'edge_fi
 export type TaskClass = 'local_safety' | 'realtime_offloadable' | 'edge_heavy';
 export type NodeKind = 'robot' | 'edge' | 'cloud';
 
+export const DEFAULT_BINARY_FORMULATION = 'one_hot_placement';
+
 export interface SchedulerRunOptions {
   communicationWeight?: number;
+  formulation?: string;
 }
 
 export interface NumericSchedulingParameter {
@@ -24,6 +27,8 @@ export interface SchedulingAlgorithmCapability {
   kind: string;
   stability: string;
   execution_paths: string[];
+  default_formulation?: string | null;
+  supported_formulations?: string[];
   parameters: {
     communication_weight?: NumericSchedulingParameter;
   };
@@ -275,6 +280,7 @@ export interface SimulationResponse {
     critical_path: string[];
     scheduling?: RuntimeSchedulingProvenance;
     requested_algorithm?: string;
+    formulation?: string | null;
     optimizer_options?: Record<string, number>;
     metric_schema_version?: string;
   };
@@ -379,7 +385,9 @@ export interface RuntimeEvent {
 
 export interface RuntimeSchedulingProvenance {
   requested_algorithm?: string;
+  requested_formulation?: string;
   effective_optimizers?: Record<string, number>;
+  effective_formulations?: Record<string, number>;
   effective_policies?: Record<string, number>;
   solve_statuses?: Record<string, number>;
   termination_reasons?: Record<string, number>;
@@ -397,6 +405,7 @@ export interface RuntimeReport {
     levels: Record<string, number>;
     scheduling?: RuntimeSchedulingProvenance;
     requested_algorithm?: string;
+    formulation?: string | null;
     optimizer_options?: Record<string, number>;
     metric_schema_version?: string;
   };

@@ -2,19 +2,30 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 import enum
 import math
 from types import MappingProxyType
-from typing import Generic, Mapping, Protocol, TypeVar, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Generic,
+    Mapping,
+    Protocol,
+    TypeVar,
+    runtime_checkable,
+)
 
 from .base import SchedulingPlan, SchedulingProblem, SolveStatus
+
+if TYPE_CHECKING:
+    from .formulation import SchedulingSolveRequest
 
 
 ContinuationPayloadT_co = TypeVar(
     "ContinuationPayloadT_co",
     covariant=True,
 )
+ContinuationKey = tuple[str, ...]
 
 
 class SolveTracePhase(str, enum.Enum):
@@ -27,6 +38,7 @@ class SolveTracePhase(str, enum.Enum):
     FAILED = "failed"
     VALIDATED = "validated"
     REJECTED = "rejected"
+    FALLBACK = "fallback"
 
 
 @dataclass(frozen=True)
@@ -45,6 +57,13 @@ class SolveTraceContext:
     work_unit: str
     solve_budget_ms: float
     max_iterations: int
+    optimizer_config_digest: str = ""
+    solve_request_id: str = ""
+    continuation_contract_id: str = ""
+    metric_contract_id: str = ""
+    formulation_id: str = ""
+    formulation_version: str = ""
+    formulation_digest: str = ""
 
     def __post_init__(self) -> None:
         identifiers = (
@@ -66,6 +85,19 @@ class SolveTraceContext:
             or self.solve_budget_ms <= 0.0
         ):
             raise ValueError("solve trace budget must be positive")
+        formulation_identity = (
+            self.solve_request_id,
+            self.continuation_contract_id,
+            self.metric_contract_id,
+            self.formulation_id,
+            self.formulation_version,
+            self.formulation_digest,
+            self.optimizer_config_digest,
+        )
+        if any(formulation_identity) and not all(formulation_identity):
+            raise ValueError(
+                "solve trace formulation identity must be provided together"
+            )
 
 
 @dataclass(frozen=True)
@@ -90,7 +122,11 @@ class SolveTraceEntry:
     )
 
     def __post_init__(self) -> None:
-        if self.sequence < 1:
+        if (
+            not isinstance(self.sequence, int)
+            or isinstance(self.sequence, bool)
+            or self.sequence < 1
+        ):
             raise ValueError("solve trace sequence must be positive")
         if not isinstance(self.context, SolveTraceContext):
             raise TypeError("solve trace context must be SolveTraceContext")
@@ -101,12 +137,70 @@ class SolveTraceEntry:
             SolveStatus,
         ):
             raise TypeError("solve trace status must be SolveStatus")
-        if self.iteration < 0 or self.evaluated_work_units < 0:
+        if (
+            not isinstance(self.iteration, int)
+            or isinstance(self.iteration, bool)
+            or not isinstance(self.evaluated_work_units, int)
+            or isinstance(self.evaluated_work_units, bool)
+            or self.iteration < 0
+            or self.evaluated_work_units < 0
+        ):
             raise ValueError("solve trace counters must be non-negative")
-        if self.total_work_units is not None and self.total_work_units < 0:
+        if self.total_work_units is not None and (
+            not isinstance(self.total_work_units, int)
+            or isinstance(self.total_work_units, bool)
+            or self.total_work_units < 0
+        ):
             raise ValueError("total_work_units must be non-negative")
-        if not math.isfinite(self.elapsed_ms) or self.elapsed_ms < 0.0:
+        if (
+            not isinstance(self.elapsed_ms, (int, float))
+            or isinstance(self.elapsed_ms, bool)
+            or not math.isfinite(self.elapsed_ms)
+            or self.elapsed_ms < 0.0
+        ):
             raise ValueError("solve trace elapsed_ms must be non-negative")
+        if not isinstance(self.termination_reason, str):
+            raise TypeError("solve trace termination_reason must be a string")
+        if not isinstance(self.has_incumbent, bool):
+            raise TypeError("solve trace has_incumbent must be bool")
+        if any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            for value in self.objective_key
+        ):
+            raise ValueError("solve trace objective_key must be finite")
+        if any(
+            not isinstance(key, str)
+            or not key.strip()
+            or not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            for key, value in self.objective_components.items()
+        ):
+            raise ValueError(
+                "solve trace objective components must be named finite numbers"
+            )
+        if any(
+            not isinstance(key, str)
+            or not key.strip()
+            or not isinstance(value, str)
+            for key, value in self.selected_targets.items()
+        ):
+            raise ValueError(
+                "solve trace selected targets must map names to strings"
+            )
+        if any(
+            not isinstance(key, str)
+            or not key.strip()
+            or not isinstance(value, (float, int, str, bool))
+            or isinstance(value, float)
+            and not math.isfinite(value)
+            for key, value in self.details.items()
+        ):
+            raise ValueError(
+                "solve trace details must contain named finite scalars"
+            )
         object.__setattr__(self, "objective_key", tuple(self.objective_key))
         object.__setattr__(
             self,
@@ -138,6 +232,15 @@ class SolveTraceEntry:
             "policy_version": self.context.policy_version,
             "optimizer_id": self.context.optimizer_id,
             "optimizer_version": self.context.optimizer_version,
+            "optimizer_config_digest": self.context.optimizer_config_digest,
+            "solve_request_id": self.context.solve_request_id,
+            "continuation_contract_id": (
+                self.context.continuation_contract_id
+            ),
+            "metric_contract_id": self.context.metric_contract_id,
+            "formulation_id": self.context.formulation_id,
+            "formulation_version": self.context.formulation_version,
+            "formulation_digest": self.context.formulation_digest,
             "work_unit": self.context.work_unit,
             "solve_budget_ms": self.context.solve_budget_ms,
             "max_iterations": self.context.max_iterations,
@@ -172,6 +275,14 @@ class OptimizerContinuation(Generic[ContinuationPayloadT_co]):
     payload: ContinuationPayloadT_co = field(repr=False)
     iteration: int = 0
     objective_key: tuple[float, ...] = ()
+    optimizer_version: str = ""
+    optimizer_config_digest: str = ""
+    source_solve_request_id: str = ""
+    continuation_contract_id: str = ""
+    metric_contract_id: str = ""
+    formulation_id: str = ""
+    formulation_version: str = ""
+    formulation_digest: str = ""
 
     def __post_init__(self) -> None:
         if not self.optimizer_id.strip() or not self.schema_version.strip():
@@ -182,12 +293,26 @@ class OptimizerContinuation(Generic[ContinuationPayloadT_co]):
             raise ValueError("continuation updated_problem_id must be non-blank")
         if self.iteration < 0:
             raise ValueError("continuation iteration must be non-negative")
+        formulation_identity = (
+            self.optimizer_version,
+            self.optimizer_config_digest,
+            self.source_solve_request_id,
+            self.continuation_contract_id,
+            self.metric_contract_id,
+            self.formulation_id,
+            self.formulation_version,
+            self.formulation_digest,
+        )
+        if any(formulation_identity) and not all(formulation_identity):
+            raise ValueError(
+                "continuation formulation identity must be provided together"
+            )
         object.__setattr__(self, "objective_key", tuple(self.objective_key))
         if any(not math.isfinite(value) for value in self.objective_key):
             raise ValueError("continuation objective_key must be finite")
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        data: dict[str, object] = {
             "optimizer_id": self.optimizer_id,
             "schema_version": self.schema_version,
             "updated_problem_id": self.updated_problem_id,
@@ -195,6 +320,22 @@ class OptimizerContinuation(Generic[ContinuationPayloadT_co]):
             "objective_key": list(self.objective_key),
             "payload": _serializable_state(self.payload),
         }
+        # Preserve the v1 projection for legacy optimizer continuations while
+        # binding every formulated continuation to its complete solve contract.
+        if self.formulation_id:
+            data.update(
+                {
+                    "optimizer_version": self.optimizer_version,
+                    "optimizer_config_digest": self.optimizer_config_digest,
+                    "source_solve_request_id": self.source_solve_request_id,
+                    "continuation_contract_id": self.continuation_contract_id,
+                    "metric_contract_id": self.metric_contract_id,
+                    "formulation_id": self.formulation_id,
+                    "formulation_version": self.formulation_version,
+                    "formulation_digest": self.formulation_digest,
+                }
+            )
+        return data
 
 
 @dataclass
@@ -209,7 +350,7 @@ class OptimizerSolveState:
     session_id: str
     schema_version: str = "mars.optimizer-solve-state.v1"
     trace_entries: list[SolveTraceEntry] = field(default_factory=list)
-    continuations: dict[str, OptimizerContinuation[object]] = field(
+    continuations: dict[ContinuationKey, OptimizerContinuation[object]] = field(
         default_factory=dict
     )
     continuation_history: list[OptimizerContinuation[object]] = field(
@@ -220,7 +361,7 @@ class OptimizerSolveState:
         init=False,
         repr=False,
     )
-    _latest_context: dict[tuple[str, str], SolveTraceContext] = field(
+    _latest_context: dict[tuple[str, str, str], SolveTraceContext] = field(
         default_factory=dict,
         init=False,
         repr=False,
@@ -243,27 +384,59 @@ class OptimizerSolveState:
                 entry.context.frame_index,
             )
             self._latest_context[
-                (entry.context.problem_id, entry.context.optimizer_id)
+                (
+                    entry.context.problem_id,
+                    entry.context.optimizer_id,
+                    entry.context.solve_request_id,
+                )
             ] = entry.context
-        self._next_solve_index = len(
-            {entry.context.solve_id for entry in self.trace_entries}
+        solve_ids = {
+            entry.context.solve_id for entry in self.trace_entries
+        }
+        prefix = f"{self.session_id}:solve:"
+        restored_indices = [
+            int(solve_id.removeprefix(prefix))
+            for solve_id in solve_ids
+            if solve_id.startswith(prefix)
+            and solve_id.removeprefix(prefix).isdigit()
+        ]
+        self._next_solve_index = max(
+            (len(solve_ids), *restored_indices),
+            default=0,
         )
-        if any(
-            not isinstance(continuation, OptimizerContinuation)
-            or key != continuation.optimizer_id
-            for key, continuation in self.continuations.items()
-        ):
-            raise TypeError(
-                "continuations must map optimizer ids to matching "
-                "OptimizerContinuation values"
+        normalized_continuations = {}
+        for key, continuation in self.continuations.items():
+            if not isinstance(continuation, OptimizerContinuation):
+                raise TypeError(
+                    "continuations must contain OptimizerContinuation values"
+                )
+            expected = _continuation_key(continuation)
+            # Accept the legacy constructor shape while normalizing all
+            # in-memory keys to collision-free tagged tuples.
+            if key != expected and not (
+                isinstance(key, str)
+                and not continuation.formulation_id
+                and key == continuation.optimizer_id
+            ):
+                raise TypeError(
+                    "continuation key does not match its solve contract"
+                )
+            if expected in normalized_continuations:
+                raise ValueError(
+                    "continuation keys normalize to the same solve contract"
+                )
+            normalized_continuations[expected] = _snapshot_continuation(
+                continuation
             )
-        if any(
-            not isinstance(continuation, OptimizerContinuation)
-            for continuation in self.continuation_history
-        ):
-            raise TypeError(
-                "continuation_history must contain OptimizerContinuation"
-            )
+        self.continuations = normalized_continuations
+        normalized_history = []
+        for continuation in self.continuation_history:
+            if not isinstance(continuation, OptimizerContinuation):
+                raise TypeError(
+                    "continuation_history must contain OptimizerContinuation"
+                )
+            normalized_history.append(_snapshot_continuation(continuation))
+        self.continuation_history = normalized_history
 
     @property
     def entries(self) -> tuple[SolveTraceEntry, ...]:
@@ -276,18 +449,37 @@ class OptimizerSolveState:
         optimizer_id: str,
         optimizer_version: str = "",
         work_unit: str = "iteration",
+        solve_request: "SchedulingSolveRequest | None" = None,
     ) -> SolveTraceContext:
         """Start one solve attempt and record its initial trace entry."""
 
         if not optimizer_id.strip() or not work_unit.strip():
             raise ValueError("optimizer_id and work_unit must be non-blank")
+        if solve_request is not None and (
+            solve_request.problem.problem_id != problem.problem_id
+            or solve_request.problem != problem
+            or solve_request.optimizer_id != optimizer_id
+            or solve_request.optimizer_version != optimizer_version
+        ):
+            raise ValueError(
+                "solve request identity does not match the trace context"
+            )
         frame_index = self._frame_by_problem.setdefault(
             problem.problem_id,
             len(self._frame_by_problem) + 1,
         )
-        self._next_solve_index += 1
+        existing_solve_ids = {
+            entry.context.solve_id for entry in self.trace_entries
+        }
+        while True:
+            self._next_solve_index += 1
+            solve_id = (
+                f"{self.session_id}:solve:{self._next_solve_index}"
+            )
+            if solve_id not in existing_solve_ids:
+                break
         context = SolveTraceContext(
-            solve_id=f"{self.session_id}:solve:{self._next_solve_index}",
+            solve_id=solve_id,
             frame_index=frame_index,
             problem_id=problem.problem_id,
             snapshot_id=problem.snapshot.snapshot_id,
@@ -296,11 +488,48 @@ class OptimizerSolveState:
             policy_version=problem.policy.version,
             optimizer_id=optimizer_id,
             optimizer_version=optimizer_version,
+            optimizer_config_digest=(
+                solve_request.optimizer_config_digest
+                if solve_request is not None
+                else ""
+            ),
             work_unit=work_unit,
             solve_budget_ms=problem.solve_limits.solve_budget_ms,
             max_iterations=problem.solve_limits.max_iterations,
+            solve_request_id=(
+                solve_request.solve_request_id
+                if solve_request is not None
+                else ""
+            ),
+            continuation_contract_id=(
+                solve_request.continuation_contract_id
+                if solve_request is not None
+                else ""
+            ),
+            metric_contract_id=(
+                problem.metric_contract_id
+                if solve_request is not None
+                else ""
+            ),
+            formulation_id=(
+                solve_request.formulation_spec.formulation_id
+                if solve_request is not None
+                else ""
+            ),
+            formulation_version=(
+                solve_request.formulation_spec.formulation_version
+                if solve_request is not None
+                else ""
+            ),
+            formulation_digest=(
+                solve_request.formulation_spec.formulation_digest
+                if solve_request is not None
+                else ""
+            ),
         )
-        self._latest_context[(problem.problem_id, optimizer_id)] = context
+        self._latest_context[
+            (problem.problem_id, optimizer_id, context.solve_request_id)
+        ] = context
         self.record(context, SolveTracePhase.STARTED)
         return context
 
@@ -324,17 +553,38 @@ class OptimizerSolveState:
             **values,
         )
         self.trace_entries.append(entry)
-        self._latest_context[(context.problem_id, context.optimizer_id)] = context
+        self._latest_context[
+            (
+                context.problem_id,
+                context.optimizer_id,
+                context.solve_request_id,
+            )
+        ] = context
         return entry
 
     def latest_context(
         self,
         problem_id: str,
         optimizer_id: str,
+        solve_request_id: str = "",
     ) -> SolveTraceContext | None:
         """Return the latest invocation context for one problem and solver."""
 
-        return self._latest_context.get((problem_id, optimizer_id))
+        exact = self._latest_context.get(
+            (problem_id, optimizer_id, solve_request_id)
+        )
+        if exact is not None or solve_request_id:
+            return exact
+        return next(
+            (
+                context
+                for (candidate_problem, candidate_optimizer, _), context
+                in reversed(tuple(self._latest_context.items()))
+                if candidate_problem == problem_id
+                and candidate_optimizer == optimizer_id
+            ),
+            None,
+        )
 
     def set_continuation(
         self,
@@ -342,15 +592,66 @@ class OptimizerSolveState:
     ) -> None:
         """Replace one optimizer's typed warm-start state."""
 
-        _serializable_state(continuation.payload)
-        self.continuations[continuation.optimizer_id] = continuation
+        if not isinstance(continuation, OptimizerContinuation):
+            raise TypeError(
+                "continuation must be an OptimizerContinuation"
+            )
+        continuation = _snapshot_continuation(continuation)
+        self.continuations[
+            _continuation_key(continuation)
+        ] = continuation
         self.continuation_history.append(continuation)
 
     def continuation_for(
         self,
         optimizer_id: str,
+        *,
+        optimizer_version: str = "",
+        optimizer_config_digest: str = "",
+        continuation_contract_id: str = "",
+        formulation_id: str = "",
+        formulation_version: str = "",
+        formulation_digest: str = "",
+        metric_contract_id: str = "",
     ) -> OptimizerContinuation[object] | None:
-        return self.continuations.get(optimizer_id)
+        if not formulation_id:
+            return self.continuations.get(("legacy", optimizer_id))
+        return self.continuations.get(
+            _continuation_key_parts(
+                optimizer_id,
+                optimizer_version,
+                optimizer_config_digest,
+                continuation_contract_id,
+                formulation_id,
+                formulation_version,
+                formulation_digest,
+                metric_contract_id,
+            )
+        )
+
+    def continuation_for_request(
+        self,
+        request: "SchedulingSolveRequest",
+    ) -> OptimizerContinuation[object] | None:
+        """Return only warm state compatible with the requested solve stack."""
+
+        from .formulation import SchedulingSolveRequest
+
+        if not isinstance(request, SchedulingSolveRequest):
+            raise TypeError(
+                "continuation lookup requires SchedulingSolveRequest"
+            )
+        spec = request.formulation_spec
+        return self.continuation_for(
+            request.optimizer_id,
+            optimizer_version=request.optimizer_version,
+            optimizer_config_digest=request.optimizer_config_digest,
+            continuation_contract_id=request.continuation_contract_id,
+            formulation_id=spec.formulation_id,
+            formulation_version=spec.formulation_version,
+            formulation_digest=spec.formulation_digest,
+            metric_contract_id=request.problem.metric_contract_id,
+        )
 
     def terminal_entries(
         self,
@@ -360,6 +661,7 @@ class OptimizerSolveState:
             SolveTracePhase.COMPLETED,
             SolveTracePhase.FAILED,
             SolveTracePhase.REJECTED,
+            SolveTracePhase.FALLBACK,
             SolveTracePhase.VALIDATED,
         }
         return tuple(
@@ -399,6 +701,7 @@ class OptimizerSolveState:
                     in {
                         SolveTracePhase.FAILED,
                         SolveTracePhase.REJECTED,
+                        SolveTracePhase.FALLBACK,
                         SolveTracePhase.VALIDATED,
                         SolveTracePhase.COMPLETED,
                     }
@@ -416,6 +719,15 @@ class OptimizerSolveState:
                 "policy_version": context.policy_version,
                 "optimizer_id": context.optimizer_id,
                 "optimizer_version": context.optimizer_version,
+                "optimizer_config_digest": context.optimizer_config_digest,
+                "solve_request_id": context.solve_request_id,
+                "continuation_contract_id": (
+                    context.continuation_contract_id
+                ),
+                "metric_contract_id": context.metric_contract_id,
+                "formulation_id": context.formulation_id,
+                "formulation_version": context.formulation_version,
+                "formulation_digest": context.formulation_digest,
                 "work_unit": context.work_unit,
                 "terminal_phase": terminal.phase.value,
                 "ready_task_count": int(
@@ -446,15 +758,17 @@ class OptimizerSolveState:
                 "assignments": dict(terminal.selected_targets),
             }
             if context.work_unit == "placement_combination":
+                formulation_exhausted = bool(
+                    terminal.details.get("formulation_exhausted", False)
+                )
                 summary.update(
                     {
                         "enumerated_combinations": (
                             terminal.evaluated_work_units
                         ),
                         "total_combinations": terminal.total_work_units,
-                        "placement_search_exhaustive": bool(
-                            terminal.solve_status is SolveStatus.OPTIMAL
-                        ),
+                        "formulation_exhausted": formulation_exhausted,
+                        "placement_search_exhaustive": formulation_exhausted,
                     }
                 )
             summaries.append(summary)
@@ -463,17 +777,25 @@ class OptimizerSolveState:
     def as_dict(self) -> dict[str, object]:
         """Serialize the complete auditable trace and continuation snapshots."""
 
+        serialized_continuations = {
+            _serialized_continuation_key(key): continuation.as_dict()
+            for key, continuation in self.continuations.items()
+        }
+        if len(serialized_continuations) != len(self.continuations):
+            raise ValueError(
+                "optimizer continuation archive keys must be unique"
+            )
+
         return {
             "schema_version": self.schema_version,
             "session_id": self.session_id,
             "frame_count": len(self._frame_by_problem),
-            "solve_count": self._next_solve_index,
+            "solve_count": len(
+                {entry.context.solve_id for entry in self.trace_entries}
+            ),
             "trace_entries": [entry.as_dict() for entry in self.trace_entries],
             "invocation_summaries": list(self.invocation_summaries()),
-            "continuations": {
-                optimizer_id: continuation.as_dict()
-                for optimizer_id, continuation in self.continuations.items()
-            },
+            "continuations": serialized_continuations,
             "continuation_history": [
                 continuation.as_dict()
                 for continuation in self.continuation_history
@@ -496,6 +818,64 @@ class StatefulOptimizer(Protocol):
     ) -> SchedulingPlan: ...
 
 
+def _continuation_key(
+    continuation: OptimizerContinuation[object],
+) -> ContinuationKey:
+    if not continuation.formulation_id:
+        return ("legacy", continuation.optimizer_id)
+    return _continuation_key_parts(
+        continuation.optimizer_id,
+        continuation.optimizer_version,
+        continuation.optimizer_config_digest,
+        continuation.continuation_contract_id,
+        continuation.formulation_id,
+        continuation.formulation_version,
+        continuation.formulation_digest,
+        continuation.metric_contract_id,
+    )
+
+
+def _continuation_key_parts(
+    optimizer_id: str,
+    optimizer_version: str,
+    optimizer_config_digest: str,
+    continuation_contract_id: str,
+    formulation_id: str,
+    formulation_version: str,
+    formulation_digest: str,
+    metric_contract_id: str,
+) -> ContinuationKey:
+    identifiers = (
+        optimizer_id,
+        optimizer_version,
+        optimizer_config_digest,
+        continuation_contract_id,
+        formulation_id,
+        formulation_version,
+        formulation_digest,
+        metric_contract_id,
+    )
+    if any(not value.strip() for value in identifiers):
+        raise ValueError(
+            "formulated continuation lookup requires complete identity"
+        )
+    return ("formulated", *identifiers)
+
+
+def _serialized_continuation_key(key: ContinuationKey) -> str:
+    """Return an unambiguous JSON-object key for an in-memory tuple key."""
+
+    if len(key) == 2 and key[0] == "legacy":
+        return key[1]
+    if not key or key[0] != "formulated":
+        raise ValueError("unknown optimizer continuation key kind")
+    # Length-prefixed fields are readable and reversible without reserving a
+    # delimiter that plug-in identifiers would otherwise have to forbid.
+    return "formulated:" + "".join(
+        f"{len(value)}:{value}" for value in key[1:]
+    )
+
+
 def _serializable_state(value: object) -> object:
     if is_dataclass(value) and not isinstance(value, type):
         return {
@@ -503,10 +883,14 @@ def _serializable_state(value: object) -> object:
             for item in fields(value)
         }
     if isinstance(value, enum.Enum):
-        return value.value
+        return _serializable_state(value.value)
     if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError(
+                "optimizer state mapping keys must be strings"
+            )
         return {
-            str(key): _serializable_state(item)
+            key: _serializable_state(item)
             for key, item in value.items()
         }
     if isinstance(value, (tuple, list)):
@@ -517,6 +901,51 @@ def _serializable_state(value: object) -> object:
         return value
     raise TypeError(
         "optimizer state payload must be a dataclass or JSON-like value"
+    )
+
+
+def _freeze_state(value: object) -> object:
+    """Take an immutable recursive snapshot for auditable continuation state."""
+
+    if is_dataclass(value) and not isinstance(value, type):
+        params = getattr(type(value), "__dataclass_params__", None)
+        if params is None or not params.frozen:
+            raise TypeError(
+                "optimizer state dataclass payloads must be frozen"
+            )
+        if any(not item.init for item in fields(value)):
+            raise TypeError(
+                "optimizer state dataclass fields must all use init=True"
+            )
+        return replace(
+            value,
+            **{
+                item.name: _freeze_state(getattr(value, item.name))
+                for item in fields(value)
+            },
+        )
+    if isinstance(value, enum.Enum):
+        return value
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("optimizer state mapping keys must be strings")
+        return MappingProxyType(
+            {key: _freeze_state(item) for key, item in value.items()}
+        )
+    if isinstance(value, (tuple, list)):
+        return tuple(_freeze_state(item) for item in value)
+    return value
+
+
+def _snapshot_continuation(
+    continuation: OptimizerContinuation[object],
+) -> OptimizerContinuation[object]:
+    """Validate and freeze one independent continuation archive snapshot."""
+
+    _serializable_state(continuation.payload)
+    return replace(
+        continuation,
+        payload=_freeze_state(continuation.payload),
     )
 
 

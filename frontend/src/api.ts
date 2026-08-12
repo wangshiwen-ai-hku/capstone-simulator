@@ -7,6 +7,7 @@ import type {
   SchedulerRunOptions,
   SimulationResponse,
 } from './types';
+import { DEFAULT_BINARY_FORMULATION } from './types';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
 
@@ -56,6 +57,7 @@ export function simulate(
   options: SchedulerRunOptions = {},
 ) {
   const optimizerOptions = serializedOptimizerOptions(algorithm, options);
+  const formulation = serializedFormulation(algorithm, options);
   return request<SimulationResponse>('/api/simulate', {
     method: 'POST',
     body: JSON.stringify({
@@ -64,6 +66,7 @@ export function simulate(
       network_jitter: 0.12,
       resource_noise: 0.05,
       seed,
+      ...(formulation ? { formulation } : {}),
       ...(optimizerOptions ? { optimizer_options: optimizerOptions } : {}),
     }),
   });
@@ -76,6 +79,7 @@ export function submitRuntimeWorkflow(
   options: SchedulerRunOptions = {},
 ) {
   const optimizerOptions = serializedOptimizerOptions(algorithm, options);
+  const formulation = serializedFormulation(algorithm, options);
   return request<{ run_id: string; workflow_id: string; status: string }>(
     '/api/runtime/workflows',
     {
@@ -84,6 +88,7 @@ export function submitRuntimeWorkflow(
         scene,
         algorithm,
         seed,
+        ...(formulation ? { formulation } : {}),
         ...(optimizerOptions ? { optimizer_options: optimizerOptions } : {}),
         max_attempts: 2,
         inject_first_failure: false,
@@ -108,4 +113,17 @@ function serializedOptimizerOptions(
     throw new RangeError('Communication weight must be a finite number.');
   }
   return { communication_weight: options.communicationWeight };
+}
+
+function serializedFormulation(
+  algorithm: Algorithm,
+  options: SchedulerRunOptions,
+) {
+  const formulation = options.formulation
+    ?? (algorithm === 'binary_offload' ? DEFAULT_BINARY_FORMULATION : undefined);
+  if (formulation === undefined) return undefined;
+  if (!formulation.trim()) {
+    throw new RangeError('Scheduling formulation must be non-blank.');
+  }
+  return formulation.trim();
 }

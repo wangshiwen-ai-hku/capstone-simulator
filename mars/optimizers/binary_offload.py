@@ -1,32 +1,30 @@
-"""Exhaustive one-hot computation-placement optimizer."""
+"""Bounded exhaustive optimizer for a compiled placement formulation."""
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import replace
 from itertools import product
 import math
 from time import perf_counter
 
-from ..domain.execution import Assignment
-from ..domain.transfer import TransferReservation
 from .base import (
-    CandidateEstimate,
     CandidateMaterializationError,
-    PlannedResourceReservation,
     SchedulingPlan,
     SchedulingProblem,
     SolveStatus,
 )
-from .evaluation import (
-    evaluate_constraints,
-    evaluate_objectives,
-    objective_key,
+from .formulation import (
+    FormulationSpec,
+    PreparedSolve,
+    build_solve_request,
+    compile_solve_request,
+    formulation_failure_status,
+    prepare_solve,
 )
-from .materialization import (
-    build_assignment,
-    build_node_reservation,
-    materialize_candidate,
+from .formulations.one_hot import (
+    ONE_HOT_PLACEMENT_SPEC,
+    OneHotPlacementFormulation,
+    OneHotPlacementModel,
 )
 from .policy import binary_offload_policy
 from .state import (
@@ -37,11 +35,20 @@ from .state import (
 
 
 class BinaryOffloadOptimizer:
-    """Enumerate one feasible placement target for every ready task."""
+    """Enumerate every decision in a one-hot placement model.
+
+    ``binary_offload`` remains the compatibility-facing optimizer ID.  Its
+    search strategy is bounded exhaustive enumeration; the independently
+    selectable ``one_hot_placement`` formulation owns the decision domain,
+    policy encoding, and SchedulingPlan materialization.
+    """
 
     optimizer_id = "binary_offload"
-    optimizer_version = "3"
+    optimizer_version = "4"
+    optimizer_config_digest = "bounded-exhaustive.v1"
     solve_work_unit = "placement_combination"
+    supported_formulation_ids = frozenset({"one_hot_placement"})
+    default_formulation_id = "one_hot_placement"
 
     def __init__(
         self,
@@ -49,20 +56,38 @@ class BinaryOffloadOptimizer:
         alpha: float = 1.0,
         beta: float = 1.0,
         gamma: float = 2.0,
+        formulation: OneHotPlacementFormulation | None = None,
     ) -> None:
+        # Kept as a compatibility preset.  Explicit Policy selection remains
+        # independent of both optimizer and formulation in the core API.
         self.default_policy = binary_offload_policy(
             alpha=alpha,
             beta=beta,
             gamma=gamma,
         )
+        self.default_formulation = (
+            formulation or OneHotPlacementFormulation()
+        )
+        if (
+            self.default_formulation.spec.formulation_id
+            not in self.supported_formulation_ids
+        ):
+            raise ValueError(
+                "binary_offload received an unsupported default formulation"
+            )
 
     def solve(self, problem: SchedulingProblem) -> SchedulingPlan:
-        """Return a plan without retaining state on the optimizer instance."""
+        """Solve with the compatibility default formulation, without state."""
 
-        state = OptimizerSolveState(
-            session_id=f"standalone:{problem.problem_id}"
+        return self.solve_formulated(
+            prepare_solve(problem, self, self.default_formulation)
         )
-        return self.solve_with_state(problem, state)
+
+    @staticmethod
+    def supports_formulation(spec: FormulationSpec) -> bool:
+        """Return whether this backend implements the exact spec contract."""
+
+        return spec == ONE_HOT_PLACEMENT_SPEC
 
     def solve_with_state(
         self,
@@ -71,26 +96,91 @@ class BinaryOffloadOptimizer:
         *,
         context: SolveTraceContext | None = None,
     ) -> SchedulingPlan:
-        """Solve while appending an auditable trace to caller-owned state."""
+        """Compatibility stateful entry point using the default formulation."""
 
         solve_started = perf_counter()
+        request = build_solve_request(
+            problem,
+            self,
+            self.default_formulation,
+        )
         if context is None:
             context = state.begin(
                 problem,
                 optimizer_id=self.optimizer_id,
                 optimizer_version=self.optimizer_version,
                 work_unit=self.solve_work_unit,
+                solve_request=request,
+            )
+        try:
+            prepared = compile_solve_request(
+                request,
+                self.default_formulation,
+            )
+        except Exception as exc:
+            state.record(
+                context,
+                SolveTracePhase.FAILED,
+                elapsed_ms=self._elapsed_ms(solve_started),
+                solve_status=formulation_failure_status(exc),
+                termination_reason=f"{type(exc).__name__}: {exc}",
+                details={
+                    "ready_task_count": len(problem.epoch.ready_tasks)
+                },
+            )
+            raise
+        return self.solve_formulated_with_state(
+            prepared,
+            state,
+            context=context,
+            _solve_started=solve_started,
+        )
+
+    def solve_formulated(self, prepared: PreparedSolve) -> SchedulingPlan:
+        """Solve one independently prepared formulation request."""
+
+        state = OptimizerSolveState(
+            session_id=f"standalone:{prepared.problem.problem_id}"
+        )
+        return self.solve_formulated_with_state(prepared, state)
+
+    def solve_formulated_with_state(
+        self,
+        prepared: PreparedSolve,
+        state: OptimizerSolveState,
+        *,
+        context: SolveTraceContext | None = None,
+        _solve_started: float | None = None,
+    ) -> SchedulingPlan:
+        """Solve while appending an auditable caller-owned trace."""
+
+        self._validate_prepared(prepared)
+        problem = prepared.problem
+        solve_started = (
+            perf_counter() - prepared.compilation_elapsed_ms / 1000.0
+            if _solve_started is None
+            else _solve_started
+        )
+        if context is None:
+            context = state.begin(
+                problem,
+                optimizer_id=self.optimizer_id,
+                optimizer_version=self.optimizer_version,
+                work_unit=self.solve_work_unit,
+                solve_request=prepared.request,
             )
         elif (
             context.problem_id != problem.problem_id
             or context.optimizer_id != self.optimizer_id
+            or context.solve_request_id
+            != prepared.request.solve_request_id
         ):
             raise ValueError(
-                "solve trace context does not match problem and optimizer"
+                "solve trace context does not match the prepared solve"
             )
         try:
             return self._solve(
-                problem,
+                prepared,
                 solve_started,
                 state,
                 context,
@@ -122,60 +212,81 @@ class BinaryOffloadOptimizer:
 
     def _solve(
         self,
-        problem: SchedulingProblem,
+        prepared: PreparedSolve,
         solve_started: float,
         state: OptimizerSolveState,
         context: SolveTraceContext,
     ) -> SchedulingPlan:
-        tasks = tuple(problem.epoch.ready_tasks)
-        candidate_options = tuple(
-            self._placement_candidates(problem, task.task_id)
-            for task in tasks
-        )
-        total_combinations = math.prod(
-            len(options) for options in candidate_options
-        )
+        problem = prepared.problem
+        formulation = prepared.formulation
+        model = prepared.model
+        assert isinstance(formulation, OneHotPlacementFormulation)
+        assert isinstance(model, OneHotPlacementModel)
+        total_combinations = model.total_decisions
         best_key: tuple[float, ...] | None = None
         best_tie_break: tuple[str, ...] | None = None
         best_plan: SchedulingPlan | None = None
         evaluated = 0
         bounded_status: SolveStatus | None = None
 
-        for selection in product(*candidate_options):
+        for selection in product(*model.candidate_options):
             if (
                 problem.solve_limits.max_iterations
                 and evaluated >= problem.solve_limits.max_iterations
             ):
                 bounded_status = SolveStatus.ITERATION_LIMIT
                 break
-            if self._elapsed_ms(solve_started) >= problem.solve_budget_ms:
+            if prepared.time_limit_reached(
+                now_monotonic=perf_counter(),
+                solve_started_monotonic=solve_started,
+            ):
                 bounded_status = SolveStatus.TIME_LIMIT
                 break
 
             evaluated += 1
-            if not self._is_feasible(problem, selection):
+            decision = formulation.decision(model, selection)
+            if not formulation.is_decision_feasible(
+                problem,
+                model,
+                decision,
+            ):
+                if prepared.time_limit_reached(
+                    now_monotonic=perf_counter(),
+                    solve_started_monotonic=solve_started,
+                ):
+                    bounded_status = SolveStatus.TIME_LIMIT
+                    break
                 continue
             try:
-                materialized = self._materialize(problem, selection)
+                materialized = formulation.materialize(
+                    problem,
+                    model,
+                    decision,
+                    optimizer_id=self.optimizer_id,
+                )
             except CandidateMaterializationError:
+                if prepared.time_limit_reached(
+                    now_monotonic=perf_counter(),
+                    solve_started_monotonic=solve_started,
+                ):
+                    bounded_status = SolveStatus.TIME_LIMIT
+                    break
                 continue
             draft = self._draft_plan(
-                problem,
+                prepared,
                 materialized,
                 iteration_count=evaluated,
             )
-            objective_evaluations = evaluate_objectives(problem, draft)
-            constraint_evaluations = evaluate_constraints(problem, draft)
-            if any(
-                item.hard and not item.satisfied
-                for item in constraint_evaluations
+            evaluation = formulation.evaluate(problem, model, draft)
+            if prepared.time_limit_reached(
+                now_monotonic=perf_counter(),
+                solve_started_monotonic=solve_started,
             ):
+                bounded_status = SolveStatus.TIME_LIMIT
+                break
+            if evaluation.has_hard_violation:
                 continue
-            evaluated_key = objective_key(
-                problem.policy,
-                objective_evaluations,
-                constraint_evaluations,
-            )
+            evaluated_key = evaluation.objective_key
             if any(not math.isfinite(value) for value in evaluated_key):
                 continue
             tie_break = tuple(item.node_id for item in selection)
@@ -195,8 +306,12 @@ class BinaryOffloadOptimizer:
                         evaluated_key[0] if evaluated_key else 0.0
                     ),
                     objective_key=evaluated_key,
-                    objective_evaluations=objective_evaluations,
-                    constraint_evaluations=constraint_evaluations,
+                    objective_evaluations=(
+                        evaluation.objective_evaluations
+                    ),
+                    constraint_evaluations=(
+                        evaluation.constraint_evaluations
+                    ),
                 )
                 state.record(
                     context,
@@ -209,13 +324,13 @@ class BinaryOffloadOptimizer:
                     objective_key=evaluated_key,
                     objective_components={
                         item.objective_id: item.raw_value
-                        for item in objective_evaluations
+                        for item in evaluation.objective_evaluations
                     },
                     selected_targets={
                         item.task_id: item.node_id for item in selection
                     },
                     details={
-                        "ready_task_count": len(tasks),
+                        "ready_task_count": len(model.ordered_task_ids),
                     },
                 )
 
@@ -229,7 +344,7 @@ class BinaryOffloadOptimizer:
                     reason="solve_budget_reached_without_incumbent",
                     evaluated=evaluated,
                     total=total_combinations,
-                    ready_task_count=len(tasks),
+                    ready_task_count=len(model.ordered_task_ids),
                 )
                 raise TimeoutError(
                     "binary offload solve budget expired before an incumbent"
@@ -243,7 +358,7 @@ class BinaryOffloadOptimizer:
                     reason="max_iterations_reached_without_incumbent",
                     evaluated=evaluated,
                     total=total_combinations,
-                    ready_task_count=len(tasks),
+                    ready_task_count=len(model.ordered_task_ids),
                 )
                 raise RuntimeError(
                     "binary offload iteration limit reached before an incumbent"
@@ -253,10 +368,10 @@ class BinaryOffloadOptimizer:
                 context,
                 solve_started,
                 status=SolveStatus.INFEASIBLE,
-                reason="exhaustive_search_found_no_feasible_assignment",
+                reason="formulation_search_found_no_feasible_assignment",
                 evaluated=evaluated,
                 total=total_combinations,
-                ready_task_count=len(tasks),
+                ready_task_count=len(model.ordered_task_ids),
             )
             raise ValueError(
                 "binary offload problem has no feasible complete assignment"
@@ -275,7 +390,7 @@ class BinaryOffloadOptimizer:
             else "max_iterations_reached_with_incumbent"
         )
         assignment_reason = (
-            "optimal exhaustive one-hot placement"
+            "optimal within one-hot placement formulation"
             if exhaustive
             else "best one-hot placement incumbent within solve limits"
         )
@@ -292,6 +407,7 @@ class BinaryOffloadOptimizer:
             ),
             diagnostics={
                 "total_combinations": total_combinations,
+                "formulation_exhausted": exhaustive,
             },
         )
         state.record(
@@ -314,14 +430,44 @@ class BinaryOffloadOptimizer:
                 for item in final_plan.assignments
             },
             details={
-                "ready_task_count": len(tasks),
+                "ready_task_count": len(model.ordered_task_ids),
                 "communication_time_ms": sum(
                     item.communication_ms
                     for item in final_plan.assignments
                 ),
+                "formulation_exhausted": exhaustive,
             },
         )
         return final_plan
+
+    def _draft_plan(
+        self,
+        prepared: PreparedSolve,
+        materialized,
+        *,
+        iteration_count: int,
+    ) -> SchedulingPlan:
+        problem = prepared.problem
+        spec = prepared.request.formulation_spec
+        return SchedulingPlan(
+            problem_id=problem.problem_id,
+            snapshot_id=problem.snapshot.snapshot_id,
+            policy_id=problem.policy.policy_id,
+            policy_version=problem.policy.version,
+            epoch_id=problem.epoch.epoch_id,
+            optimizer_id=self.optimizer_id,
+            optimizer_version=self.optimizer_version,
+            solve_request_id=prepared.request.solve_request_id,
+            metric_contract_id=problem.metric_contract_id,
+            formulation_id=spec.formulation_id,
+            formulation_version=spec.formulation_version,
+            formulation_digest=spec.formulation_digest,
+            solve_status=SolveStatus.FEASIBLE,
+            iteration_count=iteration_count,
+            assignments=materialized.assignments,
+            node_reservations=materialized.node_reservations,
+            transfer_reservations=materialized.transfer_reservations,
+        )
 
     def _record_failure(
         self,
@@ -349,138 +495,45 @@ class BinaryOffloadOptimizer:
         )
 
     @staticmethod
+    def _validate_prepared(prepared: PreparedSolve) -> None:
+        if not isinstance(prepared.model, OneHotPlacementModel):
+            raise TypeError(
+                "binary_offload requires OneHotPlacementModel"
+            )
+        if not isinstance(
+            prepared.formulation,
+            OneHotPlacementFormulation,
+        ):
+            raise TypeError(
+                "binary_offload requires OneHotPlacementFormulation"
+            )
+        if (
+            not BinaryOffloadOptimizer.supports_formulation(
+                prepared.request.formulation_spec
+            )
+        ):
+            raise ValueError(
+                "binary_offload does not support the selected formulation "
+                "version or materializer contract"
+            )
+        if prepared.request.optimizer_id != BinaryOffloadOptimizer.optimizer_id:
+            raise ValueError(
+                "prepared solve optimizer identity does not match binary_offload"
+            )
+        if (
+            prepared.request.optimizer_version
+            != BinaryOffloadOptimizer.optimizer_version
+            or prepared.request.optimizer_config_digest
+            != BinaryOffloadOptimizer.optimizer_config_digest
+        ):
+            raise ValueError(
+                "prepared solve optimizer version/config does not match "
+                "binary_offload"
+            )
+
+    @staticmethod
     def _elapsed_ms(solve_started: float) -> float:
         return (perf_counter() - solve_started) * 1000.0
-
-    @staticmethod
-    def _placement_candidates(
-        problem: SchedulingProblem,
-        task_id: str,
-    ) -> tuple[CandidateEstimate, ...]:
-        candidates = tuple(
-            sorted(
-                (
-                    candidate
-                    for candidate in problem.candidates[task_id]
-                    if candidate.feasible
-                ),
-                key=lambda item: (item.node_id, item.node_kind.value),
-            )
-        )
-        if not candidates:
-            raise ValueError(
-                f"task {task_id} has no feasible placement candidate"
-            )
-        return candidates
-
-    @staticmethod
-    def _is_feasible(
-        problem: SchedulingProblem,
-        selection: tuple[CandidateEstimate, ...],
-    ) -> bool:
-        energy_by_node = defaultdict(float)
-        snapshots = problem.snapshot_by_id
-
-        for candidate in selection:
-            if not snapshots[candidate.node_id].online:
-                return False
-            energy_by_node[candidate.node_id] += candidate.energy_j
-
-        for node_id, requested_energy in energy_by_node.items():
-            remaining_energy = snapshots[node_id].remaining_energy_j
-            if (
-                remaining_energy is not None
-                and requested_energy > remaining_energy + 1e-9
-            ):
-                return False
-        return True
-
-    def _draft_plan(
-        self,
-        problem: SchedulingProblem,
-        materialized: tuple[
-            tuple[Assignment, ...],
-            tuple[PlannedResourceReservation, ...],
-            tuple[TransferReservation, ...],
-        ],
-        *,
-        iteration_count: int,
-    ) -> SchedulingPlan:
-        assignments, node_reservations, transfer_reservations = materialized
-        return SchedulingPlan(
-            problem_id=problem.problem_id,
-            snapshot_id=problem.snapshot.snapshot_id,
-            policy_id=problem.policy.policy_id,
-            policy_version=problem.policy.version,
-            epoch_id=problem.epoch.epoch_id,
-            optimizer_id=self.optimizer_id,
-            optimizer_version=self.optimizer_version,
-            solve_status=SolveStatus.FEASIBLE,
-            iteration_count=iteration_count,
-            assignments=assignments,
-            node_reservations=node_reservations,
-            transfer_reservations=transfer_reservations,
-        )
-
-    def _materialize(
-        self,
-        problem: SchedulingProblem,
-        selection: tuple[CandidateEstimate, ...],
-    ) -> tuple[
-        tuple[Assignment, ...],
-        tuple[PlannedResourceReservation, ...],
-        tuple[TransferReservation, ...],
-    ]:
-        link_available = dict(problem.link_available_ms)
-        assignments: list[Assignment] = []
-        node_reservations: list[PlannedResourceReservation] = []
-        reservations_by_node: dict[
-            str, list[PlannedResourceReservation]
-        ] = defaultdict(list)
-        for reservation in problem.existing_node_reservations:
-            reservations_by_node[reservation.node_id].append(reservation)
-        transfer_reservations: list[TransferReservation] = []
-
-        for candidate in selection:
-            (
-                materialized,
-                task_transfers,
-                next_links,
-                compute_start,
-            ) = materialize_candidate(
-                problem,
-                candidate,
-                reservations_by_node,
-                link_available,
-            )
-            link_available.update(next_links)
-            transfer_reservations.extend(task_transfers)
-            assignments.append(
-                build_assignment(
-                    problem,
-                    materialized,
-                    task_transfers,
-                    optimizer_id=self.optimizer_id,
-                    reason="one-hot placement candidate",
-                )
-            )
-            node_reservation = build_node_reservation(
-                problem,
-                materialized,
-                compute_start_ms=compute_start,
-                reservation_id=(
-                    f"binary-node:{problem.epoch.epoch_id}:"
-                    f"{candidate.task_id}:{candidate.node_id}"
-                ),
-            )
-            node_reservations.append(node_reservation)
-            reservations_by_node[candidate.node_id].append(node_reservation)
-
-        return (
-            tuple(assignments),
-            tuple(node_reservations),
-            tuple(transfer_reservations),
-        )
 
 
 __all__ = ["BinaryOffloadOptimizer"]

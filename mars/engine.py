@@ -28,7 +28,11 @@ from .domain.topology import (
 )
 from .domain.workflow import WorkflowSpec
 from .network import synthesize_legacy_full_mesh
-from .optimizers import OptimizerRegistry
+from .optimizers import (
+    FormulationRegistry,
+    OptimizerRegistry,
+    SchedulingFormulation,
+)
 from .profiling import ProfileCatalog
 from .runtime import InProcessRuntime
 from .scheduler import critical_path
@@ -91,6 +95,7 @@ def run_workflow_simulation(
     node_snapshots: list[NodeSnapshot],
     *,
     algorithm: str = "dag_deadline",
+    formulation: str | SchedulingFormulation | None = None,
     seed: int = 7,
     network_jitter: float = 0.1,
     resource_noise: float = 0.05,
@@ -101,6 +106,7 @@ def run_workflow_simulation(
     link_specs: list[LinkSpec] | None = None,
     link_snapshots: list[LinkSnapshot] | None = None,
     optimizer_registry: OptimizerRegistry | None = None,
+    formulation_registry: FormulationRegistry | None = None,
     fallback_optimizer: str | None = "heuristic",
     fail_first_task_ids: Iterable[str] = (),
 ) -> SimulationReport:
@@ -128,12 +134,14 @@ def run_workflow_simulation(
         link_specs=resolved_link_specs,
         link_snapshots=resolved_link_snapshots,
         optimizer_registry=optimizer_registry,
+        formulation_registry=formulation_registry,
         profile_catalog=profiles,
         fallback_optimizer=fallback_optimizer,
     )
     report = coordinator.run(
         workflow,
         algorithm=algorithm,
+        formulation=formulation,
         seed=seed,
         max_attempts=1,
         fail_first_task_ids=fail_first_task_ids,
