@@ -1,27 +1,39 @@
 """Regression coverage for time-aware binary-offload capacity."""
 
+from backend.app.mars_adapter import (
+    build_link_snapshots,
+    build_link_specs,
+    build_node_snapshots,
+    build_node_specs,
+    build_workflow,
+)
+from evals.benchmarks.binary_offload.spec import (
+    FORMAL_BETA,
+    SCENARIOS,
+    build_scene,
+)
 from mars.engine import run_workflow_simulation
 from mars.optimizers import OptimizerRegistry
 from mars.optimizers.binary_offload import BinaryOffloadOptimizer
-from scripts import run_binary_offload_benchmark as benchmark
+from mars.synthetic_workloads import load_default_synthetic_workloads
 
 
 def test_high_load_binary_offload_can_use_future_capacity() -> None:
     scenario = next(
         item
-        for item in benchmark.SCENARIOS
+        for item in SCENARIOS
         if item["id"] == "high_load"
     )
-    catalog = benchmark.load_default_synthetic_workloads()
-    scene = benchmark.build_scene(scenario, catalog)
-    workflow = benchmark.build_workflow(scene)
-    nodes = benchmark.build_node_specs(scene)
-    snapshots = benchmark.build_node_snapshots(scene)
-    links = benchmark.build_link_specs(scene)
-    link_snapshots = benchmark.build_link_snapshots(scene)
+    catalog = load_default_synthetic_workloads()
+    scene = build_scene(scenario, catalog)
+    workflow = build_workflow(scene)
+    nodes = build_node_specs(scene)
+    snapshots = build_node_snapshots(scene)
+    links = build_link_specs(scene)
+    link_snapshots = build_link_snapshots(scene)
     optimizer = BinaryOffloadOptimizer(
         alpha=1.0,
-        beta=benchmark.FORMAL_BETA,
+        beta=FORMAL_BETA,
         gamma=2.0,
     )
     registry = OptimizerRegistry()

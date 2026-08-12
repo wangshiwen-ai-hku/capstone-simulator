@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from mars.engine import project_coordinator_report
 from mars.domain.topology import LinkSnapshot
-from mars.workflow_metrics import evaluate_workflow_metrics
+from mars.engine import project_run_artifact
+from mars.run_artifact import RunArtifact, build_run_artifact
 
 from .mars_adapter import (
     build_link_snapshots,
+    build_link_specs,
     build_node_snapshots,
     build_node_specs,
     build_workflow,
@@ -20,9 +21,25 @@ from .schemas import SimulateRequest, SimulationResponse
 
 
 def run_simulation(req: SimulateRequest) -> SimulationResponse:
+    """Execute and return the existing Web response contract."""
+
+    response, _ = run_simulation_with_artifact(req)
+    return response
+
+
+def run_simulation_with_artifact(
+    req: SimulateRequest,
+) -> tuple[SimulationResponse, RunArtifact]:
     """Execute one Web scenario through CentralCoordinator and RuntimePort."""
 
     workflow = build_workflow(req.scene)
+    node_specs = build_node_specs(req.scene)
+    node_snapshots = build_node_snapshots(req.scene)
+    link_specs = build_link_specs(req.scene)
+    link_snapshots = _with_network_jitter(
+        build_link_snapshots(req.scene),
+        req.network_jitter,
+    )
     scheduling = configure_scheduling(
         req.algorithm,
         req.optimizer_options,
@@ -35,10 +52,7 @@ def run_simulation(req: SimulateRequest) -> SimulationResponse:
         # The runtime samples the same target-specific success probability
         # used by the optimizer; task accuracy remains a separate quality fact.
         respect_expected_accuracy=True,
-        link_snapshots=_with_network_jitter(
-            build_link_snapshots(req.scene),
-            req.network_jitter,
-        ),
+        link_snapshots=link_snapshots,
         optimizer_registry=scheduling.registry,
         fallback_optimizer=scheduling.fallback_optimizer,
     )
@@ -50,44 +64,37 @@ def run_simulation(req: SimulateRequest) -> SimulationResponse:
         max_attempts=1,
         deterministic=True,
     )
-    report = replace(
-        report,
-        metrics={
-            **report.metrics,
-            **evaluate_workflow_metrics(
-                report.task_results,
-                workflow,
-                build_node_specs(req.scene),
-                build_node_snapshots(req.scene),
-                coordinator.profile_catalog,
-                weights=scheduling.evaluation_weights,
-            ),
-        },
-        workflow={
-            **report.workflow,
-            "requested_algorithm": req.algorithm,
-            "formulation": scheduling.formulation,
-            "optimizer_options": dict(scheduling.optimizer_options),
-            "metric_schema_version": "mars.workflow-metrics.v1",
-        },
-    )
-    projected = project_coordinator_report(
-        report,
-        workflow,
-        build_node_specs(req.scene),
+    artifact = build_run_artifact(
+        run_id=f"simulation:{req.scene.id}:{req.seed}",
+        workflow=workflow,
+        node_specs=node_specs,
+        node_snapshots=node_snapshots,
+        link_specs=link_specs,
+        link_snapshots=link_snapshots,
+        profiles=coordinator.profile_catalog.profiles,
+        raw_report=report,
         algorithm=req.algorithm,
-        profiles=coordinator.profile_catalog,
+        formulation=scheduling.formulation,
+        seed=req.seed,
+        deterministic=True,
+        max_attempts=1,
         network_jitter=req.network_jitter,
         resource_noise=req.resource_noise,
+    )
+    projected = project_run_artifact(
+        artifact,
+        evaluation_weights=scheduling.evaluation_weights,
     )
     projected = replace(
         projected,
         workflow={
             **projected.workflow,
+            "requested_algorithm": req.algorithm,
             "formulation": scheduling.formulation,
+            "optimizer_options": dict(scheduling.optimizer_options),
         },
     )
-    return SimulationResponse.model_validate(projected.as_dict())
+    return SimulationResponse.model_validate(projected.as_dict()), artifact
 
 
 def _with_network_jitter(

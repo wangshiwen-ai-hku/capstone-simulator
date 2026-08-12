@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 
+from evals.workflow import evaluate_run_artifact
 from backend.app.mars_adapter import (
     build_link_snapshots,
     build_link_specs,
@@ -36,8 +37,8 @@ from backend.app.schemas import GenerateSceneRequest
 from backend.app.scheduling import configure_scheduling
 from mars.coordinator import CentralCoordinator
 from mars.profiling import ProfileCatalog, profile_catalog_from_workloads
+from mars.run_artifact import build_run_artifact
 from mars.synthetic_workloads import load_default_synthetic_workloads
-from mars.workflow_metrics import evaluate_workflow_metrics
 from backend.app.mars_adapter import build_node_specs, build_node_snapshots
 
 
@@ -108,15 +109,30 @@ def _coordinator_report_metrics(
     workflow,
     coordinator: CentralCoordinator,
     scheduling_weights,
+    *,
+    seed: int,
 ) -> dict[str, object]:
-    extra = evaluate_workflow_metrics(
-        report.task_results,
-        workflow,
-        build_node_specs(scene),
-        build_node_snapshots(scene),
-        coordinator.profile_catalog,
-        weights=scheduling_weights,
+    artifact = build_run_artifact(
+        run_id=f"failure-sampling-demo:{workflow.workflow_id}:{seed}",
+        workflow=workflow,
+        node_specs=build_node_specs(scene),
+        node_snapshots=build_node_snapshots(scene),
+        link_specs=build_link_specs(scene),
+        link_snapshots=build_link_snapshots(scene),
+        profiles=coordinator.profile_catalog.profiles,
+        raw_report=report,
+        algorithm="binary_offload",
+        formulation=None,
+        seed=seed,
+        deterministic=True,
+        max_attempts=3,
+        network_jitter=0.0,
+        resource_noise=0.04,
     )
+    extra = evaluate_run_artifact(
+        artifact,
+        weights=scheduling_weights,
+    ).as_dict()
     return {**report.metrics, **extra}
 
 
@@ -140,7 +156,7 @@ def run_demo(seed: int, amplified_rate: float, use_llm: bool) -> None:
     print(f"  tasks: {len(scene.tasks)} × local_llm_10b")
     print(f"  robots: 1, edges: 2, seed: {seed}")
     print(f"  profile failure_rate (local_llm_10b, all targets): {amplified_rate}")
-    print(f"  algorithm: binary_offload, max_attempts: 3 (both paths below)")
+    print("  algorithm: binary_offload, max_attempts: 3 (both paths below)")
     print(
         "  note: POST /api/simulate still uses max_attempts=1 inside simulation.py"
     )
@@ -167,6 +183,7 @@ def run_demo(seed: int, amplified_rate: float, use_llm: bool) -> None:
         workflow,
         simulate_style,
         scheduling.evaluation_weights,
+        seed=seed,
     )
     _print_block(
         "Simulate-style path (respect_expected_accuracy=True)",
@@ -195,6 +212,7 @@ def run_demo(seed: int, amplified_rate: float, use_llm: bool) -> None:
         workflow,
         runtime_default,
         scheduling.evaluation_weights,
+        seed=seed,
     )
     _print_block(
         "Runtime API path (current default: NO profile failure sampling)",
@@ -207,7 +225,7 @@ def run_demo(seed: int, amplified_rate: float, use_llm: bool) -> None:
     print("Interpretation")
     print(
         "  • expected_success_ratio often MATCHES across paths because "
-        "workflow_metrics uses profile failure_rate at the chosen node, "
+        "post-run evaluation uses profile failure_rate at the chosen node, "
         "not realized attempt outcomes."
     )
     print(

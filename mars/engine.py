@@ -9,16 +9,19 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import asdict, dataclass, replace
-from statistics import mean
 from typing import Iterable, Mapping
 
+from evals.contracts import EvaluationResult
+from evals.workflow import (
+    WorkflowEvaluationWeights,
+    evaluate_run_artifact,
+    evaluate_task_class_summary_from_report,
+)
+
 from .coordinator import CentralCoordinator, CoordinatorReport
-from .dag import TaskManager
 from .domain.task import (
-    TaskClass,
     TaskInstance,
     TaskState,
-    resolved_placement_constraints,
 )
 from .domain.topology import (
     LinkSnapshot,
@@ -34,12 +37,8 @@ from .optimizers import (
     SchedulingFormulation,
 )
 from .profiling import ProfileCatalog
+from .run_artifact import RunArtifact, build_run_artifact
 from .runtime import InProcessRuntime
-from .scheduler import critical_path
-from .workflow_metrics import (
-    WorkflowEvaluationWeights,
-    evaluate_workflow_metrics,
-)
 
 
 @dataclass
@@ -109,8 +108,92 @@ def run_workflow_simulation(
     formulation_registry: FormulationRegistry | None = None,
     fallback_optimizer: str | None = "heuristic",
     fail_first_task_ids: Iterable[str] = (),
+    run_id: str | None = None,
 ) -> SimulationReport:
-    """Execute a simulation through the coordinator and RuntimePort."""
+    """Execute, evaluate, and project one run for compatibility callers."""
+
+    artifact = run_workflow_artifact(
+        workflow,
+        node_specs,
+        node_snapshots,
+        algorithm=algorithm,
+        formulation=formulation,
+        seed=seed,
+        network_jitter=network_jitter,
+        resource_noise=resource_noise,
+        profiles=profiles,
+        link_specs=link_specs,
+        link_snapshots=link_snapshots,
+        optimizer_registry=optimizer_registry,
+        formulation_registry=formulation_registry,
+        fallback_optimizer=fallback_optimizer,
+        fail_first_task_ids=fail_first_task_ids,
+        run_id=run_id,
+    )
+    return project_run_artifact(
+        artifact,
+        evaluation_weights=evaluation_weights,
+    )
+
+
+def project_run_artifact(
+    artifact: RunArtifact,
+    *,
+    evaluation_weights: WorkflowEvaluationWeights = (
+        WorkflowEvaluationWeights()
+    ),
+) -> SimulationReport:
+    """Evaluate and project one factual run through the legacy report API."""
+
+    evaluation = evaluate_run_artifact(
+        artifact,
+        weights=evaluation_weights,
+    )
+    report = replace(
+        artifact.raw_report,
+        metrics={
+            **artifact.raw_report.metrics,
+            **evaluation.as_dict(),
+        },
+        workflow={
+            **artifact.raw_report.workflow,
+            "metric_schema_version": evaluation.schema_version,
+        },
+    )
+    return project_coordinator_report(
+        report,
+        artifact.workflow,
+        artifact.node_specs,
+        algorithm=artifact.algorithm,
+        profiles=ProfileCatalog(list(artifact.profiles)),
+        network_jitter=artifact.network_jitter,
+        resource_noise=artifact.resource_noise,
+        evaluation=evaluation,
+    )
+
+
+def run_workflow_artifact(
+    workflow: WorkflowSpec,
+    node_specs: list[NodeSpec],
+    node_snapshots: list[NodeSnapshot],
+    *,
+    algorithm: str = "dag_deadline",
+    formulation: str | SchedulingFormulation | None = None,
+    seed: int = 7,
+    network_jitter: float = 0.1,
+    resource_noise: float = 0.05,
+    profiles: ProfileCatalog | None = None,
+    link_specs: list[LinkSpec] | None = None,
+    link_snapshots: list[LinkSnapshot] | None = None,
+    optimizer_registry: OptimizerRegistry | None = None,
+    formulation_registry: FormulationRegistry | None = None,
+    fallback_optimizer: str | None = "heuristic",
+    fail_first_task_ids: Iterable[str] = (),
+    max_attempts: int = 1,
+    deterministic: bool = True,
+    run_id: str | None = None,
+) -> RunArtifact:
+    """Execute one workflow and return its unevaluated factual artifact."""
 
     if network_jitter < 0:
         raise ValueError("network_jitter must be non-negative")
@@ -143,30 +226,27 @@ def run_workflow_simulation(
         algorithm=algorithm,
         formulation=formulation,
         seed=seed,
-        max_attempts=1,
+        max_attempts=max_attempts,
         fail_first_task_ids=fail_first_task_ids,
-        deterministic=True,
+        deterministic=deterministic,
     )
-    report = replace(
-        report,
-        metrics={
-            **report.metrics,
-            **evaluate_workflow_metrics(
-                report.task_results,
-                workflow,
-                node_specs,
-                node_snapshots,
-                coordinator.profile_catalog,
-                weights=evaluation_weights,
-            ),
-        },
-    )
-    return project_coordinator_report(
-        report,
-        workflow,
-        node_specs,
+    return build_run_artifact(
+        run_id=(
+            run_id
+            or f"run:{workflow.workflow_id}:{algorithm}:{seed}"
+        ),
+        workflow=workflow,
+        node_specs=node_specs,
+        node_snapshots=node_snapshots,
+        link_specs=resolved_link_specs,
+        link_snapshots=resolved_link_snapshots,
+        profiles=coordinator.profile_catalog.profiles,
+        raw_report=report,
         algorithm=algorithm,
-        profiles=coordinator.profile_catalog,
+        formulation=formulation,
+        seed=seed,
+        deterministic=deterministic,
+        max_attempts=max_attempts,
         network_jitter=network_jitter,
         resource_noise=resource_noise,
     )
@@ -181,6 +261,7 @@ def project_coordinator_report(
     profiles: ProfileCatalog | None,
     network_jitter: float = 0.0,
     resource_noise: float = 0.0,
+    evaluation: EvaluationResult | None = None,
 ) -> SimulationReport:
     """Project a coordinator result onto the simulation contract."""
 
@@ -318,26 +399,16 @@ def project_coordinator_report(
             )
         )
 
-    manager = TaskManager()
-    index = manager.submit(workflow)
-    critical_ids, critical_path_ms, _ = critical_path(
-        workflow.tasks,
-        index,
-    )
-    metrics = _simulation_metrics(
-        report,
-        workflow,
-        records,
-        node_by_id,
-        critical_path_ms=critical_path_ms,
+    metrics = (
+        evaluation.as_dict()
+        if evaluation is not None
+        else dict(report.metrics)
     )
     makespan_ms = float(metrics["makespan_ms"])
     state_counts = Counter(record.state for record in records)
     levels = {
         str(task_id): int(level)
-        for task_id, level in dict(
-            report.workflow.get("levels", index.levels)
-        ).items()
+        for task_id, level in dict(report.workflow.get("levels", {})).items()
     }
     profile_sources = _profile_sources(
         records,
@@ -372,7 +443,7 @@ def project_coordinator_report(
             ),
             "state_counts": dict(state_counts),
             "critical_path": list(
-                report.workflow.get("critical_path", critical_ids)
+                report.workflow.get("critical_path", ())
             ),
             **{
                 key: report.workflow[key]
@@ -385,7 +456,10 @@ def project_coordinator_report(
                 if key in report.workflow
             },
         },
-        task_class_summary=_task_class_summary(records),
+        task_class_summary=evaluate_task_class_summary_from_report(
+            workflow,
+            report,
+        ),
         dag={
             "valid": True,
             "topological_order": topological_order,
@@ -455,188 +529,6 @@ def _resolve_links(
     )
 
 
-def _simulation_metrics(
-    report: CoordinatorReport,
-    workflow: WorkflowSpec,
-    records: list[SimulationRecord],
-    node_by_id: Mapping[str, NodeSpec],
-    *,
-    critical_path_ms: float,
-) -> dict[str, float | int]:
-    completed = [
-        record
-        for record in records
-        if record.finish_time_ms > 0.0
-        or record.state
-        in {
-            TaskState.SUCCEEDED.value,
-            TaskState.FAILED.value,
-            TaskState.TIMEOUT.value,
-            TaskState.DROPPED.value,
-        }
-    ]
-    latencies = [record.total_latency_ms for record in completed]
-    energies = [record.energy_j for record in completed]
-    executed = [
-        record
-        for record in records
-        if record.compute_time_ms > 0.0
-    ]
-    succeeded = sum(record.success for record in records)
-    missed = sum(record.deadline_missed for record in records)
-    executed_missed = sum(
-        record.deadline_missed for record in executed
-    )
-    required_on_time = sum(
-        record.success and not record.deadline_missed
-        for record in records
-    )
-    makespan_ms = max(
-        (record.finish_time_ms for record in records),
-        default=0.0,
-    )
-    safety_violations = sum(
-        _violates_safety_contract(
-            next(
-                task
-                for task in workflow.tasks
-                if task.task_id == record.task_id
-            ),
-            record.target_node_id,
-            node_by_id,
-        )
-        for record in records
-    )
-    levels = dict(report.workflow.get("levels", {}))
-    metrics: dict[str, float | int] = {
-        "task_count": len(records),
-        "success_rate": round(
-            succeeded / max(1, len(records)),
-            4,
-        ),
-        "deadline_miss_rate": round(
-            missed / max(1, len(records)),
-            4,
-        ),
-        "executed_deadline_miss_rate": round(
-            executed_missed / max(1, len(executed)),
-            4,
-        ),
-        "required_task_on_time_rate": round(
-            required_on_time / max(1, len(records)),
-            4,
-        ),
-        "avg_latency_ms": round(
-            mean(latencies) if latencies else 0.0,
-            2,
-        ),
-        "p95_latency_ms": round(_percentile(latencies, 0.95), 2),
-        "p99_latency_ms": round(_percentile(latencies, 0.99), 2),
-        "avg_energy_j": round(
-            mean(energies) if energies else 0.0,
-            2,
-        ),
-        "total_energy_j": round(sum(energies), 2),
-        "total_solver_time_ms": round(
-            _number(report.metrics.get("total_solver_time_ms")),
-            6,
-        ),
-        "max_solver_time_ms": round(
-            _number(report.metrics.get("max_solver_time_ms")),
-            6,
-        ),
-        "scheduling_epoch_count": int(
-            _number(report.metrics.get("scheduling_epoch_count"))
-        ),
-        "bandwidth_mb": round(
-            _number(report.metrics.get("transferred_mb")),
-            2,
-        ),
-        "makespan_ms": round(makespan_ms, 2),
-        "edge_offload_ratio": round(
-            sum(record.mode == "edge" for record in records)
-            / max(1, len(records)),
-            4,
-        ),
-        "safety_violation_count": safety_violations,
-        "skipped_task_count": sum(
-            record.state == TaskState.SKIPPED.value
-            for record in records
-        ),
-        "workflow_success_rate": (
-            1.0
-            if report.workflow["state"] == "succeeded"
-            else 0.0
-        ),
-        "critical_path_ms": round(
-            _number(
-                report.metrics.get(
-                    "critical_path_ms",
-                    critical_path_ms,
-                )
-            ),
-            2,
-        ),
-        "dag_depth": max(
-            (int(level) for level in levels.values()),
-            default=-1,
-        )
-        + 1,
-    }
-    for key in (
-        "expected_success_reward",
-        "expected_success_ratio",
-        "communication_time_ms",
-        "normalized_communication",
-        "peak_cpu_utilization",
-        "peak_gpu_utilization",
-        "peak_memory_utilization",
-        "maximum_resource_utilization",
-        "workflow_evaluation_objective",
-        "fallback_count",
-    ):
-        if key in report.metrics:
-            value = _number(report.metrics[key])
-            metrics[key] = int(value) if key == "fallback_count" else value
-    return metrics
-
-
-def _task_class_summary(
-    records: Iterable[SimulationRecord],
-) -> dict[str, dict[str, float | int]]:
-    items = tuple(records)
-    summary: dict[str, dict[str, float | int]] = {}
-    for task_class in TaskClass:
-        class_items = [
-            record
-            for record in items
-            if record.task_class == task_class.value
-        ]
-        summary[task_class.value] = {
-            "task_count": len(class_items),
-            "success_rate": round(
-                sum(record.success for record in class_items)
-                / max(1, len(class_items)),
-                4,
-            ),
-            "avg_latency_ms": round(
-                mean(
-                    record.total_latency_ms
-                    for record in class_items
-                )
-                if class_items
-                else 0.0,
-                2,
-            ),
-            "edge_offload_ratio": round(
-                sum(record.mode == "edge" for record in class_items)
-                / max(1, len(class_items)),
-                4,
-            ),
-        }
-    return summary
-
-
 def _profile_sources(
     records: Iterable[SimulationRecord],
     task_by_id: Mapping[str, TaskInstance],
@@ -696,23 +588,6 @@ def _task_result_reason(
     return state
 
 
-def _violates_safety_contract(
-    task: TaskInstance,
-    target_node_id: str,
-    node_by_id: Mapping[str, NodeSpec],
-) -> bool:
-    constraints = resolved_placement_constraints(task)
-    if not constraints.safety_required or not target_node_id:
-        return False
-    target = node_by_id.get(target_node_id)
-    return (
-        target is None
-        or not target.safety_capable
-        or bool(constraints.pinned_node_id)
-        and target_node_id != constraints.pinned_node_id
-    )
-
-
 def _mapping(value: object) -> Mapping[str, object]:
     if isinstance(value, Mapping):
         return value
@@ -723,14 +598,3 @@ def _number(value: object) -> float:
     if isinstance(value, (int, float)):
         return float(value)
     return 0.0
-
-
-def _percentile(values: list[float], fraction: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    position = (len(ordered) - 1) * fraction
-    lower = int(position)
-    upper = min(lower + 1, len(ordered) - 1)
-    weight = position - lower
-    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
