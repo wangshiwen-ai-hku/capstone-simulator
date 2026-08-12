@@ -23,6 +23,7 @@ from .domain import (
 from .dag import DagValidationError, TaskManager, validate_workflow
 from .coordinator import CentralCoordinator, CoordinatorReport
 from .network import NetworkTopology
+from .run_artifact import RunArtifact, build_run_artifact
 from .optimizers import (
     BUILTIN_METRICS,
     CandidateFidelity,
@@ -105,6 +106,7 @@ __all__ = [
     "PlacementConstraints",
     "PlanValidationError",
     "RuntimePort",
+    "RunArtifact",
     "SchedulingEpoch",
     "SchedulingFormulation",
     "SchedulingPlan",
@@ -125,6 +127,7 @@ __all__ = [
     "TaskState",
     "WorkflowSpec",
     "WorkflowState",
+    "build_run_artifact",
     "validate_workflow",
 ]
 

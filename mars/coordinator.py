@@ -94,6 +94,7 @@ class CoordinatorReport:
     data_edges: tuple[dict[str, str], ...]
     events: tuple[RuntimeEvent, ...]
     logs: tuple[str, ...]
+    scheduling_plans: tuple[SchedulingPlan, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -354,6 +355,7 @@ class CentralCoordinator:
         solve_status_counts: Counter[str] = Counter()
         termination_reason_counts: Counter[str] = Counter()
         fallback_count = 0
+        scheduling_plans: list[SchedulingPlan] = []
 
         self._emit(
             current_time_ms,
@@ -458,6 +460,7 @@ class CentralCoordinator:
                 fallback_optimizer=self.fallback_optimizer,
                 solve_state=optimizer_solve_state,
             )
+            scheduling_plans.append(plan)
             planning_elapsed_ms = (
                 perf_counter() - planning_started
             ) * 1000.0
@@ -1392,6 +1395,7 @@ class CentralCoordinator:
             logs=tuple(
                 event.message for event in self._events
             ),
+            scheduling_plans=tuple(scheduling_plans),
         )
 
     def _update_runtime_view(

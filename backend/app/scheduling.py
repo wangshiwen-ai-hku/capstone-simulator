@@ -6,13 +6,13 @@ from dataclasses import dataclass
 import math
 from typing import Mapping
 
+from evals.workflow import WorkflowEvaluationWeights
 from mars.optimizers import (
     BinaryOffloadOptimizer,
     HeuristicOptimizer,
     OptimizerRegistry,
     SolveLimits,
 )
-from mars.workflow_metrics import WorkflowEvaluationWeights
 
 
 DEFAULT_SUCCESS_WEIGHT = 1.0

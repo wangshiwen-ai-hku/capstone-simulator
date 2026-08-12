@@ -8,11 +8,12 @@ from dataclasses import dataclass, replace
 from threading import Lock
 from uuid import uuid4
 
+from evals.workflow import evaluate_run_artifact
 from mars.coordinator import CentralCoordinator, CoordinatorReport
 from mars.domain.topology import LinkSnapshot
 from mars.optimizers import OptimizerRegistry
+from mars.run_artifact import RunArtifact, build_run_artifact
 from mars.runtime import InProcessRuntime
-from mars.workflow_metrics import evaluate_workflow_metrics
 
 from .mars_adapter import (
     build_link_snapshots,
@@ -33,6 +34,7 @@ class RuntimeRun:
     workflow_id: str
     status: str
     future: Future[CoordinatorReport] | None = None
+    artifact: RunArtifact | None = None
     result: dict[str, object] | None = None
     error: str = ""
     trace_session: TraceSession | None = None
@@ -120,7 +122,7 @@ class LocalRuntimeService:
             )
         with self._lock:
             self._runs[run_id] = run
-            run.future = self._executor.submit(
+            future = self._executor.submit(
                 self._execute_run,
                 run_id,
                 coordinator,
@@ -129,6 +131,13 @@ class LocalRuntimeService:
                 failure_ids,
                 scheduling,
             )
+            run.future = future
+        # Finalization cannot depend on a client polling the status endpoint.
+        # Register outside the lock because add_done_callback() executes
+        # synchronously when an exceptionally fast future is already done.
+        future.add_done_callback(
+            lambda _future: self._finalize_run(run_id)
+        )
         payload = {
             "run_id": run_id,
             "workflow_id": workflow.workflow_id,
@@ -161,23 +170,41 @@ class LocalRuntimeService:
             fail_first_task_ids=failure_ids,
             deterministic=request.deterministic,
         )
-        metrics = evaluate_workflow_metrics(
-            report.task_results,
-            workflow,
-            build_node_specs(request.scene),
-            build_node_snapshots(request.scene),
-            coordinator.profile_catalog,
+        artifact = build_run_artifact(
+            run_id=run_id,
+            workflow=workflow,
+            node_specs=build_node_specs(request.scene),
+            node_snapshots=build_node_snapshots(request.scene),
+            link_specs=build_link_specs(request.scene),
+            link_snapshots=build_link_snapshots(request.scene),
+            profiles=coordinator.profile_catalog.profiles,
+            raw_report=report,
+            algorithm=request.algorithm,
+            formulation=scheduling.formulation,
+            seed=request.seed,
+            deterministic=request.deterministic,
+            max_attempts=request.max_attempts,
+            network_jitter=0.0,
+            resource_noise=0.04,
+        )
+        # Preserve the completed factual run before any post-run evaluator
+        # runs.  Evaluation is deliberately downstream of the artifact and a
+        # failure there must not discard otherwise complete execution evidence.
+        with self._lock:
+            self._runs[run_id].artifact = artifact
+        evaluation = evaluate_run_artifact(
+            artifact,
             weights=scheduling.evaluation_weights,
         )
         return replace(
             report,
-            metrics={**report.metrics, **metrics},
+            metrics={**report.metrics, **evaluation.as_dict()},
             workflow={
                 **report.workflow,
                 "requested_algorithm": request.algorithm,
                 "formulation": scheduling.formulation,
                 "optimizer_options": dict(scheduling.optimizer_options),
-                "metric_schema_version": "mars.workflow-metrics.v1",
+                "metric_schema_version": evaluation.schema_version,
             },
         )
 
@@ -218,6 +245,14 @@ class LocalRuntimeService:
         for run in self._runs.values():
             self._refresh_locked(run)
 
+    def _finalize_run(self, run_id: str) -> None:
+        """Commit terminal state and traces as soon as execution completes."""
+
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is not None:
+                self._refresh_locked(run)
+
     def _refresh_locked(self, run: RuntimeRun) -> None:
         if run.future is None or not run.future.done() or run.status in {"succeeded", "failed"}:
             return
@@ -242,6 +277,11 @@ class LocalRuntimeService:
             return
         if run.result is not None:
             session.write_response(run.result)
+        if run.artifact is not None:
+            session.write_json(
+                "run_artifact.json",
+                run.artifact.as_dict(),
+            )
         if run.error:
             session.write_json("error.json", {"error": run.error})
         session.write_json(

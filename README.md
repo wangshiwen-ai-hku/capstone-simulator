@@ -20,8 +20,10 @@ React UI --> FastAPI adapter
                                                                 +-- Simulated Robot Agent(s)
                                                                 +-- Simulated Edge Agent(s)
 
-CoordinatorReport --> Web response projector / runtime result
-mars.engine -------> compatibility wrapper over the same coordinator path
+CoordinatorReport --> immutable RunArtifact (inputs + raw run evidence)
+                         +--> evals post-run evaluation
+                         +--> Web response projector / runtime result
+mars.engine -------> compatibility wrapper over the same artifact path
 ```
 
 The central runtime uses virtual time rather than wall-clock model execution.
@@ -193,15 +195,25 @@ Both Web simulation and runtime workflow submission use this path with
 projector for callers that still consume `SimulationReport`; it does not own a
 second scheduler or event loop.
 
-The built-in optimizer ID is `heuristic`. The existing API values
-`dag_deadline`, `rule_based`, `local_first`, `edge_first`, and `greedy_cost`
-continue to be accepted as policy aliases. Each resolves to the `heuristic`
-optimizer and the policy with the same name. Additional solvers implement the
-`Optimizer` protocol and are registered through `OptimizerRegistry`; they
-consume the same `SchedulingProblem` and do not change the coordinator, task
-model, or runtime interface. Solvers that need incumbent tracing or cross-frame
-warm starts additionally implement the optional `StatefulOptimizer` protocol;
-existing stateless plug-ins continue to use `solve(problem)` unchanged.
+`RunArtifact` is the immutable, pre-evaluation record of a completed run: it
+captures declared workflow/topology/profile inputs, run configuration, retained
+scheduling Plans, and the raw `CoordinatorReport`. Post-run metric definitions,
+observations, aggregation, and reusable benchmark packages live in top-level
+`evals`. Evaluation consumes artifacts only after execution; benchmark packages
+drive the production engine externally, then aggregate and report its artifacts.
+Neither changes scheduling or runtime semantics. `SimulationReport` remains a
+compatibility projection rather than the canonical run record.
+
+The built-in optimizer IDs are `heuristic` and `binary_offload`. The existing
+API values `dag_deadline`, `rule_based`, `local_first`, `edge_first`, and
+`greedy_cost` continue to be accepted as policy aliases. Each resolves to the
+`heuristic` optimizer and the policy with the same name. Additional solvers
+implement the `Optimizer` protocol and are registered through
+`OptimizerRegistry`; they consume the same `SchedulingProblem` and do not change
+the coordinator, task model, or runtime interface. Solvers that need incumbent
+tracing or cross-frame warm starts additionally implement the optional
+`StatefulOptimizer` protocol; existing stateless plug-ins continue to use
+`solve(problem)` unchanged.
 
 ## Quick start
 
@@ -303,20 +315,27 @@ fans out to environment understanding and planning.
 Both interface actions use the same coordinator and RuntimePort execution path:
 
 - **Run Scheduling Simulation** returns the `SimulationReport` representation of
-  the completed coordinator run.
+  the evaluated `RunArtifact` produced from the completed coordinator run.
 - **Submit to Agent Runtime** stores the coordinator report asynchronously and
-  exposes run events. Failure injection is available through the runtime API
-  and is disabled by default.
+  retains its `RunArtifact` while exposing the compatible raw result and run
+  events. Failure injection is available through the runtime API and is
+  disabled by default.
 
 ### Tests
 
 ```bash
 pip install -r backend/requirements-dev.txt
-python -m ruff check backend mars tests
-python -m compileall -q backend mars tests
+python -m ruff check backend evals mars scripts tests
+python -m compileall -q backend evals mars scripts tests
 python -m pytest -q
 cd frontend && npm test && npm run build
 ```
+
+The binary-offload experiment is implemented as the importable
+`evals.benchmarks.binary_offload` package. Tests import that package directly;
+`scripts/run_binary_offload_benchmark.py` is only the command-line entry point
+that runs the fixed matrix and writes its seven compatibility artifacts to
+`doc/`.
 
 ## Synthetic workloads
 
@@ -375,9 +394,14 @@ mars/
   coordinator.py               central runtime orchestration, attempts, retry, report
   runtime/base.py              sole asynchronous control-plane runtime contract
   runtime/inprocess.py         process-local simulated runtime adapter
+  run_artifact.py              immutable inputs and raw evidence for one run
   engine.py                    compatibility wrapper and SimulationReport projector
   synthetic_workloads.py       replaceable synthetic workload registry and sampler
   profiling.py                 execution-profile catalog
+evals/
+  contracts.py                 versioned post-run metric and aggregation contracts
+  workflow.py                  canonical RunArtifact workflow evaluation
+  benchmarks/binary_offload/   benchmark definition, runner, audit, and reporting
 backend/app/
   main.py                      FastAPI endpoints
   runtime.py                   background local-runtime service and run store
@@ -387,6 +411,7 @@ frontend/                      React benchmark and Agent runtime UI
 interfaces/proto/mars/v1/      versioned cross-module data contracts
 configs/mars/                  synthetic workload and profile configuration
 tests/                         core, runtime contract, adapter, and API tests
+scripts/                       thin command-line and demonstration entry points
 ```
 
 The Proto files define versioned data messages for workflows, topology,
