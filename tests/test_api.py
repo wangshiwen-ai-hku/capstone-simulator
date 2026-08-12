@@ -513,6 +513,43 @@ class LlmFallbackTests(unittest.TestCase):
             )
         )
 
+    def test_llm_conflicting_source_and_explicit_pin_uses_fallback(self):
+        request = GenerateSceneRequest(
+            robot_count=1,
+            edge_count=1,
+            seed=24,
+            use_llm=True,
+        )
+        payload = build_deterministic_scene(request).model_dump(mode="json")
+        placement = payload["tasks"][0]["placement_constraints"]
+        placement["pin_to_source"] = True
+        placement["pinned_node_id"] = "edge_pc"
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=json.dumps(payload))
+                )
+            ]
+        )
+        client = MagicMock()
+        client.chat.completions.create.return_value = response
+        settings = SimpleNamespace(
+            llm_timeout_seconds=120,
+            llm_temperature=0.0,
+            current_llm=lambda: {
+                "provider": "deepseek",
+                "api_key": "test-key",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-v4-flash",
+            },
+        )
+
+        with patch("backend.app.llm_client.OpenAI", return_value=client):
+            scene = generate_scene_with_llm(settings, request)
+
+        self.assertEqual(scene.generation_source, "deterministic_fallback")
+        validate_scene(scene)
+
     def test_llm_scene_with_unsupported_cloud_node_uses_fallback(self):
         request = GenerateSceneRequest(
             robot_count=1,

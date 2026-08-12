@@ -116,6 +116,7 @@ interface LlmStatus {
   configured: boolean;
   provider: string;
   model: string;
+  traceEnabled: boolean;
 }
 
 interface TaskPlayback {
@@ -782,6 +783,7 @@ export default function App() {
           configured: response.llm_configured,
           provider: response.provider,
           model: response.model,
+          traceEnabled: response.trace_archive?.enabled ?? false,
         });
       })
       .catch(() => {
@@ -1088,6 +1090,7 @@ export default function App() {
                 {llmStatus?.configured
                   ? `${llmStatus.provider} / ${llmStatus.model}`
                   : 'Configure an LLM provider in the backend to enable this option.'}
+                {llmStatus?.traceEnabled ? ' | trace archive on' : ''}
               </small>
               <label htmlFor="difficulty">Task difficulty</label>
               <div className="segmented" id="difficulty">
@@ -1241,6 +1244,15 @@ export default function App() {
               <CircleStop size={16} />
               <span>{error}</span>
               <button type="button" onClick={() => setError(null)}>Dismiss</button>
+            </div>
+          )}
+          {scene?.generation_source === 'deterministic_fallback' && (
+            <div className="workspace-notice" role="status">
+              <CircleStop size={16} />
+              <span>
+                {scene.generation_note
+                  || 'LLM generation failed; deterministic fallback used.'}
+              </span>
             </div>
           )}
           <ReactFlow<FlowNode, Edge>

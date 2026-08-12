@@ -24,6 +24,7 @@ from .mars_adapter import (
 from .scene_generator import build_deterministic_scene
 from .schemas import GenerateSceneRequest, RuntimeWorkflowRequest
 from .scheduling import SchedulingConfiguration, configure_scheduling
+from .trace_archive import TraceSession
 
 
 @dataclass
@@ -34,6 +35,8 @@ class RuntimeRun:
     future: Future[CoordinatorReport] | None = None
     result: dict[str, object] | None = None
     error: str = ""
+    trace_session: TraceSession | None = None
+    trace_archived: bool = False
 
 
 class LocalRuntimeService:
@@ -67,7 +70,12 @@ class LocalRuntimeService:
             self._refresh_all_locked()
             return self._runtime_view_locked()
 
-    def submit(self, request: RuntimeWorkflowRequest) -> dict[str, object]:
+    def submit(
+        self,
+        request: RuntimeWorkflowRequest,
+        *,
+        trace_session: TraceSession | None = None,
+    ) -> dict[str, object]:
         _validate_runtime_topology(request)
         scheduling = configure_scheduling(
             request.algorithm,
@@ -98,7 +106,17 @@ class LocalRuntimeService:
             failure_ids = (selected,)
 
         run_id = f"run_{uuid4().hex[:12]}"
-        run = RuntimeRun(run_id, workflow.workflow_id, "accepted")
+        run = RuntimeRun(
+            run_id,
+            workflow.workflow_id,
+            "accepted",
+            trace_session=trace_session,
+        )
+        if trace_session is not None:
+            trace_session.write_json(
+                "run.json",
+                {"run_id": run_id, "workflow_id": workflow.workflow_id},
+            )
         with self._lock:
             self._runs[run_id] = run
             run.future = self._executor.submit(
@@ -110,11 +128,15 @@ class LocalRuntimeService:
                 failure_ids,
                 scheduling,
             )
-        return {
+        payload = {
             "run_id": run_id,
             "workflow_id": workflow.workflow_id,
             "status": "accepted",
         }
+        if trace_session is not None:
+            payload["trace_id"] = trace_session.trace_id
+            payload["trace_directory"] = str(trace_session.directory)
+        return payload
 
     def _execute_run(
         self,
@@ -201,6 +223,7 @@ class LocalRuntimeService:
         except Exception as exc:  # surfaced through the run status endpoint
             run.status = "failed"
             run.error = f"{type(exc).__name__}: {exc}"
+            self._archive_run_trace(run)
             return
         run.result = report.as_dict()
         run.status = (
@@ -208,6 +231,25 @@ class LocalRuntimeService:
             if report.workflow.get("state") == "succeeded"
             else "failed"
         )
+        self._archive_run_trace(run)
+
+    def _archive_run_trace(self, run: RuntimeRun) -> None:
+        session = run.trace_session
+        if session is None or run.trace_archived:
+            return
+        if run.result is not None:
+            session.write_response(run.result)
+        if run.error:
+            session.write_json("error.json", {"error": run.error})
+        session.write_json(
+            "status.json",
+            {
+                "run_id": run.run_id,
+                "workflow_id": run.workflow_id,
+                "status": run.status,
+            },
+        )
+        run.trace_archived = True
 
     def _runtime_view_locked(self) -> dict[str, object]:
         coordinator = self._coordinator

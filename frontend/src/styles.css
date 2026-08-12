@@ -1098,6 +1098,31 @@ textarea:focus-visible {
   cursor: pointer;
 }
 
+.workspace-notice {
+  position: absolute;
+  z-index: 7;
+  top: 12px;
+  left: 50%;
+  display: flex;
+  width: min(640px, calc(100% - 24px));
+  min-height: 38px;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  transform: translateX(-50%);
+  border: 1px solid #806b3e;
+  border-radius: 5px;
+  color: #f2dfaa;
+  background: #3a321f;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  font-size: 10px;
+}
+
+.workspace-notice span {
+  min-width: 0;
+  flex: 1;
+}
+
 .timeline-panel {
   width: min(580px, calc(100vw - 380px));
   min-width: 300px;

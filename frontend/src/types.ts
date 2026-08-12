@@ -196,6 +196,7 @@ export interface BenchmarkScene {
   success_criteria: string[];
   generation_source: 'deterministic' | 'llm' | 'deterministic_fallback';
   generation_note: string;
+  trace_id?: string | null;
 }
 
 export interface SimulationMetrics {

@@ -204,6 +204,38 @@ describe('MARS Studio', () => {
     expect(screen.getByText('deepseek / deepseek-v4-flash')).toBeTruthy();
   });
 
+  it('shows when LLM generation falls back to a deterministic scene', async () => {
+    vi.mocked(health).mockResolvedValue({
+      status: 'ok',
+      provider: 'apiyi',
+      model: 'deepseek-v4-flash',
+      llm_configured: true,
+      system: 'MARS',
+      mars_version: 'test',
+      trace_archive: {
+        enabled: true,
+      },
+    });
+    vi.mocked(generateScene)
+      .mockResolvedValueOnce(scene)
+      .mockResolvedValueOnce({
+        ...scene,
+        generation_source: 'deterministic_fallback',
+        generation_note: 'LLM apiyi failed; deterministic fallback used. Trace: trace-1.',
+      });
+    render(<App />);
+
+    await screen.findByText('Warehouse test scene');
+    const llm = await screen.findByRole('checkbox', { name: 'Use LLM scene generation' });
+    fireEvent.click(llm);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply settings' }));
+
+    expect((await screen.findByRole('status')).textContent).toContain(
+      'LLM apiyi failed; deterministic fallback used. Trace: trace-1.',
+    );
+    expect(screen.getByText('apiyi / deepseek-v4-flash | trace archive on')).toBeTruthy();
+  });
+
   it('renders a failed workflow report instead of treating it as a transport error', async () => {
     vi.mocked(submitRuntimeWorkflow).mockResolvedValue({
       run_id: 'run-failed',

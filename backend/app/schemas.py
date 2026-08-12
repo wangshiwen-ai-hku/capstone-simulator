@@ -293,6 +293,13 @@ class BenchmarkScene(BaseModel):
         "deterministic_fallback",
     ] = "deterministic"
     generation_note: str = ""
+    trace_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Opaque scene-generation trace identifier used to associate "
+            "later simulation and runtime calls."
+        ),
+    )
 
     @field_validator("tasks")
     @classmethod

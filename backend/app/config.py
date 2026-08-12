@@ -49,9 +49,30 @@ class Settings(BaseSettings):
     custom_base_url: str = Field(default="https://llm-gateway.example.com/v1", alias="CUSTOM_BASE_URL")
     custom_model: str = Field(default="", alias="CUSTOM_MODEL")
 
+    apiyi_api_key: Optional[str] = Field(default=None, alias="APIYI_KEY")
+    apiyi_base_url: str = Field(
+        default="https://api.apiyi.com/v1",
+        alias="APIYI_BASE_URL",
+    )
+    apiyi_model: str = Field(
+        default="deepseek-v4-flash",
+        alias="APIYI_MODEL",
+    )
+
     cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173", alias="CORS_ORIGINS")
     llm_temperature: float = Field(default=0.35, alias="LLM_TEMPERATURE")
-    llm_timeout_seconds: int = Field(default=120, alias="LLM_TIMEOUT_SECONDS")
+    llm_timeout_seconds: int = Field(default=300, ge=1, alias="LLM_TIMEOUT_SECONDS")
+    llm_max_retries: int = Field(default=1, ge=0, le=5, alias="LLM_MAX_RETRIES")
+    llm_stream_responses: bool = Field(
+        default=True,
+        alias="LLM_STREAM_RESPONSES",
+    )
+
+    mars_trace_archive: bool = Field(default=False, alias="MARS_TRACE_ARCHIVE")
+    mars_trace_dir: str = Field(
+        default="tmp/mars-traces",
+        alias="MARS_TRACE_DIR",
+    )
 
     def cors_origin_list(self) -> List[str]:
         return [x.strip() for x in self.cors_origins.split(",") if x.strip()]
@@ -73,6 +94,13 @@ class Settings(BaseSettings):
             return {"provider": provider, "api_key": self.gemini_api_key, "base_url": self.gemini_base_url, "model": self.gemini_model}
         if provider == "custom":
             return {"provider": provider, "api_key": self.custom_api_key, "base_url": self.custom_base_url, "model": self.custom_model}
+        if provider == "apiyi":
+            return {
+                "provider": provider,
+                "api_key": self.apiyi_api_key,
+                "base_url": self.apiyi_base_url,
+                "model": self.apiyi_model,
+            }
         return {"provider": "openai", "api_key": self.openai_api_key, "base_url": self.openai_base_url, "model": self.openai_model}
 
     def public_llm(self) -> dict[str, str | bool]:
