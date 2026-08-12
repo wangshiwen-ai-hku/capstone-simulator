@@ -214,7 +214,6 @@ describe('MARS Studio', () => {
       mars_version: 'test',
       trace_archive: {
         enabled: true,
-        directory: '/tmp/mars-traces',
       },
     });
     vi.mocked(generateScene)

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -52,6 +54,8 @@ def test_trace_writes_session_files(tmp_path: Path) -> None:
     relative = session.directory.relative_to(scene_session.root_directory)
     assert relative.parts[:2] == ("calls", "simulate")
     assert "binary_offload" in relative.parts[-1]
+    assert os.stat(scene_session.root_directory).st_mode & 0o777 == 0o700
+    assert os.stat(written).st_mode & 0o777 == 0o600
 
 
 def test_unlinked_call_creates_an_imported_scene_root(tmp_path: Path) -> None:
@@ -87,6 +91,27 @@ def test_trace_rejects_path_traversal(tmp_path: Path) -> None:
         session.write_json("../outside.json", {"unsafe": True})
 
 
+def test_trace_io_failures_are_best_effort(tmp_path: Path) -> None:
+    settings = Settings(
+        _env_file=None,
+        MARS_TRACE_ARCHIVE=True,
+        MARS_TRACE_DIR=str(tmp_path / "traces"),
+    )
+    with patch(
+        "backend.app.trace_archive._new_scene_root",
+        side_effect=OSError("disk unavailable"),
+    ):
+        assert begin_session("generate-scene", settings) is None
+
+    session = begin_session("generate-scene", settings)
+    assert session is not None
+    with patch(
+        "backend.app.trace_archive._write_json_atomic",
+        side_effect=OSError("disk full"),
+    ):
+        assert session.write_json("scene/response.json", {"ok": True}) is None
+
+
 def test_llm_trace_is_structured_and_redacts_credentials(
     tmp_path: Path,
 ) -> None:
@@ -102,8 +127,8 @@ def test_llm_trace_is_structured_and_redacts_credentials(
         provider="custom",
         model="demo",
         base_url="https://user:secret@example.com/v1?token=secret",
-        system_prompt="system",
-        user_prompt="user",
+        system_prompt="API_KEY=plain-secret system",
+        user_prompt="Bearer opaque-user-token user",
         timeout_seconds=30,
         max_retries=1,
         stream=True,
@@ -112,7 +137,11 @@ def test_llm_trace_is_structured_and_redacts_credentials(
         session,
         provider="custom",
         model="demo",
-        response_content='{"workflow_id": "wf"}',
+        response_content=(
+            '{"workflow_id": "wf", '
+            '"secret": "echoed-value", '
+            '"message": "token=response-token"}'
+        ),
         success=False,
         elapsed_ms=12.5,
         error=RuntimeError("Bearer sk-secretvalue123456 failed"),
@@ -120,8 +149,17 @@ def test_llm_trace_is_structured_and_redacts_credentials(
 
     request = json.loads((session.directory / "llm/request.json").read_text())
     result = json.loads((session.directory / "llm/meta.json").read_text())
+    response = json.loads((session.directory / "llm/response.json").read_text())
     assert request["base_url"] == "https://example.com/v1"
-    assert "secretvalue" not in json.dumps(result)
+    archived = json.dumps({"request": request, "result": result, "response": response})
+    for secret in (
+        "plain-secret",
+        "opaque-user-token",
+        "secretvalue",
+        "echoed-value",
+        "response-token",
+    ):
+        assert secret not in archived
     assert (session.directory / "llm/response.json").is_file()
 
 
@@ -139,6 +177,35 @@ def test_summarize_llm_response_truncates_and_parses() -> None:
     assert summary["preview_truncated"] is True
     assert summary["parsed_json"]["workflow_id"] == "wf_demo"
     assert summary["parsed_json"]["task_count"] == 1
+
+
+def test_summarize_llm_response_tolerates_wrong_field_types() -> None:
+    summary = summarize_llm_response(
+        json.dumps(
+            {
+                "workflow_id": ["not", "a", "string"],
+                "title": 42,
+                "tasks": 3,
+                "data_edges": {"wrong": "shape"},
+                "nodes": None,
+            }
+        )
+    )
+    parsed = summary["parsed_json"]
+    assert parsed == {
+        "workflow_id": None,
+        "title": None,
+        "task_count": None,
+        "data_edge_count": None,
+        "node_count": None,
+        "top_level_keys": [
+            "data_edges",
+            "nodes",
+            "tasks",
+            "title",
+            "workflow_id",
+        ],
+    }
 
 
 def test_trace_env_toggle(monkeypatch: pytest.MonkeyPatch) -> None:

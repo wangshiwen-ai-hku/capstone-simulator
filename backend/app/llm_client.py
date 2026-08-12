@@ -108,7 +108,7 @@ def _extract_json(text: str) -> Dict[str, Any]:
 
 
 def _normalize_llm_scene_payload(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Repair common LLM placement mistakes before schema validation."""
+    """Repair harmless omissions and reject ambiguous placement authority."""
     for task in data.get("tasks") or []:
         if not isinstance(task, dict):
             continue
@@ -118,7 +118,10 @@ def _normalize_llm_scene_payload(data: Dict[str, Any]) -> Dict[str, Any]:
         if placement.get("pinned_node_id") is None:
             placement["pinned_node_id"] = ""
         if placement.get("pin_to_source") and placement.get("pinned_node_id"):
-            placement["pinned_node_id"] = ""
+            raise ValueError(
+                f"task {task.get('id', '<unknown>')} cannot set both "
+                "pin_to_source and pinned_node_id"
+            )
     return data
 
 

@@ -227,7 +227,8 @@ tmp/mars-traces/
 If a scheduler call uses an older/imported scene without a known `trace_id`, a
 new root marked `status: imported` is created instead of silently losing the
 call. Files are written atomically. `GET /api/health` includes the archive
-status, layout, schema version, and directory. Credentials are never archived.
+status, layout, and schema version without exposing the server filesystem path.
+Credentials are redacted from archived prompts, responses, and metadata.
 
 ### Frontend
 
