@@ -158,7 +158,11 @@ def profile_catalog_from_workloads(
                     supported=profile.supported,
                     provenance="synthetic_workload_catalog",
                     cpu_units=profile.resources.cpu_cores,
-                    gpu_units=profile.resources.gpu_units,
+                    # Accelerator demand belongs to the workload, not the
+                    # target. Keep it in absolute sparse INT8 TOPS so moving
+                    # a task between Jetson and edge hardware never changes
+                    # the amount of work being scheduled.
+                    gpu_units=workload.accelerator_demand_tops,
                 )
             )
     return ProfileCatalog(profiles)

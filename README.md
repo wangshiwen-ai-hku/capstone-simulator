@@ -248,6 +248,26 @@ LLM_MAX_RETRIES=1
 LLM_STREAM_RESPONSES=1
 ```
 
+The left control surface also includes MARS Agent and MARS Templates. Agent
+models are routed through APIYI and currently allow `deepseek-v4-flash` and
+`gemini-3.1-flash-lite`. Configure `APIYI_KEY`; optional settings are documented in
+`backend/.env.example`. Without a key, the Agent remains usable in a local,
+deterministic structured-draft mode. Saved templates contain a complete,
+validated `BenchmarkScene` and can be imported directly into Studio.
+
+MARS Agent uses an incremental conversation: discovery, atomic-task planning,
+review, then schema compilation after confirmation. Model calls are bounded by
+`MARS_AGENT_MODEL_TIMEOUT_SECONDS` (35 seconds by default). Retrieval creates
+its TLS context from the packaged `certifi` CA bundle, so a normal backend
+startup does not require manually exporting `SSL_CERT_FILE`.
+
+Generated accelerator resources use absolute sparse INT8 TOPS: Jetson Orin
+Nano/NX/AGX capacities are 67/157/275 TOPS, while each workload declares one
+fixed `accelerator_demand_tops` independent of board, difficulty, seed, and
+utilization. Synthetic scenes run a schedulability preflight before they are
+returned so random background load cannot silently leave a task without an
+execution candidate.
+
 Restart the backend and confirm that `GET /api/health` reports
 `"provider": "deepseek"` and `"llm_configured": true`. Enable **Use LLM** in
 the Web interface when generating a scene. Provider credentials remain in the

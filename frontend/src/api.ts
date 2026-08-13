@@ -1,8 +1,11 @@
 import type {
   Algorithm,
+  AgentChatResponse,
   ArchitectureResponse,
   BenchmarkScene,
+  BenchmarkTemplate,
   GenerateSceneRequest,
+  MarsAgentModel,
   RuntimeWorkflowRun,
   SchedulerRunOptions,
   SimulationResponse,
@@ -48,6 +51,46 @@ export function generateScene(payload: GenerateSceneRequest) {
     method: 'POST',
     body: JSON.stringify(payload),
   });
+}
+
+export function chatWithAgent(payload: {
+  thread_id?: string;
+  message: string;
+  model: MarsAgentModel;
+  enable_web_search: boolean;
+  current_scene?: BenchmarkScene;
+  action?: 'message' | 'confirm' | 'restart';
+}) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 50_000);
+  return request<AgentChatResponse>('/api/agent/chat', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+  }).finally(() => window.clearTimeout(timeout));
+}
+
+export function listTemplates() {
+  return request<{ templates: BenchmarkTemplate[] }>('/api/templates');
+}
+
+export function createTemplate(payload: {
+  name: string;
+  description: string;
+  tags: string[];
+  scene: BenchmarkScene;
+}) {
+  return request<BenchmarkTemplate>('/api/templates', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteTemplate(templateId: string) {
+  const res = await fetch(`${API_BASE}/api/templates/${encodeURIComponent(templateId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
 }
 
 export function simulate(

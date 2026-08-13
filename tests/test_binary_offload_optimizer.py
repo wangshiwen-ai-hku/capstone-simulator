@@ -826,7 +826,7 @@ def test_public_workload_profile_conversion_preserves_target_resources() -> None
 
     assert converted is not None
     assert converted.cpu_units == robot.resources.cpu_cores
-    assert converted.gpu_units == robot.resources.gpu_units
+    assert converted.gpu_units == workload.accelerator_demand_tops
     assert converted.peak_memory_mb == robot.resources.memory_mb
     assert converted.output_size_mb == robot.output_size_mb.typical
     assert converted.failure_rate == robot.failure_rate

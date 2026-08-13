@@ -1,6 +1,7 @@
 from enum import Enum
 import math
-from typing import Dict, List, Literal, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mars.domain.task import TaskClass, infer_task_class
@@ -61,6 +62,9 @@ class GenerateSceneRequest(BaseModel):
     difficulty: Difficulty = Difficulty.medium
     seed: int = Field(default=7, ge=0)
     use_llm: bool = False
+    robot_hardware: Literal[
+        "orin_nano", "orin_nx", "orin_agx"
+    ] = "orin_nx"
 
     @field_validator("task_categories")
     @classmethod
@@ -76,7 +80,10 @@ class NodeSpec(BaseModel):
     display_name: str
     architecture: str = "generic"
     cpu_capacity: float = Field(gt=0)
-    gpu_capacity: float = Field(ge=0)
+    gpu_capacity: float = Field(
+        ge=0,
+        description="Accelerator capacity in sparse INT8 TOPS.",
+    )
     memory_gb: float = Field(gt=0)
     bandwidth_mbps: float = Field(gt=0)
     base_latency_ms: float = Field(ge=0)
@@ -214,8 +221,15 @@ class Workload(BaseModel):
         ),
     )
     priority: int = Field(default=3, ge=1, le=5)
-    compute_demand: float = Field(gt=0, description="Normalized compute units.")
-    gpu_demand: float = Field(default=0.0, ge=0)
+    compute_demand: float = Field(
+        gt=0,
+        description="CPU demand in physical cores.",
+    )
+    gpu_demand: float = Field(
+        default=0.0,
+        ge=0,
+        description="Fixed accelerator demand in sparse INT8 TOPS.",
+    )
     latency_budget_ms: float = Field(gt=0)
     safety_level: int = Field(default=2, ge=1, le=5)
     model_requirement: str
@@ -364,6 +378,108 @@ class BenchmarkScene(BaseModel):
                     f"{constraints.pinned_node_id}"
                 )
         return self
+
+
+AgentModel = Literal[
+    "deepseek-v4-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-flash",
+]
+
+
+class AgentChatRequest(BaseModel):
+    """One guided modelling turn using the same scene contract as Studio."""
+
+    thread_id: Optional[str] = None
+    message: str = Field(min_length=1, max_length=12_000)
+    model: AgentModel = "gemini-3.1-flash-lite"
+    enable_web_search: bool = True
+    current_scene: Optional[BenchmarkScene] = None
+    action: Literal["message", "confirm", "restart"] = "message"
+
+
+class AgentSource(BaseModel):
+    title: str
+    url: str = ""
+    snippet: str = ""
+    kind: Literal["mars", "web"] = "mars"
+
+
+class AgentStructuredInfo(BaseModel):
+    task_spec: Dict[str, Any] = Field(default_factory=dict)
+    workflow_spec: Dict[str, Any] = Field(default_factory=dict)
+    assumptions: List[str] = Field(default_factory=list)
+
+
+AgentPhase = Literal["discovery", "planning", "review", "ready"]
+
+
+class AgentAtomicTaskPlan(BaseModel):
+    id: str
+    name: str
+    task_type: str
+    purpose: str = ""
+    source_robot_id: str = "robot_1"
+    dependencies: List[str] = Field(default_factory=list)
+    arrival_time_ms: float = Field(default=0, ge=0)
+    deadline_ms: float = Field(default=1000, gt=0)
+    priority: int = Field(default=3, ge=1, le=5)
+    placement_hint: str = ""
+
+
+class AgentChatResponse(BaseModel):
+    thread_id: str
+    message: str
+    model: AgentModel
+    fallback: bool = False
+    questions: List[str] = Field(default_factory=list)
+    insights: List[str] = Field(default_factory=list)
+    suggested_nodes: List[str] = Field(default_factory=list)
+    sources: List[AgentSource] = Field(default_factory=list)
+    structured_info: AgentStructuredInfo = Field(
+        default_factory=AgentStructuredInfo
+    )
+    scene_draft: Optional[BenchmarkScene] = None
+    ready_to_import: bool = False
+    phase: AgentPhase = "discovery"
+    progress: int = Field(default=0, ge=0, le=100)
+    atomic_tasks: List[AgentAtomicTaskPlan] = Field(default_factory=list)
+    provenance: Literal[
+        "api",
+        "api_recovered",
+        "local_intake",
+        "local_fallback",
+    ] = "local_intake"
+    effective_model: Optional[str] = None
+    diagnostic: str = ""
+
+
+class BenchmarkTemplateCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=1000)
+    tags: List[str] = Field(default_factory=list, max_length=20)
+    scene: BenchmarkScene
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags(cls, tags: List[str]) -> List[str]:
+        normalized = [tag.strip() for tag in tags if tag.strip()]
+        return list(dict.fromkeys(normalized))
+
+
+class BenchmarkTemplate(BaseModel):
+    schema_version: str = "mars.benchmark.template.v1"
+    id: str
+    name: str
+    description: str = ""
+    tags: List[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+    scene: BenchmarkScene
+
+
+class BenchmarkTemplateList(BaseModel):
+    templates: List[BenchmarkTemplate] = Field(default_factory=list)
 
 
 class SimulateRequest(BaseModel):

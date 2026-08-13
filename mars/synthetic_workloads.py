@@ -115,6 +115,7 @@ class SyntheticWorkload:
     task_class: TaskClass
     description: str
     model_variant: str
+    accelerator_demand_tops: float
     inputs: tuple[PortDefinition, ...]
     outputs: tuple[PortDefinition, ...]
     profiles: tuple[SyntheticRuntimeProfile, ...]
@@ -122,6 +123,13 @@ class SyntheticWorkload:
     def __post_init__(self) -> None:
         if not self.task_type.strip() or not self.display_name.strip():
             raise ValueError("task_type and display_name are required")
+        if (
+            not math.isfinite(self.accelerator_demand_tops)
+            or self.accelerator_demand_tops < 0
+        ):
+            raise ValueError(
+                "accelerator_demand_tops must be finite and non-negative"
+            )
         targets = [profile.target for profile in self.profiles]
         if len(targets) != len(set(targets)):
             raise ValueError(f"duplicate target profile for {self.task_type}")
@@ -149,7 +157,7 @@ class SyntheticWorkload:
         profile = self.profile_for(target)
         dominant = (
             ResourceClass.GPU
-            if profile.resources.gpu_units > profile.resources.cpu_cores / 4
+            if self.accelerator_demand_tops > 0
             else ResourceClass.CPU
         )
         fallback = self.task_class is not TaskClass.LOCAL_SAFETY
@@ -158,8 +166,8 @@ class SyntheticWorkload:
         return TaskSpec(
             task_type=self.task_type,
             task_class=self.task_class,
-            compute_demand=max(0.1, profile.resources.cpu_cores + 1.5 * profile.resources.gpu_units),
-            gpu_demand=profile.resources.gpu_units,
+            compute_demand=max(0.1, profile.resources.cpu_cores),
+            gpu_demand=self.accelerator_demand_tops,
             latency_budget_ms=latency_budget_ms or profile.latency.p95_ms * 1.25,
             model_requirement=self.model_variant,
             input_size_mb=profile.input_size_mb.typical,
@@ -233,7 +241,7 @@ class SyntheticSampler:
             target=resolved,
             latency_ms=round(latency, 4),
             cpu_cores=profile.resources.cpu_cores,
-            gpu_units=profile.resources.gpu_units,
+            gpu_units=workload.accelerator_demand_tops,
             memory_mb=profile.resources.memory_mb,
             input_size_mb=round(input_size, 6),
             output_size_mb=round(output_size, 6),
@@ -372,6 +380,9 @@ def workload_from_dict(item: Mapping[str, Any]) -> SyntheticWorkload:
         task_class=TaskClass(item["task_class"]),
         description=item.get("description", ""),
         model_variant=item.get("model_variant", "synthetic"),
+        accelerator_demand_tops=float(
+            item.get("accelerator_demand_tops", 0.0)
+        ),
         inputs=ports(item.get("inputs", [])),
         outputs=ports(item.get("outputs", [])),
         profiles=tuple(profiles),

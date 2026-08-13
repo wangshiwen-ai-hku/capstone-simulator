@@ -135,9 +135,11 @@ Scene controls:
 - task_categories: {[x.value for x in req.task_categories]}
 - difficulty: {req.difficulty.value}
 - seed: {req.seed}
+- robot_hardware: {req.robot_hardware}
 
 Domain constraints:
-- Robot nodes are Jetson Orin-like and can execute local inference and safety tasks.
+- Robot node accelerator capacity and task accelerator demand use absolute sparse INT8 TOPS, never normalized GPU fractions.
+- A task's GPU TOPS demand is fixed by its workload/model and must not scale with difficulty, seed, utilization, or selected Jetson board.
 - Edge nodes are PC/control-plane-like and can run heavier VLA/LLM/VLM workloads.
 - Generate only the requested robot and edge nodes. Do not add cloud nodes.
 - Use workload abstraction fields: task_type, compute_demand, latency_budget, safety_level, model_requirement, data_size, bandwidth_requirement, energy_budget, allow_local_fallback, result_verification.
@@ -293,7 +295,12 @@ def generate_scene_with_llm(
         logger.info("Received scene-generation response (%d bytes)", len(content))
         data = _normalize_llm_scene_payload(_extract_json(content))
         scene = BenchmarkScene.model_validate(data)
+        from .scene_generator import apply_absolute_resource_contract
+        from .schedulability import ensure_generated_scene_schedulable
+
+        apply_absolute_resource_contract(scene, req.robot_hardware)
         _validate_llm_contract(scene, req)
+        ensure_generated_scene_schedulable(scene)
         validate_scene(scene)
         archive_llm_result(
             trace_session,

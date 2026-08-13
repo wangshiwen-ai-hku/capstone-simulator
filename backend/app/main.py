@@ -15,6 +15,7 @@ from mars.optimizers import (
 from mars.synthetic_workloads import load_default_synthetic_workloads
 
 from .config import get_settings
+from .agent_service import MarsAgentService
 from .llm_client import generate_scene_with_llm
 from .mars_adapter import SceneValidationError, validate_scene
 from .runtime import runtime_service
@@ -24,11 +25,17 @@ from .scene_generator import (
     placement_constraints_for,
 )
 from .schemas import (
+    AgentChatRequest,
+    AgentChatResponse,
     BenchmarkScene,
+    BenchmarkTemplate,
+    BenchmarkTemplateCreate,
+    BenchmarkTemplateList,
     GenerateSceneRequest,
     RuntimeWorkflowRequest,
     SimulateRequest,
 )
+from .template_store import TemplateStore
 from .simulation import run_simulation_with_artifact
 from .trace_archive import begin_session, log_startup_banner, trace_status
 
@@ -40,6 +47,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
+agent_service = MarsAgentService(settings)
+template_store = TemplateStore(settings.mars_template_dir)
 synthetic_workloads = load_default_synthetic_workloads()
 log_startup_banner(settings)
 
@@ -100,6 +109,58 @@ def providers():
             "OpenAI-compatible client."
         ),
     }
+
+
+@app.get("/api/agent/status")
+def agent_status():
+    return {
+        "provider": "apiyi",
+        "configured": bool(settings.apiyi_api_key),
+        "models": ["gemini-3.1-flash-lite", "deepseek-v4-flash"],
+        "orchestrator": "langgraph_incremental_workflow",
+        "planning_mode": "bounded_single_model_turn",
+        "memory": "thread-scoped",
+        "retrieval": settings.agent_web_search,
+        "scene_schema": "BenchmarkScene",
+    }
+
+
+@app.post("/api/agent/chat", response_model=AgentChatResponse)
+def agent_chat(request: AgentChatRequest):
+    try:
+        response = agent_service.chat(request)
+        if response.scene_draft is not None:
+            _validate_scene_request(response.scene_draft)
+        return response
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/templates", response_model=BenchmarkTemplateList)
+def list_templates():
+    return BenchmarkTemplateList(templates=template_store.list())
+
+
+@app.post("/api/templates", response_model=BenchmarkTemplate, status_code=201)
+def create_template(request: BenchmarkTemplateCreate):
+    _validate_scene_request(request.scene)
+    return template_store.create(request)
+
+
+@app.get("/api/templates/{template_id}", response_model=BenchmarkTemplate)
+def get_template(template_id: str):
+    try:
+        return template_store.get(template_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="template not found") from exc
+
+
+@app.delete("/api/templates/{template_id}", status_code=204)
+def delete_template(template_id: str):
+    try:
+        template_store.delete(template_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="template not found") from exc
 
 
 @app.get("/api/architecture")

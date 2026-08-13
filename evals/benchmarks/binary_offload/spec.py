@@ -29,7 +29,7 @@ HARDWARE = {
         "label": "Jetson AGX Orin 32GB",
         "power_mode": "40W fixed",
         "cpu_capacity": 8.0,
-        "gpu_capacity": 1.0,
+        "gpu_capacity": 275.0,
         "memory_gb": 32.0,
         "max_concurrency": 1,
         "initial_utilization": {
@@ -51,8 +51,7 @@ HARDWARE = {
                 "to the official 8-core CPU"
             ),
             "gpu_capacity": (
-                "synthetic_data: normalized MARS unit, not CUDA-core count "
-                "or utilization percentage"
+                "reference_data: sparse INT8 TOPS for Jetson AGX Orin"
             ),
             "max_concurrency": (
                 "synthetic_data: conservative experiment setting"
@@ -67,7 +66,7 @@ HARDWARE = {
         "label": "x86 workstation + discrete NVIDIA GPU",
         "power_mode": "mains powered",
         "cpu_capacity": 16.0,
-        "gpu_capacity": 4.0,
+        "gpu_capacity": 500.0,
         "memory_gb": 64.0,
         "max_concurrency": 4,
         "initial_utilization": {
@@ -188,7 +187,7 @@ def build_scene(
             "display_name": f"Jetson AGX Orin {index}",
             "architecture": "aarch64-jetson-agx-orin-32gb-40w",
             "cpu_capacity": 8.0,
-            "gpu_capacity": 1.0,
+            "gpu_capacity": 275.0,
             "memory_gb": 32.0,
             "bandwidth_mbps": 300.0,
             "base_latency_ms": 2.0,
@@ -206,7 +205,7 @@ def build_scene(
             "display_name": "Edge PC",
             "architecture": "x86_64-discrete-nvidia-gpu",
             "cpu_capacity": 16.0,
-            "gpu_capacity": 4.0,
+            "gpu_capacity": 500.0,
             "memory_gb": 64.0,
             "bandwidth_mbps": 1000.0,
             "base_latency_ms": 1.0,

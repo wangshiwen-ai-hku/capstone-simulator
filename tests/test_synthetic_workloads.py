@@ -29,6 +29,7 @@ def custom_workload() -> dict:
         "task_class": "realtime_offloadable",
         "description": "Test fixture",
         "model_variant": "custom-fixture",
+        "accelerator_demand_tops": 3.5,
         "inputs": [{"name": "sample", "semantic_type": "sample"}],
         "outputs": [{"name": "result", "semantic_type": "inspection_result"}],
         "profiles": {"orin": dict(profile), "edge": dict(profile)},
@@ -61,6 +62,7 @@ class SyntheticCatalogTests(unittest.TestCase):
 
     def test_every_workload_has_complete_orin_and_edge_profiles(self):
         for workload in self.catalog:
+            self.assertGreaterEqual(workload.accelerator_demand_tops, 0)
             for target in ExecutionTarget:
                 profile = workload.profile_for(target)
                 self.assertGreater(profile.latency.p99_ms, 0)
@@ -126,6 +128,7 @@ class SyntheticCatalogTests(unittest.TestCase):
         self.assertIs(spec.task_class, TaskClass.EDGE_HEAVY)
         self.assertEqual(spec.input_size_mb, profile.input_size_mb.typical)
         self.assertEqual(spec.output_size_mb, profile.output_size_mb.typical)
+        self.assertEqual(spec.gpu_demand, workload.accelerator_demand_tops)
         self.assertFalse(spec.allow_local_fallback)
         self.assertEqual(
             [(port.name, port.message_type) for port in spec.input_ports],
