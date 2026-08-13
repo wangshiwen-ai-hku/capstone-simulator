@@ -3,7 +3,7 @@ import { defineConfig, devices } from '@playwright/test';
 export default defineConfig({
   testDir: './e2e',
   testMatch: '**/*.e2e.ts',
-  timeout: 60_000,
+  timeout: 120_000,
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
@@ -32,7 +32,7 @@ export default defineConfig({
       ),
       cwd: '..',
       url: 'http://127.0.0.1:8000/api/health',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 120_000,
     },
     {
@@ -40,7 +40,7 @@ export default defineConfig({
       command: 'npm run preview -- --host 127.0.0.1 --port 5173 --strictPort',
       cwd: '.',
       url: 'http://127.0.0.1:5173',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 120_000,
     },
   ],

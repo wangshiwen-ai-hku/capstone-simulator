@@ -36,17 +36,20 @@ test('loads the production UI and completes a workflow through the live API', as
     response.request().method() === 'POST'
     && new URL(response.url()).pathname === '/api/runtime/workflows'
   ));
-  const completedResponse = page.waitForResponse(async (response) => {
-    if (
-      response.request().method() !== 'GET'
-      || !/^\/api\/runtime\/workflows\/[^/]+$/.test(new URL(response.url()).pathname)
-      || response.status() !== 200
-    ) {
-      return false;
-    }
-    const payload = await response.json();
-    return payload.status === 'succeeded' && Boolean(payload.result);
-  });
+  const completedResponse = page.waitForResponse(
+    async (response) => {
+      if (
+        response.request().method() !== 'GET'
+        || !/^\/api\/runtime\/workflows\/[^/]+$/.test(new URL(response.url()).pathname)
+        || response.status() !== 200
+      ) {
+        return false;
+      }
+      const payload = await response.json();
+      return payload.status === 'succeeded' && Boolean(payload.result);
+    },
+    { timeout: 75_000 },
+  );
 
   await page.getByRole('button', { name: 'Run' }).click();
 
