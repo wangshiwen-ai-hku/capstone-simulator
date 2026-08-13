@@ -331,6 +331,19 @@ python -m pytest -q
 cd frontend && npm test && npm run build
 ```
 
+With the backend virtual environment active, install Chromium once and run the
+full-stack smoke test against the production frontend bundle:
+
+```bash
+cd frontend
+npx playwright install chromium
+npm run test:e2e
+```
+
+The smoke test starts FastAPI and the Vite preview server, loads the UI in a
+real browser, generates a deterministic scene, submits a workflow, and verifies
+that the terminal runtime result renders. It does not require an LLM API key.
+
 The binary-offload experiment is implemented as the importable
 `evals.benchmarks.binary_offload` package. Tests import that package directly;
 `scripts/run_binary_offload_benchmark.py` is only the command-line entry point
