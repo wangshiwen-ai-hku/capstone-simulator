@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from copy import deepcopy
 from dataclasses import dataclass, fields, is_dataclass
 import enum
 import math
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from .coordinator import CoordinatorReport
@@ -17,6 +17,10 @@ from .profiling import ExecutionProfile
 if TYPE_CHECKING:
     from .optimizers.base import SchedulingPlan
     from .optimizers.formulation import SchedulingFormulation
+
+
+class _FrozenList(tuple):
+    """Immutable list snapshot that preserves its serialized container type."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +80,11 @@ class RunArtifact:
             raise TypeError(
                 "run artifact raw_report must be a CoordinatorReport"
             )
+        object.__setattr__(
+            self,
+            "raw_report",
+            _snapshot_report(self.raw_report),
+        )
         if not isinstance(self.seed, int) or isinstance(self.seed, bool):
             raise TypeError("run artifact seed must be an integer")
         if self.seed < 0:
@@ -129,7 +138,7 @@ class RunArtifact:
             "link_specs": _to_data(self.link_specs),
             "link_snapshots": _to_data(self.link_snapshots),
             "profiles": _to_data(self.profiles),
-            "raw_report": deepcopy(self.raw_report.as_dict()),
+            "raw_report": self.raw_report.as_dict(),
             "scheduling_plans": _to_data(self.scheduling_plans),
             "algorithm": self.algorithm,
             "formulation": self.formulation,
@@ -194,6 +203,42 @@ def _formulation_id(
             "run artifact formulation must be an id or SchedulingFormulation"
         )
     return formulation_id
+
+
+def _snapshot_report(report: CoordinatorReport) -> CoordinatorReport:
+    """Own a recursively read-only snapshot of mutable report payloads."""
+
+    return CoordinatorReport(
+        workflow=_freeze_data(report.workflow),
+        metrics=_freeze_data(report.metrics),
+        task_results=tuple(
+            _freeze_data(item) for item in report.task_results
+        ),
+        agents=tuple(_freeze_data(item) for item in report.agents),
+        data_edges=tuple(
+            _freeze_data(item) for item in report.data_edges
+        ),
+        events=tuple(report.events),
+        logs=tuple(report.logs),
+        scheduling_plans=tuple(report.scheduling_plans),
+    )
+
+
+def _freeze_data(value: object) -> object:
+    """Copy JSON-shaped report data into immutable containers."""
+
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {
+                key: _freeze_data(item)
+                for key, item in value.items()
+            }
+        )
+    if isinstance(value, list):
+        return _FrozenList(_freeze_data(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_data(item) for item in value)
+    return value
 
 
 def _to_data(value: object) -> object:

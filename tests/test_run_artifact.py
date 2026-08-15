@@ -22,6 +22,7 @@ from backend.app.runtime import LocalRuntimeService
 from backend.app.scene_generator import build_deterministic_scene
 from backend.app.schemas import GenerateSceneRequest, RuntimeWorkflowRequest
 from backend.app.trace_archive import begin_session
+from evals.workflow import evaluate_run_artifact
 from mars import RunArtifact, build_run_artifact
 from mars.coordinator import CentralCoordinator
 from mars.optimizers import OneHotPlacementFormulation
@@ -140,6 +141,58 @@ def test_run_artifact_is_frozen_data_and_keeps_report_api_stable() -> None:
     assert "evaluation" not in payload
     assert "metric_definitions" not in payload
     json.dumps(payload, allow_nan=False)
+
+
+def test_run_artifact_owns_a_deeply_immutable_report_snapshot() -> None:
+    artifact, source_report = _completed_run()
+    expected_payload = artifact.as_dict()
+    expected_metrics = evaluate_run_artifact(artifact).as_dict()
+    assert artifact.raw_report is not source_report
+
+    source_report.metrics["tampered"] = 123
+    source_report.workflow["state"] = "failed"
+    source_levels = source_report.workflow["levels"]
+    assert isinstance(source_levels, dict)
+    source_levels[next(iter(source_levels))] = 999
+    scheduling = source_report.workflow["scheduling"]
+    assert isinstance(scheduling, dict)
+    scheduling["requested_seed"] = -1
+    source_result = source_report.task_results[0]
+    source_result["state"] = "failed"
+    source_attempts = source_result["attempts"]
+    assert isinstance(source_attempts, list)
+    source_attempts[0]["energy_j"] = 999.0
+    source_outputs = source_result["outputs"]
+    assert isinstance(source_outputs, list)
+    source_outputs.append({"artifact_id": "tampered"})
+    source_resources = source_report.agents[0]["resources"]
+    assert isinstance(source_resources, dict)
+    source_resources["cpu_capacity"] = -1.0
+    source_report.data_edges[0]["consumer_task"] = "tampered"
+
+    assert artifact.as_dict() == expected_payload
+    assert evaluate_run_artifact(artifact).as_dict() == expected_metrics
+
+    with pytest.raises(TypeError):
+        artifact.raw_report.metrics["tampered"] = 456
+    with pytest.raises(TypeError):
+        artifact.raw_report.workflow["state"] = "failed"
+    frozen_result = artifact.raw_report.task_results[0]
+    with pytest.raises(TypeError):
+        frozen_result["state"] = "failed"
+    frozen_attempts = frozen_result["attempts"]
+    assert isinstance(frozen_attempts, tuple)
+    with pytest.raises(TypeError):
+        frozen_attempts[0]["energy_j"] = 456.0
+
+    exported = artifact.as_dict()
+    exported["raw_report"]["workflow"]["state"] = "tampered"
+    exported["raw_report"]["task_results"][0]["attempts"][0][
+        "energy_j"
+    ] = -1.0
+    assert artifact.as_dict() == expected_payload
+    json.dumps(artifact.as_dict(), allow_nan=False)
+    json.dumps(artifact.raw_report.as_dict(), allow_nan=False)
 
 
 def test_run_artifact_preserves_attempts_events_outputs_and_every_plan() -> None:

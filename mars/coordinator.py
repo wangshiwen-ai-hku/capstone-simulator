@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 from collections import Counter
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from random import SystemRandom
@@ -98,14 +99,34 @@ class CoordinatorReport:
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "workflow": self.workflow,
-            "metrics": self.metrics,
-            "task_results": list(self.task_results),
-            "agents": list(self.agents),
-            "data_edges": list(self.data_edges),
+            "workflow": _report_data(self.workflow),
+            "metrics": _report_data(self.metrics),
+            "task_results": [
+                _report_data(item) for item in self.task_results
+            ],
+            "agents": [_report_data(item) for item in self.agents],
+            "data_edges": [
+                _report_data(item) for item in self.data_edges
+            ],
             "events": [asdict(event) for event in self.events],
             "logs": list(self.logs),
         }
+
+
+def _report_data(value: object) -> object:
+    """Return detached data from mutable or read-only report containers."""
+
+    if isinstance(value, Mapping):
+        return {
+            key: _report_data(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_report_data(item) for item in value]
+    if isinstance(value, tuple):
+        items = tuple(_report_data(item) for item in value)
+        return items if type(value) is tuple else list(items)
+    return value
 
 
 @dataclass(frozen=True)
