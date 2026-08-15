@@ -291,6 +291,44 @@ def test_sparse_restored_trace_does_not_reuse_a_solve_id() -> None:
     assert state.as_dict()["solve_count"] == 2
 
 
+def test_sparse_restored_trace_continues_frame_numbering() -> None:
+    restored_context = SolveTraceContext(
+        solve_id="sparse-frames:solve:1",
+        frame_index=9,
+        problem_id="restored-problem",
+        snapshot_id="snapshot",
+        epoch_id="epoch",
+        policy_id="policy",
+        policy_version="1",
+        optimizer_id="optimizer",
+        optimizer_version="",
+        work_unit="iteration",
+        solve_budget_ms=10.0,
+        max_iterations=0,
+    )
+    state = OptimizerSolveState(
+        session_id="sparse-frames",
+        trace_entries=[
+            SolveTraceEntry(
+                sequence=1,
+                context=restored_context,
+                phase=SolveTracePhase.STARTED,
+            )
+        ],
+    )
+
+    next_context = state.begin(
+        _fake_problem(),
+        optimizer_id="optimizer",
+    )
+
+    assert next_context.frame_index == 10
+    assert [
+        entry.context.frame_index for entry in state.entries
+    ] == [9, 10]
+    assert state.as_dict()["frame_count"] == 2
+
+
 def test_coordinator_records_validated_solves_across_epochs() -> None:
     nodes = (
         NodeSpec("robot", NodeKind.ROBOT, 4, 1, 8, 100, 1),

@@ -366,6 +366,7 @@ class OptimizerSolveState:
         init=False,
         repr=False,
     )
+    _next_frame_index: int = field(default=0, init=False, repr=False)
     _next_solve_index: int = field(default=0, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -390,6 +391,13 @@ class OptimizerSolveState:
                     entry.context.solve_request_id,
                 )
             ] = entry.context
+        self._next_frame_index = max(
+            (
+                entry.context.frame_index
+                for entry in self.trace_entries
+            ),
+            default=0,
+        )
         solve_ids = {
             entry.context.solve_id for entry in self.trace_entries
         }
@@ -464,10 +472,11 @@ class OptimizerSolveState:
             raise ValueError(
                 "solve request identity does not match the trace context"
             )
-        frame_index = self._frame_by_problem.setdefault(
-            problem.problem_id,
-            len(self._frame_by_problem) + 1,
-        )
+        frame_index = self._frame_by_problem.get(problem.problem_id)
+        if frame_index is None:
+            self._next_frame_index += 1
+            frame_index = self._next_frame_index
+            self._frame_by_problem[problem.problem_id] = frame_index
         existing_solve_ids = {
             entry.context.solve_id for entry in self.trace_entries
         }
