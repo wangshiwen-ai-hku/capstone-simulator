@@ -446,7 +446,7 @@ def project_coordinator_report(
                 report.workflow.get("critical_path", ())
             ),
             **{
-                key: report.workflow[key]
+                key: _plain_data(report.workflow[key])
                 for key in (
                     "scheduling",
                     "requested_algorithm",
@@ -592,6 +592,19 @@ def _mapping(value: object) -> Mapping[str, object]:
     if isinstance(value, Mapping):
         return value
     raise TypeError("coordinator report entries must be mappings")
+
+
+def _plain_data(value: object) -> object:
+    """Detach immutable run evidence before exposing legacy API data."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _plain_data(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [_plain_data(item) for item in value]
+    return value
 
 
 def _number(value: object) -> float:
