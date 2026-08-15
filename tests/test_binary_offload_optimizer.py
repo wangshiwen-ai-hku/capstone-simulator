@@ -26,6 +26,7 @@ from mars.optimizers import (
     HeuristicOptimizer,
     ObjectiveMetric,
     OptimizerRegistry,
+    OptimizerSolveState,
     PlanValidationError,
     PlannedResourceReservation,
     ResourceDemand,
@@ -34,9 +35,10 @@ from mars.optimizers import (
     SchedulingSnapshot,
     SolveLimits,
     SolveStatus,
+    SolveTracePhase,
     binary_offload_policy,
-    built_in_policy,
     maximum_resource_utilization,
+    metric_contract_id,
     node_resource_utilization,
     validate_plan,
 )
@@ -288,40 +290,75 @@ def _problem() -> SchedulingProblem:
         node_available_ms={node.node_id: 0.0 for node in nodes},
         link_available_ms={link.link_id: 0.0 for link in links},
     )
+    policy = binary_offload_policy()
     return SchedulingProblem(
         problem_id="stage-2-problem",
         snapshot=snapshot,
-        policy=built_in_policy("greedy_cost"),
+        policy=policy,
         solve_limits=SolveLimits(solve_budget_ms=1000.0),
+        metric_contract_id=metric_contract_id(policy),
+    )
+
+
+def _with_policy(
+    problem: SchedulingProblem,
+    policy,
+    **changes,
+) -> SchedulingProblem:
+    return replace(
+        problem,
+        policy=policy,
+        metric_contract_id=metric_contract_id(policy),
+        **changes,
     )
 
 
 def test_binary_offload_matches_stage_1_and_validates() -> None:
     optimizer = BinaryOffloadOptimizer()
-    problem = replace(_problem(), policy=optimizer.default_policy)
+    assert not hasattr(optimizer, "solve_history")
+    problem = _with_policy(_problem(), optimizer.default_policy)
+    state = OptimizerSolveState(session_id="stage-1-validation")
 
-    plan = validate_plan(problem, optimizer.solve(problem))
+    plan = validate_plan(problem, optimizer.solve_with_state(problem, state))
+    summary = state.invocation_summaries()[0]
 
     assert plan.assignment_by_task["task_1"].target_node_id == "edge"
     assert plan.assignment_by_task["task_2"].target_node_id == "edge"
     assert plan.policy_id == "binary_offload"
     assert plan.objective_value == pytest.approx(0.55375)
-    assert plan.diagnostics["binary_objective_value"] == pytest.approx(
-        plan.objective_value
-    )
     assert plan.solve_status is SolveStatus.OPTIMAL
-    assert plan.diagnostics["enumerated_combinations"] == 4
+    assert plan.iteration_count == 4
     assert plan.diagnostics["total_combinations"] == 4
-    assert plan.diagnostics["placement_search_exhaustive"] == 1
-    epoch_record = optimizer.solve_history[0]
-    assert epoch_record["success_reward"] == pytest.approx(0.97625)
-    assert epoch_record["communication_time_ms"] == pytest.approx(60.0)
-    assert epoch_record["normalized_communication_ratio"] == pytest.approx(
-        0.03
+    assert not {
+        "alpha",
+        "beta",
+        "gamma",
+        "binary_objective_value",
+        "enumerated_combinations",
+        "placement_search_exhaustive",
+        "solve_budget_ms",
+        "max_iterations",
+    } & set(plan.diagnostics)
+    assert summary["enumerated_combinations"] == plan.iteration_count
+    assert summary["total_combinations"] == 4
+    assert summary["objective_components"][
+        "expected_weighted_success_ratio"
+    ] == pytest.approx(0.97625)
+    assert summary["communication_time_ms"] == pytest.approx(60.0)
+    assert summary["objective_components"][
+        "normalized_communication_ratio"
+    ] == pytest.approx(0.03)
+    assert summary["objective_components"][
+        "maximum_resource_utilization"
+    ] == pytest.approx(0.75)
+    assert summary["objective_value"] == pytest.approx(plan.objective_value)
+    assert summary["solve_status"] == "optimal"
+    assert state.entries[0].phase is SolveTracePhase.STARTED
+    assert state.entries[-1].phase is SolveTracePhase.COMPLETED
+    assert any(
+        entry.phase is SolveTracePhase.INCUMBENT
+        for entry in state.entries
     )
-    assert epoch_record["maximum_resource_utilization"] == pytest.approx(0.75)
-    assert epoch_record["objective_value"] == pytest.approx(0.55375)
-    assert epoch_record["solve_status"] == "optimal"
 
 
 def test_binary_offload_can_be_registered() -> None:
@@ -382,10 +419,10 @@ def test_binary_offload_accepts_edge_only_without_source_candidate() -> None:
         },
     )
     optimizer = BinaryOffloadOptimizer(alpha=1.0, beta=0.0, gamma=0.0)
-    problem = replace(
+    problem = _with_policy(
         original,
+        optimizer.default_policy,
         snapshot=snapshot,
-        policy=optimizer.default_policy,
     )
 
     plan = validate_plan(problem, optimizer.solve(problem))
@@ -476,10 +513,10 @@ def test_binary_offload_enumerates_peer_edge_cloud_and_source() -> None:
         },
     )
     optimizer = BinaryOffloadOptimizer(alpha=1.0, beta=0.0, gamma=0.0)
-    problem = replace(
+    problem = _with_policy(
         original,
+        optimizer.default_policy,
         snapshot=snapshot,
-        policy=optimizer.default_policy,
     )
 
     plan = validate_plan(problem, optimizer.solve(problem))
@@ -520,10 +557,10 @@ def test_source_selected_against_preference_is_fallback_local() -> None:
         },
     )
     optimizer = BinaryOffloadOptimizer(alpha=1.0, beta=0.0, gamma=0.0)
-    problem = replace(
+    problem = _with_policy(
         original,
+        optimizer.default_policy,
         snapshot=snapshot,
-        policy=optimizer.default_policy,
     )
 
     plan = validate_plan(problem, optimizer.solve(problem))
@@ -534,34 +571,37 @@ def test_source_selected_against_preference_is_fallback_local() -> None:
 
 def test_binary_offload_returns_truthful_iteration_limited_incumbent() -> None:
     optimizer = BinaryOffloadOptimizer()
-    problem = replace(
+    problem = _with_policy(
         _problem(),
-        policy=optimizer.default_policy,
+        optimizer.default_policy,
         solve_limits=SolveLimits(
             solve_budget_ms=1000.0,
             max_iterations=1,
         ),
     )
+    state = OptimizerSolveState(session_id="iteration-limited")
 
-    plan = validate_plan(problem, optimizer.solve(problem))
+    plan = validate_plan(problem, optimizer.solve_with_state(problem, state))
+    summary = state.invocation_summaries()[0]
 
     assert plan.solve_status is SolveStatus.ITERATION_LIMIT
     assert plan.iteration_count == 1
-    assert plan.diagnostics["enumerated_combinations"] == 1
     assert plan.diagnostics["total_combinations"] == 4
-    assert plan.diagnostics["placement_search_exhaustive"] == 0
     assert "incumbent" in plan.termination_reason
-    assert optimizer.solve_history[0]["solve_status"] == "iteration_limit"
-    assert optimizer.solve_history[0]["has_incumbent"] is True
+    assert summary["solve_status"] == "iteration_limit"
+    assert summary["has_incumbent"] is True
+    assert summary["enumerated_combinations"] == 1
+    assert summary["total_combinations"] == 4
+    assert state.entries[-1].phase is SolveTracePhase.COMPLETED
 
 
 def test_binary_offload_raises_when_time_limit_precedes_incumbent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     optimizer = BinaryOffloadOptimizer()
-    problem = replace(
+    problem = _with_policy(
         _problem(),
-        policy=optimizer.default_policy,
+        optimizer.default_policy,
         solve_limits=SolveLimits(solve_budget_ms=1.0),
     )
     ticks = iter((0.0, 0.1, 0.1))
@@ -569,35 +609,44 @@ def test_binary_offload_raises_when_time_limit_precedes_incumbent(
         "mars.optimizers.binary_offload.perf_counter",
         lambda: next(ticks),
     )
+    state = OptimizerSolveState(session_id="timeout-no-incumbent")
 
     with pytest.raises(TimeoutError, match="before an incumbent"):
-        optimizer.solve(problem)
-    assert optimizer.solve_history[0]["solve_status"] == "time_limit"
-    assert optimizer.solve_history[0]["has_incumbent"] is False
+        optimizer.solve_with_state(problem, state)
+    summary = state.invocation_summaries()[0]
+    assert summary["solve_status"] == "time_limit"
+    assert summary["has_incumbent"] is False
+    assert summary["total_combinations"] == 4
+    assert state.entries[-1].phase is SolveTracePhase.FAILED
 
 
 def test_binary_offload_returns_time_limited_incumbent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     optimizer = BinaryOffloadOptimizer()
-    problem = replace(
+    problem = _with_policy(
         _problem(),
-        policy=optimizer.default_policy,
+        optimizer.default_policy,
         solve_limits=SolveLimits(solve_budget_ms=1.0),
     )
-    ticks = iter((0.0, 0.0, 0.1, 0.1, 0.1))
+    ticks = iter((0.0, 0.0, 0.0, 0.0, 0.1, 0.1))
     monkeypatch.setattr(
         "mars.optimizers.binary_offload.perf_counter",
         lambda: next(ticks),
     )
+    state = OptimizerSolveState(session_id="timeout-with-incumbent")
 
-    plan = validate_plan(problem, optimizer.solve(problem))
+    plan = validate_plan(problem, optimizer.solve_with_state(problem, state))
+    summary = state.invocation_summaries()[0]
 
     assert plan.solve_status is SolveStatus.TIME_LIMIT
     assert plan.iteration_count == 1
-    assert plan.diagnostics["placement_search_exhaustive"] == 0
-    assert optimizer.solve_history[0]["solve_status"] == "time_limit"
-    assert optimizer.solve_history[0]["has_incumbent"] is True
+    assert plan.diagnostics["total_combinations"] == 4
+    assert summary["solve_status"] == "time_limit"
+    assert summary["has_incumbent"] is True
+    assert summary["enumerated_combinations"] == 1
+    assert summary["total_combinations"] == 4
+    assert state.entries[-1].phase is SolveTracePhase.COMPLETED
 
 
 def test_binary_offload_audits_infeasible_solve_without_candidates() -> None:
@@ -612,18 +661,21 @@ def test_binary_offload_audits_infeasible_solve_without_candidates() -> None:
         },
     )
     optimizer = BinaryOffloadOptimizer()
-    problem = replace(
+    problem = _with_policy(
         original,
+        optimizer.default_policy,
         snapshot=snapshot,
-        policy=optimizer.default_policy,
     )
+    state = OptimizerSolveState(session_id="infeasible-no-candidates")
 
     with pytest.raises(ValueError, match="no feasible placement"):
-        optimizer.solve(problem)
+        optimizer.solve_with_state(problem, state)
 
-    assert optimizer.solve_history[0]["solve_status"] == "infeasible"
-    assert optimizer.solve_history[0]["has_incumbent"] is False
-    assert optimizer.solve_history[0]["total_combinations"] == 0
+    summary = state.invocation_summaries()[0]
+    assert summary["solve_status"] == "infeasible"
+    assert summary["has_incumbent"] is False
+    assert state.entries[0].phase is SolveTracePhase.STARTED
+    assert state.entries[-1].phase is SolveTracePhase.FAILED
 
 
 def test_energy_budget_applies_to_non_source_target_and_shared_validator() -> None:
@@ -653,10 +705,10 @@ def test_energy_budget_applies_to_non_source_target_and_shared_validator() -> No
         },
     )
     optimizer = BinaryOffloadOptimizer()
-    problem = replace(
+    problem = _with_policy(
         original,
+        optimizer.default_policy,
         snapshot=snapshot,
-        policy=optimizer.default_policy,
     )
 
     with pytest.raises(ValueError, match="no feasible complete"):

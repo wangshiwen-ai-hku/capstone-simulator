@@ -56,6 +56,13 @@ def test_architecture_declares_bounded_multi_node_binary_optimizer() -> None:
     assert binary["compatibility"]["supports_multiple_nodes"] is True
     assert binary["compatibility"]["requires_source_candidate"] is False
     assert binary["parameters"]["communication_weight"]["default"] == 1.0
+    assert binary["search"]["strategy"] == "bounded_exhaustive"
+    assert binary["default_formulation"] == "one_hot_placement"
+    assert binary["supported_formulations"] == ["one_hot_placement"]
+    assert payload["formulations"] == ["one_hot_placement"]
+    assert payload["planning_pipeline"].index("formulation") < (
+        payload["planning_pipeline"].index("optimizer")
+    )
 
 
 def test_binary_simulation_supports_multiple_edges_and_shared_metrics() -> None:
@@ -65,6 +72,7 @@ def test_binary_simulation_supports_multiple_edges_and_shared_metrics() -> None:
         json={
             "scene": _scene(client),
             "algorithm": "binary_offload",
+            "formulation": "one_hot_placement",
             "optimizer_options": {"communication_weight": 0.5},
             "network_jitter": 0,
             "resource_noise": 0,
@@ -73,11 +81,40 @@ def test_binary_simulation_supports_multiple_edges_and_shared_metrics() -> None:
     )
 
     assert response.status_code == 200, response.text
-    metrics = response.json()["metrics"]
+    payload = response.json()
+    metrics = payload["metrics"]
     assert metrics["scheduling_epoch_count"] > 0
     assert 0 <= metrics["expected_success_ratio"] <= 1
     assert metrics["communication_time_ms"] >= 0
     assert metrics["maximum_resource_utilization"] >= 0
+    assert payload["workflow"]["formulation"] == "one_hot_placement"
+    assert payload["workflow"]["scheduling"][
+        "requested_formulation"
+    ] == "one_hot_placement"
+    assert payload["workflow"]["scheduling"][
+        "effective_formulations"
+    ]["one_hot_placement"] > 0
+
+
+def test_binary_simulation_defaults_to_one_hot_formulation() -> None:
+    client = TestClient(api_main.app)
+    response = client.post(
+        "/api/simulate",
+        json={
+            "scene": _scene(client, edge_count=1),
+            "algorithm": "binary_offload",
+            "network_jitter": 0,
+            "resource_noise": 0,
+            "seed": 73,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    workflow = response.json()["workflow"]
+    assert workflow["formulation"] == "one_hot_placement"
+    assert workflow["scheduling"]["requested_formulation"] == (
+        "one_hot_placement"
+    )
 
 
 def test_optimizer_options_are_binary_specific() -> None:
@@ -93,6 +130,40 @@ def test_optimizer_options_are_binary_specific() -> None:
 
     assert response.status_code == 422
     assert "optimizer_options are not supported" in response.text
+
+
+def test_one_hot_formulation_is_available_to_policy_aliases() -> None:
+    client = TestClient(api_main.app)
+    response = client.post(
+        "/api/simulate",
+        json={
+            "scene": _scene(client, edge_count=1),
+            "algorithm": "dag_deadline",
+            "formulation": "one_hot_placement",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    workflow = response.json()["workflow"]
+    assert workflow["formulation"] == "one_hot_placement"
+    assert workflow["scheduling"]["requested_formulation"] == (
+        "one_hot_placement"
+    )
+
+
+def test_unknown_formulation_is_rejected_by_scheduling_configuration() -> None:
+    client = TestClient(api_main.app)
+    response = client.post(
+        "/api/simulate",
+        json={
+            "scene": _scene(client, edge_count=1),
+            "algorithm": "binary_offload",
+            "formulation": "unknown",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "unsupported binary_offload formulation" in response.text
 
 
 def test_deprecated_beta_is_ignored_for_non_binary_clients() -> None:
@@ -139,6 +210,7 @@ def test_binary_runtime_retry_can_move_to_another_candidate() -> None:
                 task_categories=["local_llm_7b"],
             ),
             "algorithm": "binary_offload",
+            "formulation": "one_hot_placement",
             "optimizer_options": {"communication_weight": 0.5},
             "seed": 73,
             "max_attempts": 2,
@@ -155,6 +227,10 @@ def test_binary_runtime_retry_can_move_to_another_candidate() -> None:
     result = payload["result"]
     assert result["metrics"]["retry_count"] == 1
     assert result["workflow"]["requested_algorithm"] == "binary_offload"
+    assert result["workflow"]["formulation"] == "one_hot_placement"
+    assert result["workflow"]["scheduling"][
+        "requested_formulation"
+    ] == "one_hot_placement"
     assert result["workflow"]["optimizer_options"][
         "communication_weight"
     ] == 0.5

@@ -8,6 +8,7 @@ from collections import Counter
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from random import SystemRandom
+from time import perf_counter
 from typing import Iterable
 
 from .dag import TaskManager, resolve_task_input_bindings
@@ -31,10 +32,13 @@ from .domain.transfer import TransferReservation
 from .domain.workflow import FailurePolicy, WorkflowSpec
 from .network import synthesize_legacy_full_mesh
 from .optimizers import (
+    FormulationRegistry,
     Optimizer,
     OptimizerRegistry,
+    OptimizerSolveState,
     PlannedResourceReservation,
     SchedulingEpoch,
+    SchedulingFormulation,
     SchedulingPlan,
     SolveLimits,
 )
@@ -134,6 +138,7 @@ class CentralCoordinator:
         link_specs: Iterable[LinkSpec] | None = None,
         link_snapshots: Iterable[LinkSnapshot] | None = None,
         optimizer_registry: OptimizerRegistry | None = None,
+        formulation_registry: FormulationRegistry | None = None,
         fallback_optimizer: str | Optimizer | None = "heuristic",
     ) -> None:
         if not isinstance(runtime, RuntimePort):
@@ -158,11 +163,13 @@ class CentralCoordinator:
             None if link_snapshots is None else tuple(link_snapshots)
         )
         self.optimizer_registry = optimizer_registry
+        self.formulation_registry = formulation_registry
         self.fallback_optimizer = fallback_optimizer
         self._events: list[RuntimeEvent] = []
         self._sequence = 0
         self._started = False
         self._run_started = False
+        self._optimizer_solve_state: OptimizerSolveState | None = None
         self._runtime_loop: asyncio.AbstractEventLoop | None = None
         self._runtime_view: dict[str, object] = {
             "scheduler_id": "mars-central",
@@ -175,6 +182,12 @@ class CentralCoordinator:
         """Return the latest cached view without touching the runtime adapter."""
 
         return deepcopy(self._runtime_view)
+
+    @property
+    def optimizer_solve_state(self) -> OptimizerSolveState | None:
+        """Expose the workflow solve trace, including after a failed run."""
+
+        return self._optimizer_solve_state
 
     async def describe_async(self) -> dict[str, object]:
         return self.describe()
@@ -195,6 +208,7 @@ class CentralCoordinator:
         workflow: WorkflowSpec,
         *,
         algorithm: str = "dag_deadline",
+        formulation: str | SchedulingFormulation | None = None,
         seed: int = 7,
         max_attempts: int = 2,
         fail_first_task_ids: Iterable[str] = (),
@@ -206,6 +220,7 @@ class CentralCoordinator:
             self.run_async(
                 workflow,
                 algorithm=algorithm,
+                formulation=formulation,
                 seed=seed,
                 max_attempts=max_attempts,
                 fail_first_task_ids=fail_first_task_ids,
@@ -218,6 +233,7 @@ class CentralCoordinator:
         workflow: WorkflowSpec,
         *,
         algorithm: str = "dag_deadline",
+        formulation: str | SchedulingFormulation | None = None,
         seed: int = 7,
         max_attempts: int = 2,
         fail_first_task_ids: Iterable[str] = (),
@@ -249,6 +265,10 @@ class CentralCoordinator:
             deterministic=deterministic,
             random_seed=execution_seed,
         )
+        optimizer_solve_state = OptimizerSolveState(
+            session_id=f"workflow:{workflow.workflow_id}",
+        )
+        self._optimizer_solve_state = optimizer_solve_state
         if self._started:
             inventory = await self.runtime.inventory(current_time_ms)
         else:
@@ -329,6 +349,7 @@ class CentralCoordinator:
         total_solver_time_ms = 0.0
         max_solver_time_ms = 0.0
         optimizer_counts: Counter[str] = Counter()
+        formulation_counts: Counter[str] = Counter()
         policy_counts: Counter[str] = Counter()
         solve_status_counts: Counter[str] = Counter()
         termination_reason_counts: Counter[str] = Counter()
@@ -408,9 +429,11 @@ class CentralCoordinator:
                 in active_resource_reservations.items()
                 if attempt_id in active_attempt_ids
             )
+            planning_started = perf_counter()
             plan = plan_scheduling_epoch(
                 epoch,
                 optimizer=algorithm,
+                formulation=formulation,
                 node_specs=node_specs,
                 node_snapshots=inventory.snapshots,
                 input_artifact_bindings=bindings,
@@ -431,14 +454,22 @@ class CentralCoordinator:
                 excluded_node_ids=excluded_node_ids,
                 solve_limits=solve_limits,
                 registry=self.optimizer_registry,
+                formulation_registry=self.formulation_registry,
                 fallback_optimizer=self.fallback_optimizer,
+                solve_state=optimizer_solve_state,
             )
-            total_solver_time_ms += plan.solve_elapsed_ms
+            planning_elapsed_ms = (
+                perf_counter() - planning_started
+            ) * 1000.0
+            total_solver_time_ms += planning_elapsed_ms
             max_solver_time_ms = max(
                 max_solver_time_ms,
-                plan.solve_elapsed_ms,
+                planning_elapsed_ms,
             )
             optimizer_counts[plan.optimizer_id] += 1
+            formulation_counts[
+                plan.formulation_id or "unformulated"
+            ] += 1
             policy_counts[plan.policy_id] += 1
             solve_status_counts[plan.solve_status.value] += 1
             termination_reason_counts[
@@ -603,6 +634,7 @@ class CentralCoordinator:
                         transfer_reservations=transfer_reservations,
                         input_artifact_bindings=input_bindings,
                         problem_id=plan.problem_id,
+                        solve_request_id=plan.solve_request_id,
                         snapshot_id=plan.snapshot_id,
                         policy_id=plan.policy_id,
                         policy_version=plan.policy_version,
@@ -1321,7 +1353,15 @@ class CentralCoordinator:
                 "levels": index.levels,
                 "scheduling": {
                     "requested_algorithm": algorithm,
+                    "requested_formulation": (
+                        formulation
+                        if isinstance(formulation, str)
+                        else formulation.spec.formulation_id
+                        if formulation is not None
+                        else ""
+                    ),
                     "effective_optimizers": dict(optimizer_counts),
+                    "effective_formulations": dict(formulation_counts),
                     "effective_policies": dict(policy_counts),
                     "solve_statuses": dict(solve_status_counts),
                     "termination_reasons": dict(
@@ -1337,6 +1377,9 @@ class CentralCoordinator:
                         "deterministic": solve_limits.deterministic,
                         "random_seed": solve_limits.random_seed,
                     },
+                    "optimizer_solve_state": (
+                        optimizer_solve_state.as_dict()
+                    ),
                 },
             },
             metrics=metrics,

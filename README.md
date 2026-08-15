@@ -47,16 +47,26 @@ that port.
 - Every planning iteration captures runtime facts in an immutable
   `SchedulingSnapshot`.
 - `SchedulingProblem = SchedulingSnapshot + SchedulingPolicy + SolveLimits`;
-  this is the input contract shared by every optimizer.
-- A policy declares objectives and constraints. An optimizer is the replaceable
-  solver that consumes those declarations and returns a `SchedulingPlan`.
+  this is the solver-independent input contract shared by every formulation.
+- A policy declares objectives and constraints. A formulation compiles those
+  declarations and captured facts into a versioned decision domain; an
+  optimizer is the replaceable search strategy over a compatible formulation.
+- `MetricDefinition` is the immutable built-in catalog behind stable
+  `ObjectiveMetric` wire IDs. It versions each metric's unit, scope, canonical
+  plan evaluator, and optional candidate proxy without putting executable
+  behavior into a policy or Proto message.
+- `candidate_proxy_key` is explicitly a local heuristic ranking aid; registry
+  fidelity marks it as exact, proxy, or unsupported. Committed Plans are always
+  scored again with the canonical plan evaluator.
 - Plans are validated against candidates, node capacity, concurrency, and link
   reservations before commit; shared evaluation recomputes policy objectives
   and constraints rather than trusting solver-reported values.
 - Runtime dispatch carries the exact validated Assignment and its matching node
   and link reservation fragment.
 - Invalid plug-in plans are rejected and may be re-solved by the configured
-  fallback optimizer.
+  fallback optimizer. The fallback first preserves the requested formulation;
+  if it must use its own default domain, the Plan records the relaxation and
+  both effective formulation identities remain visible in the solve trace.
 - Critical-path, deadline, load, locality, bandwidth, and energy-aware built-in policies.
 - Central scheduler with scene-defined simulated Orin and edge Agents.
 - Explicit registration, heartbeat, reservation/release, attempts, and
@@ -90,9 +100,12 @@ READY task batch
   + SchedulingPolicy
   + SolveLimits
   -> SchedulingProblem
+  -> configurable Formulation
+  -> CompiledFormulation
   -> Optimizer
   -> SchedulingPlan
   -> shared objective/constraint evaluation and plan validation
+  -> caller-owned OptimizerSolveState trace
   -> optional fallback solve using the same Problem and Policy
   -> node and link reservations
   -> runtime commit
@@ -104,12 +117,30 @@ current reservations, availability, and critical-path estimates. The policy
 contains the optimization intent:
 ordered weighted objectives plus policy-level constraints. Solve limits bound
 solver work without changing either facts or intent. These objects are kept
-separate so the same captured state and policy can be evaluated by different
-optimizers.
+separate so the same captured state and policy can be compiled and searched by
+different formulation/optimizer pairs.
 
 `snapshot_id` fingerprints all captured facts. `problem_id` additionally
-fingerprints the complete versioned Policy and SolveLimits, so a Plan cannot be
-mistaken for the result of a different state or solve contract.
+fingerprints the complete versioned Policy, referenced metric semantics, and
+SolveLimits. Formulation is deliberately not part of `problem_id`: two model
+encodings can solve the same Problem. Instead, `solve_request_id` fingerprints
+the Problem, formulation/materializer contract, and optimizer version/config,
+so Plans, traces, continuations, and dispatches remain exactly correlated.
+
+The first concrete implementation is `one_hot_placement` v1. It selects exactly
+one feasible candidate for each ready task and decodes the selection with the
+serial-transfer/earliest-resource materializer. Drop, defer, split,
+replication, alternate task ordering, and free start-time decisions are outside
+this formulation version. Therefore `OPTIMAL` means globally optimal within
+the Plan's recorded formulation domain, not across every schedule representable
+by the general `SchedulingPlan` contract.
+
+The v1 compiled model is a black-box discrete decision domain: it is directly
+usable by enumerative and heuristic searches through canonical plan scoring.
+A future MILP, CP-SAT, or ADMM plug-in will additionally need either a typed
+solver-family encoder or a solver-neutral expression IR supplied by the
+formulation; it must not reimplement Policy metric semantics inside the
+optimizer. The canonical evaluator and Plan validator remain the final truth.
 
 The DAG manager, not an optimizer, owns dependency satisfaction and task
 lifecycle. Each rolling-horizon Problem contains the currently ready batch plus
@@ -125,6 +156,31 @@ termination reason so future MILP, ADMM, or primal-dual implementations share
 the same result envelope. `INFEASIBLE` and `ERROR` Plans are never committable;
 time- or iteration-limited Plans must still contain a fully validated feasible
 incumbent for every assignment they return.
+Coordinator `total_solver_time_ms` and `max_solver_time_ms` measure the complete
+planning orchestration wall time, including compilation, rejected attempts,
+and fallback attempts; a Plan's own elapsed field describes its effective
+optimizer attempt.
+`solve_budget_ms` is one shared, cooperative deadline for that orchestration:
+compiled optimizers receive the absolute deadline and must stop promptly, and
+the scheduler rejects every result returned after it. A synchronous in-process
+plug-in cannot be forcibly interrupted while its Python call is running;
+strict execution preemption requires a future worker-process boundary.
+
+The coordinator owns one `OptimizerSolveState` per workflow and carries it
+across rolling-horizon epochs. Every solver is traced through the common
+started/completed/failed/validated/rejected/fallback lifecycle; a solver may additionally
+implement the stateful formulated interface to record incumbents or keep a
+typed, versioned continuation for warm starts. Formulated continuations are
+isolated by Problem/Snapshot schema, Policy and metric semantics,
+formulation/materializer, optimizer version/config, and the deterministic/
+random-seed contract; they cannot be resumed under an incompatible
+mathematical or search model. Optimizer
+instances remain stateless and safe to reuse. The complete recorded trace and
+continuation history are included in the coordinator scheduling report; each
+solver controls checkpoint cadence, so an enumerative solver can record
+incumbent changes without logging every rejected combination.
+If a workflow run raises before a report can be returned, the same state remains
+available through `CentralCoordinator.optimizer_solve_state` for diagnosis.
 
 `CentralCoordinator` owns the only scheduling event loop. Its optimizer sees
 the complete ready batch. The coordinator commits validated assignments through
@@ -143,7 +199,9 @@ continue to be accepted as policy aliases. Each resolves to the `heuristic`
 optimizer and the policy with the same name. Additional solvers implement the
 `Optimizer` protocol and are registered through `OptimizerRegistry`; they
 consume the same `SchedulingProblem` and do not change the coordinator, task
-model, or runtime interface.
+model, or runtime interface. Solvers that need incumbent tracing or cross-frame
+warm starts additionally implement the optional `StatefulOptimizer` protocol;
+existing stateless plug-ins continue to use `solve(problem)` unchanged.
 
 ## Quick start
 
@@ -308,7 +366,12 @@ mars/
   optimizers/base.py           snapshot, problem, plan, registry, invariant validation
   optimizers/policy.py         objectives, constraints, solve limits, policy presets
   optimizers/evaluation.py     shared objective and constraint evaluation
+  optimizers/formulation.py    formulation, solve-request, and registry contracts
+  optimizers/formulations/     concrete compiled decision domains
+  optimizers/materialization.py shared candidate timing and reservation construction
+  optimizers/state.py          cross-frame solve trace and continuation state
   optimizers/heuristics.py     built-in heuristic optimizer
+  optimizers/binary_offload.py exhaustive ready-batch placement optimizer
   coordinator.py               central runtime orchestration, attempts, retry, report
   runtime/base.py              sole asynchronous control-plane runtime contract
   runtime/inprocess.py         process-local simulated runtime adapter

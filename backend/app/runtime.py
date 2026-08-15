@@ -80,6 +80,7 @@ class LocalRuntimeService:
         scheduling = configure_scheduling(
             request.algorithm,
             request.optimizer_options,
+            formulation=request.formulation,
             legacy_beta=request.model_dump(include={"beta"}).get("beta"),
         )
         coordinator = coordinator_for_scene(
@@ -154,6 +155,7 @@ class LocalRuntimeService:
         report = coordinator.run(
             workflow,
             algorithm=request.algorithm,
+            formulation=scheduling.formulation,
             seed=request.seed,
             max_attempts=request.max_attempts,
             fail_first_task_ids=failure_ids,
@@ -173,6 +175,7 @@ class LocalRuntimeService:
             workflow={
                 **report.workflow,
                 "requested_algorithm": request.algorithm,
+                "formulation": scheduling.formulation,
                 "optimizer_options": dict(scheduling.optimizer_options),
                 "metric_schema_version": "mars.workflow-metrics.v1",
             },

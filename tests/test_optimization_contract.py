@@ -16,9 +16,12 @@ from mars.domain import (
     TaskSpec,
 )
 from mars.optimizers import (
+    BUILTIN_METRICS,
+    CandidateFidelity,
     ConstraintRelation,
     ConstraintSpec,
     HeuristicOptimizer,
+    MetricScope,
     ObjectiveEvaluation,
     ObjectiveMetric,
     OptimizerRegistry,
@@ -29,6 +32,8 @@ from mars.optimizers import (
     SolveLimits,
     SolveStatus,
     built_in_policy,
+    candidate_objective_key,
+    candidate_proxy_key,
     validate_plan,
 )
 from mars.scheduler import (
@@ -172,6 +177,157 @@ class _MutatingOptimizer:
         task_id = problem.epoch.ready_tasks[0].task_id
         self.original_candidates = problem.candidates[task_id]
         problem.candidates[task_id] = ()  # type: ignore[index]
+
+
+def test_builtin_metric_registry_is_complete_and_immutable() -> None:
+    expected_proto_names = {
+        ObjectiveMetric.MAKESPAN_MS: "OBJECTIVE_METRIC_MAKESPAN_MS",
+        ObjectiveMetric.TOTAL_DEADLINE_VIOLATION_MS: (
+            "OBJECTIVE_METRIC_TOTAL_DEADLINE_VIOLATION_MS"
+        ),
+        ObjectiveMetric.TOTAL_COMPLETION_TIME_MS: (
+            "OBJECTIVE_METRIC_TOTAL_COMPLETION_TIME_MS"
+        ),
+        ObjectiveMetric.CRITICAL_PATH_FINISH_MS: (
+            "OBJECTIVE_METRIC_CRITICAL_PATH_FINISH_MS"
+        ),
+        ObjectiveMetric.TOTAL_ENERGY_J: "OBJECTIVE_METRIC_TOTAL_ENERGY_J",
+        ObjectiveMetric.TOTAL_COMMUNICATION_MS: (
+            "OBJECTIVE_METRIC_TOTAL_COMMUNICATION_TIME_MS"
+        ),
+        ObjectiveMetric.LOCALITY_PENALTY: "OBJECTIVE_METRIC_LOCALITY_PENALTY",
+        ObjectiveMetric.DROPPED_TASKS: "OBJECTIVE_METRIC_DROPPED_TASK_COUNT",
+        ObjectiveMetric.NON_SOURCE_ASSIGNMENTS: (
+            "OBJECTIVE_METRIC_NON_SOURCE_ASSIGNMENT_COUNT"
+        ),
+        ObjectiveMetric.NON_EDGE_ASSIGNMENTS: (
+            "OBJECTIVE_METRIC_NON_EDGE_ASSIGNMENT_COUNT"
+        ),
+        ObjectiveMetric.PLACEMENT_PREFERENCE_PENALTY: (
+            "OBJECTIVE_METRIC_PLACEMENT_PREFERENCE_PENALTY"
+        ),
+        ObjectiveMetric.RULE_MISMATCH_COUNT: (
+            "OBJECTIVE_METRIC_RULE_MISMATCH_COUNT"
+        ),
+        ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO: (
+            "OBJECTIVE_METRIC_EXPECTED_WEIGHTED_SUCCESS_RATIO"
+        ),
+        ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO: (
+            "OBJECTIVE_METRIC_NORMALIZED_COMMUNICATION_RATIO"
+        ),
+        ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION: (
+            "OBJECTIVE_METRIC_MAXIMUM_RESOURCE_UTILIZATION"
+        ),
+    }
+
+    assert set(BUILTIN_METRICS) == set(ObjectiveMetric)
+    assert len(BUILTIN_METRICS) == 15
+    assert {
+        metric: definition.proto_enum_name
+        for metric, definition in BUILTIN_METRICS.items()
+    } == expected_proto_names
+    assert all(
+        definition.metric is metric
+        and definition.semantics_version == "1"
+        and isinstance(definition.scope, MetricScope)
+        and isinstance(
+            definition.candidate_fidelity,
+            CandidateFidelity,
+        )
+        and callable(definition.evaluate_plan)
+        for metric, definition in BUILTIN_METRICS.items()
+    )
+    assert {
+        metric
+        for metric, definition in BUILTIN_METRICS.items()
+        if definition.candidate_fidelity is CandidateFidelity.PROXY
+    } == {
+        ObjectiveMetric.MAKESPAN_MS,
+        ObjectiveMetric.CRITICAL_PATH_FINISH_MS,
+        ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO,
+        ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION,
+    }
+    assert {
+        metric
+        for metric, definition in BUILTIN_METRICS.items()
+        if definition.scope is MetricScope.TIMELINE
+    } == {ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION}
+
+    with pytest.raises(TypeError):
+        BUILTIN_METRICS[ObjectiveMetric.MAKESPAN_MS] = (  # type: ignore[index]
+            BUILTIN_METRICS[ObjectiveMetric.MAKESPAN_MS]
+        )
+    with pytest.raises((AttributeError, TypeError)):
+        BUILTIN_METRICS[ObjectiveMetric.MAKESPAN_MS].unit = (  # type: ignore[misc]
+            "seconds"
+        )
+
+
+def test_builtin_metric_registry_preserves_raw_metric_semantics() -> None:
+    problem = _problem(policy="greedy_cost")
+    plan = validate_plan(problem, HeuristicOptimizer().solve(problem))
+    plan_values = {
+        metric: definition.evaluate_plan(problem, plan)
+        for metric, definition in BUILTIN_METRICS.items()
+    }
+
+    assert plan_values == pytest.approx(
+        {
+            ObjectiveMetric.MAKESPAN_MS: 8.333333333333334,
+            ObjectiveMetric.TOTAL_DEADLINE_VIOLATION_MS: 0.0,
+            ObjectiveMetric.TOTAL_COMPLETION_TIME_MS: 8.333333333333334,
+            ObjectiveMetric.CRITICAL_PATH_FINISH_MS: 8.333333333333334,
+            ObjectiveMetric.TOTAL_ENERGY_J: 1.0,
+            ObjectiveMetric.TOTAL_COMMUNICATION_MS: 0.0,
+            ObjectiveMetric.LOCALITY_PENALTY: 2.0,
+            ObjectiveMetric.DROPPED_TASKS: 0.0,
+            ObjectiveMetric.NON_SOURCE_ASSIGNMENTS: 1.0,
+            ObjectiveMetric.NON_EDGE_ASSIGNMENTS: 0.0,
+            ObjectiveMetric.PLACEMENT_PREFERENCE_PENALTY: 0.0,
+            ObjectiveMetric.RULE_MISMATCH_COUNT: 0.0,
+            ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO: 1.0,
+            ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO: 0.0,
+            ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION: 0.125,
+        }
+    )
+
+    task_id = problem.epoch.ready_tasks[0].task_id
+    candidate = next(
+        item for item in problem.candidates[task_id] if item.node_id == "robot"
+    )
+    assert all(
+        definition.candidate_proxy is not None
+        for definition in BUILTIN_METRICS.values()
+    )
+    candidate_values = {
+        metric: definition.candidate_proxy(problem, task_id, candidate)
+        for metric, definition in BUILTIN_METRICS.items()
+        if definition.candidate_proxy is not None
+    }
+    assert candidate_values == pytest.approx(
+        {
+            ObjectiveMetric.MAKESPAN_MS: 28.571428571428573,
+            ObjectiveMetric.TOTAL_DEADLINE_VIOLATION_MS: 0.0,
+            ObjectiveMetric.TOTAL_COMPLETION_TIME_MS: 28.571428571428573,
+            ObjectiveMetric.CRITICAL_PATH_FINISH_MS: 28.571428571428573,
+            ObjectiveMetric.TOTAL_ENERGY_J: 0.7142857142857143,
+            ObjectiveMetric.TOTAL_COMMUNICATION_MS: 0.0,
+            ObjectiveMetric.LOCALITY_PENALTY: 0.0,
+            ObjectiveMetric.DROPPED_TASKS: 0.0,
+            ObjectiveMetric.NON_SOURCE_ASSIGNMENTS: 0.0,
+            ObjectiveMetric.NON_EDGE_ASSIGNMENTS: 1.0,
+            ObjectiveMetric.PLACEMENT_PREFERENCE_PENALTY: 1.0,
+            ObjectiveMetric.RULE_MISMATCH_COUNT: 1.0,
+            ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO: 1.0,
+            ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO: 0.0,
+            ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION: 0.5,
+        }
+    )
+    assert candidate_objective_key(
+        problem,
+        task_id,
+        candidate,
+    ) == candidate_proxy_key(problem, task_id, candidate)
 
 
 def test_legacy_algorithm_aliases_are_reserved_from_solver_registry() -> None:

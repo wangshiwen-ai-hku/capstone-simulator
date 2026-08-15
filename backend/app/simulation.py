@@ -26,6 +26,7 @@ def run_simulation(req: SimulateRequest) -> SimulationResponse:
     scheduling = configure_scheduling(
         req.algorithm,
         req.optimizer_options,
+        formulation=req.formulation,
         legacy_beta=req.model_dump(include={"beta"}).get("beta"),
     )
     coordinator = coordinator_for_scene(
@@ -44,6 +45,7 @@ def run_simulation(req: SimulateRequest) -> SimulationResponse:
     report = coordinator.run(
         workflow,
         algorithm=req.algorithm,
+        formulation=scheduling.formulation,
         seed=req.seed,
         max_attempts=1,
         deterministic=True,
@@ -64,6 +66,7 @@ def run_simulation(req: SimulateRequest) -> SimulationResponse:
         workflow={
             **report.workflow,
             "requested_algorithm": req.algorithm,
+            "formulation": scheduling.formulation,
             "optimizer_options": dict(scheduling.optimizer_options),
             "metric_schema_version": "mars.workflow-metrics.v1",
         },
@@ -76,6 +79,13 @@ def run_simulation(req: SimulateRequest) -> SimulationResponse:
         profiles=coordinator.profile_catalog,
         network_jitter=req.network_jitter,
         resource_noise=req.resource_noise,
+    )
+    projected = replace(
+        projected,
+        workflow={
+            **projected.workflow,
+            "formulation": scheduling.formulation,
+        },
     )
     return SimulationResponse.model_validate(projected.as_dict())
 

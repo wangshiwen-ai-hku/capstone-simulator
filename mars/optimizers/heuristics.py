@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import replace
+from itertools import product
+import math
 from time import perf_counter
 
 from ..domain.execution import Assignment, ExecutionMode
@@ -16,16 +18,35 @@ from .base import (
     SchedulingPlan,
     SchedulingProblem,
     SolveStatus,
-    background_resource_demand,
-    execution_mode_for_candidate,
 )
-from .evaluation import candidate_objective_key
+from .evaluation import candidate_proxy_key
+from .formulation import FormulationError, FormulationSpec, PreparedSolve
+from .formulations.one_hot import (
+    ONE_HOT_PLACEMENT_SPEC,
+    OneHotPlacementFormulation,
+    OneHotPlacementModel,
+)
+from .materialization import (
+    build_assignment,
+    build_node_reservation,
+    materialize_candidate,
+)
 
 
 class HeuristicOptimizer:
     """Deterministic solver that follows the policy carried by the problem."""
 
     optimizer_id = "heuristic"
+    # The legacy greedy algorithm is unchanged; formulation support is an
+    # additive interface, so retain its public version for compatibility.
+    optimizer_version = "1"
+    optimizer_config_digest = "deterministic-greedy.v1"
+    solve_work_unit = "ready_task"
+    supported_formulation_ids = frozenset({"one_hot_placement"})
+
+    @staticmethod
+    def supports_formulation(spec: FormulationSpec) -> bool:
+        return spec == ONE_HOT_PLACEMENT_SPEC
 
     def solve(self, problem: SchedulingProblem) -> SchedulingPlan:
         solve_started = perf_counter()
@@ -76,7 +97,7 @@ class HeuristicOptimizer:
                     continue
                 try:
                     materialized.append(
-                        _materialize_candidate(
+                        materialize_candidate(
                             problem,
                             candidate,
                             reservations_by_node,
@@ -119,43 +140,23 @@ class HeuristicOptimizer:
                 task.task_id,
                 materialized,
             )
-            link_ids = tuple(
-                dict.fromkeys(
-                    link_id
-                    for transfer in chosen.transfers
-                    for link_id in transfer.path_link_ids
-                )
-            )
-            assignment = Assignment(
-                task_id=task.task_id,
-                target_node_id=chosen.node_id,
-                execution_mode=execution_mode_for_candidate(task, chosen),
-                estimated_start_ms=chosen.start_ms,
-                estimated_finish_ms=chosen.finish_ms,
-                compute_ms=chosen.compute_ms,
-                communication_ms=chosen.communication_ms,
-                energy_j=chosen.energy_j,
-                reason=_reason(problem.policy.policy_id),
-                input_locations=chosen.input_locations,
-                transfer_link_ids=link_ids,
+            assignment = build_assignment(
+                problem,
+                chosen,
+                reservations,
                 optimizer_id=self.optimizer_id,
-                epoch_id=problem.epoch.epoch_id,
-                output_size_mb=chosen.output_size_mb,
-                success_probability=chosen.success_probability,
+                reason=_reason(problem.policy.policy_id),
             )
             assignments.append(assignment)
             node_reservations.append(
-                resource_reservation := PlannedResourceReservation(
+                resource_reservation := build_node_reservation(
+                    problem,
+                    chosen,
+                    compute_start_ms=compute_start,
                     reservation_id=(
                         f"plan:{problem.epoch.epoch_id}:"
                         f"{task.task_id}:{chosen.node_id}"
                     ),
-                    epoch_id=problem.epoch.epoch_id,
-                    task_id=task.task_id,
-                    node_id=chosen.node_id,
-                    start_ms=compute_start,
-                    finish_ms=chosen.finish_ms,
-                    demand=chosen.resource_demand,
                 )
             )
             reservations_by_node[chosen.node_id].append(
@@ -175,7 +176,7 @@ class HeuristicOptimizer:
             policy_version=problem.policy.version,
             epoch_id=problem.epoch.epoch_id,
             optimizer_id=self.optimizer_id,
-            optimizer_version="1",
+            optimizer_version=self.optimizer_version,
             solve_status=(
                 SolveStatus.TIME_LIMIT
                 if time_limit_reached
@@ -207,6 +208,192 @@ class HeuristicOptimizer:
             },
         )
 
+    def solve_formulated(self, prepared: PreparedSolve) -> SchedulingPlan:
+        """Return a feasible decision in the selected formulation domain.
+
+        This is primarily the recovery path for a bounded solver.  It ranks
+        candidates with the shared policy proxy, but every returned schedule is
+        decoded by the formulation and later receives authoritative validation.
+        """
+
+        if not isinstance(prepared.model, OneHotPlacementModel) or not isinstance(
+            prepared.formulation,
+            OneHotPlacementFormulation,
+        ):
+            raise TypeError(
+                "heuristic currently supports only one-hot placement"
+            )
+        if prepared.request.optimizer_id != self.optimizer_id:
+            raise ValueError(
+                "prepared solve optimizer identity does not match heuristic"
+            )
+        if (
+            prepared.request.optimizer_version != self.optimizer_version
+            or prepared.request.optimizer_config_digest
+            != self.optimizer_config_digest
+        ):
+            raise ValueError(
+                "prepared solve optimizer version/config does not match "
+                "heuristic"
+            )
+        if not self.supports_formulation(
+            prepared.request.formulation_spec
+        ):
+            raise ValueError(
+                "heuristic does not support the selected formulation "
+                "version or materializer contract"
+            )
+        problem = prepared.problem
+        model = prepared.model
+        formulation = prepared.formulation
+        solve_started = (
+            perf_counter() - prepared.compilation_elapsed_ms / 1000.0
+        )
+        ranked_options = tuple(
+            tuple(
+                sorted(
+                    options,
+                    key=lambda candidate: (
+                        *candidate_proxy_key(
+                            problem,
+                            task_id,
+                            candidate,
+                        ),
+                        candidate.node_id,
+                    ),
+                )
+            )
+            for task_id, options in zip(
+                model.ordered_task_ids,
+                model.candidate_options,
+                strict=True,
+            )
+        )
+        evaluated = 0
+        for selection in product(*ranked_options):
+            if (
+                problem.solve_limits.max_iterations
+                and evaluated >= problem.solve_limits.max_iterations
+            ):
+                raise RuntimeError(
+                    "heuristic iteration limit reached before a one-hot "
+                    "incumbent"
+                )
+            if prepared.time_limit_reached(
+                now_monotonic=perf_counter(),
+                solve_started_monotonic=solve_started,
+            ):
+                raise TimeoutError(
+                    "heuristic solve budget expired before a one-hot incumbent"
+                )
+            evaluated += 1
+            decision = formulation.decision(model, selection)
+            if not formulation.is_decision_feasible(
+                problem,
+                model,
+                decision,
+            ):
+                if prepared.time_limit_reached(
+                    now_monotonic=perf_counter(),
+                    solve_started_monotonic=solve_started,
+                ):
+                    raise TimeoutError(
+                        "heuristic solve budget expired before a one-hot "
+                        "incumbent"
+                    )
+                continue
+            try:
+                materialized = formulation.materialize(
+                    problem,
+                    model,
+                    decision,
+                    optimizer_id=self.optimizer_id,
+                )
+            except CandidateMaterializationError:
+                if prepared.time_limit_reached(
+                    now_monotonic=perf_counter(),
+                    solve_started_monotonic=solve_started,
+                ):
+                    raise TimeoutError(
+                        "heuristic solve budget expired before a one-hot "
+                        "incumbent"
+                    )
+                continue
+            spec = prepared.request.formulation_spec
+            draft = SchedulingPlan(
+                problem_id=problem.problem_id,
+                snapshot_id=problem.snapshot.snapshot_id,
+                policy_id=problem.policy.policy_id,
+                policy_version=problem.policy.version,
+                epoch_id=problem.epoch.epoch_id,
+                optimizer_id=self.optimizer_id,
+                optimizer_version=self.optimizer_version,
+                solve_request_id=prepared.request.solve_request_id,
+                metric_contract_id=problem.metric_contract_id,
+                formulation_id=spec.formulation_id,
+                formulation_version=spec.formulation_version,
+                formulation_digest=spec.formulation_digest,
+                assignments=materialized.assignments,
+                node_reservations=materialized.node_reservations,
+                transfer_reservations=(
+                    materialized.transfer_reservations
+                ),
+            )
+            evaluation = formulation.evaluate(
+                problem,
+                model,
+                draft,
+            )
+            if prepared.time_limit_reached(
+                now_monotonic=perf_counter(),
+                solve_started_monotonic=solve_started,
+            ):
+                raise TimeoutError(
+                    "heuristic solve budget expired before a one-hot incumbent"
+                )
+            if evaluation.has_hard_violation or any(
+                not math.isfinite(value)
+                for value in evaluation.objective_key
+            ):
+                continue
+            elapsed_ms = (perf_counter() - solve_started) * 1000.0
+            return SchedulingPlan(
+                problem_id=problem.problem_id,
+                snapshot_id=problem.snapshot.snapshot_id,
+                policy_id=problem.policy.policy_id,
+                policy_version=problem.policy.version,
+                epoch_id=problem.epoch.epoch_id,
+                optimizer_id=self.optimizer_id,
+                optimizer_version=self.optimizer_version,
+                solve_request_id=prepared.request.solve_request_id,
+                metric_contract_id=problem.metric_contract_id,
+                formulation_id=spec.formulation_id,
+                formulation_version=spec.formulation_version,
+                formulation_digest=spec.formulation_digest,
+                solve_status=SolveStatus.FEASIBLE,
+                solve_elapsed_ms=elapsed_ms,
+                iteration_count=evaluated,
+                termination_reason="greedy_one_hot_incumbent_found",
+                assignments=tuple(
+                    replace(
+                        assignment,
+                        reason="greedy feasible one-hot placement",
+                    )
+                    for assignment in materialized.assignments
+                ),
+                node_reservations=materialized.node_reservations,
+                transfer_reservations=(
+                    materialized.transfer_reservations
+                ),
+                diagnostics={
+                    "total_combinations": model.total_decisions,
+                    "formulation_exhausted": False,
+                },
+            )
+        raise FormulationError(
+            "heuristic found no feasible one-hot placement assignment"
+        )
+
     def _choose(
         self,
         problem: SchedulingProblem,
@@ -228,7 +415,7 @@ class HeuristicOptimizer:
         return min(
             materialized,
             key=lambda item: (
-                *candidate_objective_key(
+                *candidate_proxy_key(
                     problem,
                     task_id,
                     item[0],
@@ -260,169 +447,6 @@ def _task_order(
         )
         return (slack, -task.priority, task.task_id)
     return (task.arrival_time_ms, -task.priority, task.task_id)
-
-
-def _materialize_candidate(
-    problem: SchedulingProblem,
-    candidate: CandidateEstimate,
-    reservations_by_node: dict[
-        str, list[PlannedResourceReservation]
-    ],
-    link_available: dict[str, float],
-) -> tuple[
-    CandidateEstimate,
-    tuple[TransferReservation, ...],
-    dict[str, float],
-    float,
-]:
-    cursor = max(problem.epoch.now_ms, candidate.ready_time_ms)
-    next_links = dict(link_available)
-    reservations: list[TransferReservation] = []
-    for index, transfer in enumerate(candidate.transfers):
-        if not transfer.path_link_ids or transfer.transfer_time_ms <= 0:
-            continue
-        transfer_start = max(
-            cursor,
-            *(
-                next_links.get(link_id, problem.epoch.now_ms)
-                for link_id in transfer.path_link_ids
-            ),
-        )
-        transfer_finish = transfer_start + transfer.transfer_time_ms
-        reservation = TransferReservation(
-            reservation_id=(
-                f"transfer:{problem.epoch.epoch_id}:{candidate.task_id}:"
-                f"{index}:{candidate.node_id}"
-            ),
-            epoch_id=problem.epoch.epoch_id,
-            task_id=candidate.task_id,
-            transfer_id=transfer.transfer_id,
-            path_link_ids=transfer.path_link_ids,
-            start_ms=transfer_start,
-            finish_ms=transfer_finish,
-            size_mb=transfer.size_mb,
-        )
-        reservations.append(reservation)
-        for link_id in transfer.path_link_ids:
-            next_links[link_id] = transfer_finish
-        cursor = transfer_finish
-
-    compute_start = _earliest_resource_start(
-        problem,
-        candidate,
-        cursor,
-        reservations_by_node.get(candidate.node_id, []),
-    )
-    start_ms = (
-        reservations[0].start_ms if reservations else compute_start
-    )
-    finish_ms = compute_start + candidate.compute_ms
-    communication_ms = sum(
-        item.finish_ms - item.start_ms for item in reservations
-    )
-    return (
-        replace(
-            candidate,
-            start_ms=start_ms,
-            finish_ms=finish_ms,
-            communication_ms=communication_ms,
-        ),
-        tuple(reservations),
-        next_links,
-        compute_start,
-    )
-
-
-def _earliest_resource_start(
-    problem: SchedulingProblem,
-    candidate: CandidateEstimate,
-    earliest_ms: float,
-    existing: list[PlannedResourceReservation],
-) -> float:
-    """Find the first interval that satisfies concurrency and capacity."""
-
-    node = problem.node_by_id[candidate.node_id]
-    background = background_resource_demand(problem, candidate.node_id)
-    if (
-        background.cpu_units + candidate.resource_demand.cpu_units
-        > node.cpu_capacity + 1e-9
-        or background.gpu_units + candidate.resource_demand.gpu_units
-        > node.gpu_capacity + 1e-9
-        or background.memory_gb + candidate.resource_demand.memory_gb
-        > node.memory_gb + 1e-9
-    ):
-        raise CandidateMaterializationError(
-            f"candidate {candidate.task_id}:{candidate.node_id} exceeds "
-            "capacity after observed background load"
-        )
-    duration_ms = candidate.compute_ms
-    cursor = max(
-        earliest_ms,
-        problem.node_available_ms.get(
-            candidate.node_id,
-            problem.epoch.now_ms,
-        ),
-    )
-    while True:
-        finish = cursor + duration_ms
-        overlapping = [
-            reservation
-            for reservation in existing
-            if reservation.start_ms < finish - 1e-9
-            and reservation.finish_ms > cursor + 1e-9
-        ]
-        boundaries = sorted(
-            {
-                cursor,
-                *(
-                    max(cursor, reservation.start_ms)
-                    for reservation in overlapping
-                ),
-                *(
-                    min(finish, reservation.finish_ms)
-                    for reservation in overlapping
-                ),
-            }
-        )
-        feasible = True
-        for point in boundaries:
-            if point >= finish - 1e-9:
-                continue
-            active = [
-                reservation
-                for reservation in overlapping
-                if reservation.start_ms <= point + 1e-9
-                and reservation.finish_ms > point + 1e-9
-            ]
-            if len(active) + 1 > node.max_concurrency:
-                feasible = False
-                break
-            if (
-                background.cpu_units
-                + sum(item.demand.cpu_units for item in active)
-                + candidate.resource_demand.cpu_units
-                > node.cpu_capacity + 1e-9
-                or background.gpu_units
-                + sum(item.demand.gpu_units for item in active)
-                + candidate.resource_demand.gpu_units
-                > node.gpu_capacity + 1e-9
-                or background.memory_gb
-                + sum(item.demand.memory_gb for item in active)
-                + candidate.resource_demand.memory_gb
-                > node.memory_gb + 1e-9
-            ):
-                feasible = False
-                break
-        if feasible:
-            return cursor
-        releases = [
-            reservation.finish_ms
-            for reservation in overlapping
-            if reservation.finish_ms > cursor + 1e-9
-        ]
-        if not releases:
-            return cursor
-        cursor = min(releases)
 
 
 def _reason(policy_id: str) -> str:

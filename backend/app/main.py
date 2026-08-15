@@ -8,6 +8,7 @@ from mars import __version__ as mars_version
 from mars.domain.task import TASK_CLASS_LABELS, TaskClass
 from mars.optimizers import (
     algorithm_aliases,
+    built_in_formulation_registry,
     built_in_policy_ids,
     built_in_registry,
 )
@@ -118,12 +119,14 @@ def architecture():
             "scheduling_policy",
             "solve_limits",
             "scheduling_problem",
+            "formulation",
             "optimizer",
             "shared_objective_constraint_evaluation",
             "plan_validation_or_fallback",
             "reservation_commit",
         ],
         "optimizers": list(built_in_registry().ids()),
+        "formulations": list(built_in_formulation_registry().ids()),
         "policies": list(built_in_policy_ids()),
         "algorithm_aliases": algorithm_aliases(),
         "scheduling_capabilities": scheduling_capabilities(),

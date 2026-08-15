@@ -85,7 +85,7 @@ const { scene } = vi.hoisted(() => ({ scene: {
   generation_note: '',
 } as BenchmarkScene }));
 
-const binaryCapability = {
+const legacyBinaryCapability = {
   id: 'binary_offload',
   label: 'Binary offload',
   kind: 'optimizer',
@@ -108,6 +108,29 @@ const binaryCapability = {
     requires_source_candidate: false,
     max_ready_tasks: 32,
   },
+} satisfies SchedulingAlgorithmCapability;
+
+const binaryCapability = {
+  ...legacyBinaryCapability,
+  default_formulation: 'one_hot_placement',
+  supported_formulations: ['one_hot_placement'],
+} satisfies SchedulingAlgorithmCapability;
+
+const formulatedDeadlineCapability = {
+  ...legacyBinaryCapability,
+  id: 'dag_deadline',
+  label: 'DAG deadline',
+  kind: 'policy_alias',
+  stability: 'stable',
+  parameters: {},
+  default_formulation: 'deadline_aware',
+  supported_formulations: ['one_hot_placement', 'deadline_aware'],
+} satisfies SchedulingAlgorithmCapability;
+
+const optionalFormulationDeadlineCapability = {
+  ...formulatedDeadlineCapability,
+  default_formulation: null,
+  supported_formulations: ['one_hot_placement'],
 } satisfies SchedulingAlgorithmCapability;
 
 vi.mock('./api', () => ({
@@ -362,6 +385,7 @@ describe('MARS Studio', () => {
 
     const weight = await screen.findByLabelText('Communication weight');
     expect((weight as HTMLInputElement).value).toBe('0.25');
+    expect(screen.queryByLabelText('Formulation')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Run' }));
 
     await waitFor(() => {
@@ -369,7 +393,10 @@ describe('MARS Studio', () => {
         expect.objectContaining({ id: scene.id }),
         'binary_offload',
         7,
-        { communicationWeight: 0.25 },
+        {
+          communicationWeight: 0.25,
+          formulation: 'one_hot_placement',
+        },
       );
     });
     expect(await screen.findByLabelText('Runtime metrics')).toBeTruthy();
@@ -386,6 +413,141 @@ describe('MARS Studio', () => {
     expect(screen.getByText('binary offload x 5, heuristic x 1')).toBeTruthy();
     expect(screen.getByText('Fallbacks')).toBeTruthy();
     expect(screen.queryByText('Longest solve')).toBeNull();
+  });
+
+  it('uses legacy one-hot defaults when formulation capabilities are absent', async () => {
+    vi.mocked(getArchitecture).mockResolvedValue({
+      scheduling_capabilities: {
+        schema_version: '1',
+        algorithms: [legacyBinaryCapability],
+      },
+    });
+    vi.mocked(submitRuntimeWorkflow).mockResolvedValue({
+      run_id: 'run-legacy-binary',
+      workflow_id: scene.workflow_id,
+      status: 'accepted',
+    });
+    vi.mocked(getRuntimeWorkflow).mockResolvedValue({
+      run_id: 'run-legacy-binary',
+      workflow_id: scene.workflow_id,
+      status: 'failed',
+      result: null,
+      error: 'expected test stop',
+    });
+    render(<App />);
+
+    const method = await screen.findByLabelText('Scheduling method');
+    await screen.findByRole('option', { name: 'Binary offload' });
+    fireEvent.change(method, { target: { value: 'binary_offload' } });
+    expect(screen.queryByLabelText('Formulation')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    await waitFor(() => {
+      expect(submitRuntimeWorkflow).toHaveBeenCalledWith(
+        expect.objectContaining({ id: scene.id }),
+        'binary_offload',
+        7,
+        {
+          communicationWeight: 0.25,
+          formulation: 'one_hot_placement',
+        },
+      );
+    });
+  });
+
+  it('shows multiple formulations and selects the advertised default', async () => {
+    vi.mocked(getArchitecture).mockResolvedValue({
+      scheduling_capabilities: {
+        schema_version: '1',
+        algorithms: [{
+          ...binaryCapability,
+          default_formulation: 'relaxed_placement',
+          supported_formulations: ['one_hot_placement', 'relaxed_placement'],
+        }],
+      },
+    });
+    render(<App />);
+
+    const method = await screen.findByLabelText('Scheduling method');
+    await screen.findByRole('option', { name: 'Binary offload' });
+    fireEvent.change(method, { target: { value: 'binary_offload' } });
+
+    await waitFor(() => {
+      expect((screen.getByLabelText('Formulation') as HTMLSelectElement).value).toBe(
+        'relaxed_placement',
+      );
+    });
+  });
+
+  it('drives formulation selection from the selected policy capability', async () => {
+    vi.mocked(getArchitecture).mockResolvedValue({
+      scheduling_capabilities: {
+        schema_version: '1',
+        algorithms: [formulatedDeadlineCapability],
+      },
+    });
+    vi.mocked(submitRuntimeWorkflow).mockResolvedValue({
+      run_id: 'run-formulated-policy',
+      workflow_id: scene.workflow_id,
+      status: 'accepted',
+    });
+    vi.mocked(getRuntimeWorkflow).mockResolvedValue({
+      run_id: 'run-formulated-policy',
+      workflow_id: scene.workflow_id,
+      status: 'failed',
+      result: null,
+      error: 'expected test stop',
+    });
+    render(<App />);
+
+    const selector = await screen.findByLabelText('Formulation');
+    expect((selector as HTMLSelectElement).value).toBe('deadline_aware');
+    fireEvent.change(selector, { target: { value: 'one_hot_placement' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    await waitFor(() => {
+      expect(submitRuntimeWorkflow).toHaveBeenCalledWith(
+        expect.objectContaining({ id: scene.id }),
+        'dag_deadline',
+        7,
+        { formulation: 'one_hot_placement' },
+      );
+    });
+  });
+
+  it('does not implicitly select an optional policy formulation', async () => {
+    vi.mocked(getArchitecture).mockResolvedValue({
+      scheduling_capabilities: {
+        schema_version: '1',
+        algorithms: [optionalFormulationDeadlineCapability],
+      },
+    });
+    vi.mocked(submitRuntimeWorkflow).mockResolvedValue({
+      run_id: 'run-unformulated-policy',
+      workflow_id: scene.workflow_id,
+      status: 'accepted',
+    });
+    vi.mocked(getRuntimeWorkflow).mockResolvedValue({
+      run_id: 'run-unformulated-policy',
+      workflow_id: scene.workflow_id,
+      status: 'failed',
+      result: null,
+      error: 'expected test stop',
+    });
+    render(<App />);
+
+    const selector = await screen.findByLabelText('Formulation');
+    expect((selector as HTMLSelectElement).value).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    await waitFor(() => {
+      expect(submitRuntimeWorkflow).toHaveBeenCalledWith(
+        expect.objectContaining({ id: scene.id }),
+        'dag_deadline',
+        7,
+        {},
+      );
+    });
   });
 });
 

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 import enum
 import math
 from types import MappingProxyType
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ..domain.artifact import (
     InputArtifactBinding,
@@ -35,6 +35,9 @@ from .policy import (
     SolveLimits,
     algorithm_aliases,
 )
+
+if TYPE_CHECKING:
+    from .formulation import SchedulingSolveRequest
 
 
 @dataclass(frozen=True)
@@ -445,6 +448,7 @@ class SchedulingProblem:
     snapshot: SchedulingSnapshot
     policy: SchedulingPolicy
     solve_limits: SolveLimits
+    metric_contract_id: str
     schema_version: str = "mars.scheduling-problem.v1"
 
     def __post_init__(self) -> None:
@@ -452,6 +456,8 @@ class SchedulingProblem:
             raise ValueError("problem schema_version must be non-blank")
         if not self.problem_id.strip():
             raise ValueError("problem_id must be non-blank")
+        if not self.metric_contract_id.strip():
+            raise ValueError("metric_contract_id must be non-blank")
         if not isinstance(self.snapshot, SchedulingSnapshot):
             raise TypeError("snapshot must be a SchedulingSnapshot")
         if not isinstance(self.policy, SchedulingPolicy):
@@ -729,6 +735,11 @@ class SchedulingPlan:
     assignments: tuple[Assignment, ...]
     schema_version: str = "mars.scheduling-plan.v1"
     optimizer_version: str = ""
+    solve_request_id: str = ""
+    metric_contract_id: str = ""
+    formulation_id: str = ""
+    formulation_version: str = ""
+    formulation_digest: str = ""
     solve_status: SolveStatus = SolveStatus.FEASIBLE
     solve_elapsed_ms: float = 0.0
     iteration_count: int = 0
@@ -740,13 +751,26 @@ class SchedulingPlan:
     objective_key: tuple[float, ...] = ()
     objective_evaluations: tuple[ObjectiveEvaluation, ...] = ()
     constraint_evaluations: tuple[ConstraintEvaluation, ...] = ()
-    diagnostics: Mapping[str, float | int | str] = field(default_factory=dict)
+    diagnostics: Mapping[str, float | int | str | bool] = field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         if not self.schema_version.strip():
             raise ValueError("plan schema_version must be non-blank")
         if not isinstance(self.solve_status, SolveStatus):
             raise TypeError("solve_status must be a SolveStatus")
+        formulation_identity = (
+            self.solve_request_id,
+            self.formulation_id,
+            self.formulation_version,
+            self.formulation_digest,
+        )
+        if any(formulation_identity) and not all(formulation_identity):
+            raise ValueError(
+                "plan solve-request and formulation identity must be "
+                "provided together"
+            )
         if (
             not math.isfinite(self.solve_elapsed_ms)
             or self.solve_elapsed_ms < 0
@@ -877,6 +901,8 @@ class PlanValidationError(ValueError):
 def validate_plan(
     problem: SchedulingProblem,
     plan: SchedulingPlan,
+    *,
+    solve_request: "SchedulingSolveRequest | None" = None,
 ) -> SchedulingPlan:
     """Validate invariants, policy bounds, and recompute reported objectives."""
 
@@ -892,6 +918,40 @@ def validate_plan(
         raise PlanValidationError(
             "plan policy_version does not match the problem"
         )
+    if plan.metric_contract_id and (
+        plan.metric_contract_id != problem.metric_contract_id
+    ):
+        raise PlanValidationError(
+            "plan metric_contract_id does not match the problem"
+        )
+    if solve_request is not None:
+        if (
+            solve_request.problem.problem_id != problem.problem_id
+            or solve_request.problem != problem
+        ):
+            raise PlanValidationError(
+                "solve request problem does not equal the validated problem"
+            )
+        expected = {
+            "solve_request_id": solve_request.solve_request_id,
+            "metric_contract_id": problem.metric_contract_id,
+            "formulation_id": (
+                solve_request.formulation_spec.formulation_id
+            ),
+            "formulation_version": (
+                solve_request.formulation_spec.formulation_version
+            ),
+            "formulation_digest": (
+                solve_request.formulation_spec.formulation_digest
+            ),
+            "optimizer_id": solve_request.optimizer_id,
+            "optimizer_version": solve_request.optimizer_version,
+        }
+        for field_name, expected_value in expected.items():
+            if getattr(plan, field_name) != expected_value:
+                raise PlanValidationError(
+                    f"plan {field_name} does not match the solve request"
+                )
     if plan.epoch_id != problem.epoch.epoch_id:
         raise PlanValidationError("plan epoch_id does not match the problem")
     if not plan.optimizer_id.strip():
@@ -1202,6 +1262,7 @@ def validate_plan(
     )
     return replace(
         plan,
+        metric_contract_id=problem.metric_contract_id,
         objective_value=objective_value,
         objective_key=evaluated_objective_key,
         objective_evaluations=objective_evaluations,

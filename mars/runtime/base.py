@@ -93,6 +93,7 @@ class DispatchCommand:
     policy_id: str
     policy_version: str
     seed: int
+    solve_request_id: str = ""
     inject_failure: bool = False
 
     def __post_init__(self) -> None:

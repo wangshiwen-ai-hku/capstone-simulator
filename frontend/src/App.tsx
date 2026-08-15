@@ -57,7 +57,7 @@ import type {
   TaskCategory,
   Workload,
 } from './types';
-import { TASK_CATEGORIES } from './types';
+import { DEFAULT_BINARY_FORMULATION, TASK_CATEGORIES } from './types';
 
 const SCENARIOS: Array<{ value: ScenarioType; label: string }> = [
   { value: 'warehouse', label: 'Warehouse' },
@@ -693,6 +693,7 @@ export default function App() {
     SchedulingAlgorithmCapability[]
   >([]);
   const [communicationWeight, setCommunicationWeight] = useState('');
+  const [formulation, setFormulation] = useState('');
   const [seed, setSeed] = useState(7);
   const [useLlm, setUseLlm] = useState(false);
   const [llmStatus, setLlmStatus] = useState<LlmStatus | null>(null);
@@ -742,6 +743,34 @@ export default function App() {
     (capability) => capability.id === algorithm,
   );
   const binaryParameter = binaryCapability?.parameters?.communication_weight;
+  const selectedFormulations = useMemo(() => {
+    const advertised = Array.isArray(selectedCapability?.supported_formulations)
+      ? selectedCapability.supported_formulations
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean)
+      : [];
+    if (advertised.length > 0) return [...new Set(advertised)];
+    const advertisedDefault = typeof selectedCapability?.default_formulation === 'string'
+      ? selectedCapability.default_formulation.trim()
+      : '';
+    if (advertisedDefault) return [advertisedDefault];
+    return algorithm === 'binary_offload' ? [DEFAULT_BINARY_FORMULATION] : [];
+  }, [algorithm, selectedCapability]);
+  const selectedDefaultFormulation = useMemo(() => {
+    const advertisedDefault = typeof selectedCapability?.default_formulation === 'string'
+      ? selectedCapability.default_formulation.trim()
+      : '';
+    if (advertisedDefault && selectedFormulations.includes(advertisedDefault)) {
+      return advertisedDefault;
+    }
+    return algorithm === 'binary_offload'
+      ? selectedFormulations[0] ?? DEFAULT_BINARY_FORMULATION
+      : '';
+  }, [selectedCapability, selectedFormulations]);
+  const selectedFormulation = selectedFormulations.includes(formulation)
+    ? formulation
+    : selectedDefaultFormulation;
 
   const runtimeTasks = runtimeRun?.result?.task_results ?? EMPTY_RUNTIME_TASKS;
   const makespan = runtimeRun?.result?.metrics.makespan_ms ?? 0;
@@ -821,6 +850,10 @@ export default function App() {
       setCommunicationWeight(String(binaryParameter.default));
     }
   }, [binaryParameter]);
+
+  useEffect(() => {
+    setFormulation(selectedDefaultFormulation);
+  }, [algorithm, selectedDefaultFormulation]);
 
   const applyHardware = useCallback((generated: BenchmarkScene) => {
     const profile = HARDWARE[hardware];
@@ -982,9 +1015,12 @@ export default function App() {
         scene,
         algorithm,
         seed,
-        algorithm === 'binary_offload' && binaryParameter
-          ? { communicationWeight: communicationWeightValue }
-          : {},
+        {
+          ...(selectedFormulation ? { formulation: selectedFormulation } : {}),
+          ...(algorithm === 'binary_offload' && binaryParameter
+            ? { communicationWeight: communicationWeightValue }
+            : {}),
+        },
       );
       const start = Date.now();
       let current: RuntimeWorkflowRun | null = null;
@@ -1166,6 +1202,22 @@ export default function App() {
                   <span>{binaryCapability.stability}</span>
                   Backend-advertised {binaryCapability.kind}
                 </small>
+              )}
+              {(selectedFormulations.length > 1
+                || (selectedFormulations.length === 1 && !selectedDefaultFormulation)) && (
+                <div className="scheduler-parameter">
+                  <label htmlFor="formulation">Formulation</label>
+                  <select
+                    id="formulation"
+                    value={selectedFormulation}
+                    onChange={(event) => setFormulation(event.target.value)}
+                  >
+                    <option value="">Default (unformulated)</option>
+                    {selectedFormulations.map((item) => (
+                      <option key={item} value={item}>{item}</option>
+                    ))}
+                  </select>
+                </div>
               )}
               {algorithm === 'binary_offload' && binaryParameter && (
                 <div className="scheduler-parameter">

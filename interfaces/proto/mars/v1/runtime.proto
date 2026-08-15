@@ -90,6 +90,10 @@ message DispatchCommand {
   string snapshot_id = 12;
   string policy_id = 13;
   string policy_version = 14;
+
+  // Correlates this executable fragment to the exact validated formulation and
+  // optimizer request without sending either implementation to the Agent.
+  string solve_request_id = 15;
 }
 
 message DispatchAck {

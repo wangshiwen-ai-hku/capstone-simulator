@@ -8,6 +8,7 @@ from typing import Mapping
 
 from mars.optimizers import (
     BinaryOffloadOptimizer,
+    HeuristicOptimizer,
     OptimizerRegistry,
     SolveLimits,
 )
@@ -17,12 +18,21 @@ from mars.workflow_metrics import WorkflowEvaluationWeights
 DEFAULT_SUCCESS_WEIGHT = 1.0
 DEFAULT_COMMUNICATION_WEIGHT = 1.0
 DEFAULT_UTILIZATION_WEIGHT = 2.0
+DEFAULT_FORMULATION = BinaryOffloadOptimizer.default_formulation_id
+OPTIMIZER_FORMULATIONS = {
+    "binary_offload": tuple(
+        sorted(BinaryOffloadOptimizer.supported_formulation_ids)
+    ),
+    "heuristic": tuple(sorted(HeuristicOptimizer.supported_formulation_ids)),
+}
+SUPPORTED_FORMULATIONS = OPTIMIZER_FORMULATIONS["binary_offload"]
 
 
 @dataclass(frozen=True)
 class SchedulingConfiguration:
     registry: OptimizerRegistry | None
     fallback_optimizer: str | None
+    formulation: str | None
     optimizer_options: Mapping[str, float]
     evaluation_weights: WorkflowEvaluationWeights
 
@@ -31,12 +41,25 @@ def configure_scheduling(
     algorithm: str,
     optimizer_options: Mapping[str, float] | None = None,
     *,
+    formulation: str | None = None,
     legacy_beta: float | None = None,
 ) -> SchedulingConfiguration:
     """Validate API options and construct one request-local optimizer."""
 
     options = dict(optimizer_options or {})
     if algorithm != "binary_offload":
+        resolved_formulation = (
+            formulation.strip() if formulation is not None else None
+        )
+        if formulation is not None and not resolved_formulation:
+            raise ValueError("formulation must be non-blank")
+        supported = OPTIMIZER_FORMULATIONS["heuristic"]
+        if resolved_formulation not in (None, *supported):
+            raise ValueError(
+                f"unsupported heuristic formulation: "
+                f"{resolved_formulation!r}; supported formulations: "
+                f"{list(supported)!r}"
+            )
         if options:
             raise ValueError(
                 f"optimizer_options are not supported by algorithm {algorithm!r}"
@@ -47,8 +70,23 @@ def configure_scheduling(
         return SchedulingConfiguration(
             registry=None,
             fallback_optimizer="heuristic",
+            formulation=resolved_formulation,
             optimizer_options={},
             evaluation_weights=WorkflowEvaluationWeights(),
+        )
+
+    resolved_formulation = (
+        formulation.strip()
+        if formulation is not None
+        else DEFAULT_FORMULATION
+    )
+    if not resolved_formulation:
+        raise ValueError("formulation must be non-blank")
+    if resolved_formulation not in SUPPORTED_FORMULATIONS:
+        raise ValueError(
+            "unsupported binary_offload formulation: "
+            f"{resolved_formulation!r}; supported formulations: "
+            f"{list(SUPPORTED_FORMULATIONS)!r}"
         )
 
     if legacy_beta is not None:
@@ -98,6 +136,7 @@ def configure_scheduling(
     return SchedulingConfiguration(
         registry=registry,
         fallback_optimizer="heuristic",
+        formulation=resolved_formulation,
         optimizer_options=normalized,
         evaluation_weights=WorkflowEvaluationWeights(
             success=success,
@@ -131,6 +170,10 @@ def scheduling_capabilities() -> dict[str, object]:
                 "supports_multiple_nodes": True,
                 "requires_source_candidate": False,
             },
+            "default_formulation": None,
+            "supported_formulations": list(
+                OPTIMIZER_FORMULATIONS["heuristic"]
+            ),
         }
         for algorithm_id, label in stable
     ]
@@ -184,11 +227,13 @@ def scheduling_capabilities() -> dict[str, object]:
             },
             "search": {
                 "scope": "ready_set",
-                "strategy": "bounded_exhaustive_one_hot",
+                "strategy": "bounded_exhaustive",
                 "solve_budget_ms": default_limits.solve_budget_ms,
                 "max_iterations": default_limits.max_iterations,
                 "fallback_optimizer": "heuristic",
             },
+            "default_formulation": DEFAULT_FORMULATION,
+            "supported_formulations": list(SUPPORTED_FORMULATIONS),
         }
     )
     return {
@@ -198,7 +243,9 @@ def scheduling_capabilities() -> dict[str, object]:
 
 
 __all__ = [
+    "DEFAULT_FORMULATION",
     "SchedulingConfiguration",
+    "SUPPORTED_FORMULATIONS",
     "configure_scheduling",
     "scheduling_capabilities",
 ]
