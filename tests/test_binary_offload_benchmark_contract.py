@@ -1,10 +1,28 @@
 import json
+from pathlib import Path
 import subprocess
 import sys
 
 import pytest
 
-from scripts import run_binary_offload_benchmark as benchmark
+from backend.app.mars_adapter import (
+    build_link_snapshots,
+    build_link_specs,
+    build_node_snapshots,
+    build_node_specs,
+    build_workflow,
+)
+from evals.benchmarks.binary_offload.runner import run_benchmark_case
+from evals.benchmarks.binary_offload.spec import (
+    DEFAULT_SOLVE_LIMITS,
+    FORMAL_BETA,
+    FORMAL_EXPERIMENT,
+    build_scene,
+)
+from mars.synthetic_workloads import load_default_synthetic_workloads
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_package_import_does_not_mutate_sys_path():
@@ -14,7 +32,7 @@ import json
 import sys
 
 before = list(sys.path)
-module = importlib.import_module("scripts.run_binary_offload_benchmark")
+module = importlib.import_module("evals.benchmarks.binary_offload.runner")
 after_import = list(sys.path)
 importlib.reload(module)
 after_reload = list(sys.path)
@@ -26,7 +44,7 @@ print(json.dumps({
 """
     completed = subprocess.run(
         [sys.executable, "-c", probe],
-        cwd=benchmark.ROOT,
+        cwd=ROOT,
         check=True,
         capture_output=True,
         text=True,
@@ -39,7 +57,7 @@ print(json.dumps({
 
 
 def test_single_case_uses_production_metrics_and_auditable_solver_metadata():
-    catalog = benchmark.load_default_synthetic_workloads()
+    catalog = load_default_synthetic_workloads()
     scenario = {
         "id": "benchmark_smoke",
         "name": "Benchmark smoke",
@@ -47,18 +65,18 @@ def test_single_case_uses_production_metrics_and_auditable_solver_metadata():
         "tasks_per_robot": (("object_detection", ()),),
         "deadline_ms": 500.0,
     }
-    scene = benchmark.build_scene(scenario, catalog)
+    scene = build_scene(scenario, catalog)
     for task in scene.tasks:
         task.placement_constraints.allow_source_node = False
 
-    row, records, epochs = benchmark.run_benchmark_case(
+    row, records, epochs = run_benchmark_case(
         experiment="smoke_contract",
         scenario_id="benchmark_smoke",
-        workflow=benchmark.build_workflow(scene),
-        nodes=benchmark.build_node_specs(scene),
-        snapshots=benchmark.build_node_snapshots(scene),
-        links=benchmark.build_link_specs(scene),
-        link_snapshots=benchmark.build_link_snapshots(scene),
+        workflow=build_workflow(scene),
+        nodes=build_node_specs(scene),
+        snapshots=build_node_snapshots(scene),
+        links=build_link_specs(scene),
+        link_snapshots=build_link_snapshots(scene),
         seed=7,
         optimizer="binary_offload",
         policy=None,
@@ -66,8 +84,8 @@ def test_single_case_uses_production_metrics_and_auditable_solver_metadata():
         beta=4.0,
     )
 
-    assert benchmark.FORMAL_BETA == 1.0
-    assert "0.01" not in benchmark.FORMAL_EXPERIMENT
+    assert FORMAL_BETA == 1.0
+    assert "0.01" not in FORMAL_EXPERIMENT
     assert scene.workflow_deadline_ms == max(task.deadline_ms for task in scene.tasks)
 
     assert row["requested_algorithm"] == "binary_offload"
@@ -84,8 +102,8 @@ def test_single_case_uses_production_metrics_and_auditable_solver_metadata():
     assert json.loads(row["effective_termination_reasons"]) == {
         "exhaustive_one_hot_search_complete": 2,
     }
-    assert row["solve_budget_ms"] == benchmark.DEFAULT_SOLVE_LIMITS.solve_budget_ms
-    assert row["max_iterations"] == benchmark.DEFAULT_SOLVE_LIMITS.max_iterations
+    assert row["solve_budget_ms"] == DEFAULT_SOLVE_LIMITS.solve_budget_ms
+    assert row["max_iterations"] == DEFAULT_SOLVE_LIMITS.max_iterations
     assert row["solver_deterministic"] is True
     assert row["requested_seed"] == 7
     assert row["solver_random_seed"] == 7
@@ -118,6 +136,6 @@ def test_single_case_uses_production_metrics_and_auditable_solver_metadata():
     assert len(epochs) == 2
     assert all(item["solve_status"] == "optimal" for item in epochs)
     assert all(
-        item["solve_budget_ms"] == benchmark.DEFAULT_SOLVE_LIMITS.solve_budget_ms
+        item["solve_budget_ms"] == DEFAULT_SOLVE_LIMITS.solve_budget_ms
         for item in epochs
     )

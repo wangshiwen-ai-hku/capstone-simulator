@@ -23,8 +23,8 @@ jobs:
       - run: sudo apt-get update
       - run: sudo apt-get install -y protobuf-compiler
       - run: python -m pip install -r backend/requirements-dev.txt
-      - run: python -m ruff check backend mars tests
-      - run: python -m compileall -q backend mars tests
+      - run: python -m ruff check backend evals mars scripts tests
+      - run: python -m compileall -q backend evals mars scripts tests
       - run: python -m pytest -q
 
   frontend:

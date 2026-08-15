@@ -29,7 +29,7 @@ from .schemas import (
     RuntimeWorkflowRequest,
     SimulateRequest,
 )
-from .simulation import run_simulation
+from .simulation import run_simulation_with_artifact
 from .trace_archive import begin_session, log_startup_banner, trace_status
 
 
@@ -374,9 +374,10 @@ def simulate(req: SimulateRequest):
     if trace is not None:
         trace.write_request(req)
     try:
-        response = run_simulation(req)
+        response, artifact = run_simulation_with_artifact(req)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if trace is not None:
+        trace.write_json("run_artifact.json", artifact.as_dict())
         trace.write_response(response)
     return response
