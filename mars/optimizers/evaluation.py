@@ -756,6 +756,18 @@ def _plan_maximum_resource_utilization(
     )
 
 
+def _plan_deferred_priority_penalty(
+    problem: SchedulingProblem,
+    plan: SchedulingPlan,
+) -> float:
+    return float(
+        sum(
+            2 ** problem.task_by_id[task_id].priority
+            for task_id in plan.deferred_task_ids
+        )
+    )
+
+
 BUILTIN_METRICS: Mapping[ObjectiveMetric, MetricDefinition] = MappingProxyType(
     {
         ObjectiveMetric.MAKESPAN_MS: MetricDefinition(
@@ -907,6 +919,16 @@ BUILTIN_METRICS: Mapping[ObjectiveMetric, MetricDefinition] = MappingProxyType(
             candidate_proxy=(_candidate_maximum_resource_utilization),
             candidate_fidelity=CandidateFidelity.PROXY,
             proto_enum_name=("OBJECTIVE_METRIC_MAXIMUM_RESOURCE_UTILIZATION"),
+        ),
+        ObjectiveMetric.DEFERRED_PRIORITY_PENALTY: MetricDefinition(
+            metric=ObjectiveMetric.DEFERRED_PRIORITY_PENALTY,
+            semantics_version="1",
+            unit="penalty",
+            scope=MetricScope.PLAN_GLOBAL,
+            evaluate_plan=_plan_deferred_priority_penalty,
+            candidate_proxy=None,
+            candidate_fidelity=CandidateFidelity.UNSUPPORTED,
+            proto_enum_name=("OBJECTIVE_METRIC_DEFERRED_PRIORITY_PENALTY"),
         ),
     }
 )

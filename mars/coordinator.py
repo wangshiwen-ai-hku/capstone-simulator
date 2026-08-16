@@ -349,6 +349,7 @@ class CentralCoordinator:
             task.task_id: set() for task in workflow.tasks
         }
         pending_retries: set[str] = set()
+        held_deferred_task_ids: set[str] = set()
         target_by_task: dict[str, str] = {}
         mode_by_task: dict[str, str] = {}
         active_by_dispatch: dict[str, _ActiveAttempt] = {}
@@ -501,16 +502,6 @@ class CentralCoordinator:
             ] += 1
             if "fallback_optimizer" in plan.diagnostics:
                 fallback_count += 1
-            if not plan.assignments:
-                raise RuntimeError(
-                    "optimizer deferred every ready task; the runtime "
-                    "requires at least one committable assignment per epoch"
-                )
-            if plan.deferred_task_ids:
-                raise RuntimeError(
-                    "the coordinator does not commit partial plans with "
-                    "deferred ready tasks"
-                )
             self._emit(
                 current_time_ms,
                 "scheduling_epoch_planned",
@@ -1079,6 +1070,9 @@ class CentralCoordinator:
                     process_completion(dispatch_id, execution)
                     processed_completion = True
                 if processed_completion:
+                    # Resource state or DAG readiness changed. Every held task
+                    # may now have a different feasible decision.
+                    held_deferred_task_ids.clear()
                     continue
 
                 fail_fast_waiting = (
@@ -1086,8 +1080,9 @@ class CentralCoordinator:
                     is FailurePolicy.FAIL_FAST
                     and bool(active_by_dispatch)
                 )
-                if pending_retries and not fail_fast_waiting:
-                    task_id = min(pending_retries)
+                eligible_retries = pending_retries - held_deferred_task_ids
+                if eligible_retries and not fail_fast_waiting:
+                    task_id = min(eligible_retries)
                     pending_retries.remove(task_id)
                     task = manager.get(task_id)
                     exclusions = {
@@ -1100,6 +1095,10 @@ class CentralCoordinator:
                         excluded_node_ids=exclusions,
                         epoch_kind="retry",
                     )
+                    held_deferred_task_ids.update(plan.deferred_task_ids)
+                    if not plan.assignments:
+                        pending_retries.add(task_id)
+                        continue
                     assignment = plan.assignments[0]
                     if (
                         not assignment.target_node_id
@@ -1129,8 +1128,17 @@ class CentralCoordinator:
                         key=lambda item: item.task_id,
                     )
                 )
-                if arrived and not fail_fast_waiting:
+                newly_eligible = tuple(
+                    task
+                    for task in arrived
+                    if task.task_id not in held_deferred_task_ids
+                )
+                if newly_eligible and not fail_fast_waiting:
                     plan, bindings, _ = await plan_tasks(arrived)
+                    held_deferred_task_ids.difference_update(
+                        assignment.task_id for assignment in plan.assignments
+                    )
+                    held_deferred_task_ids.update(plan.deferred_task_ids)
                     ordered_assignments = sorted(
                         plan.assignments,
                         key=lambda item: (
@@ -1142,6 +1150,7 @@ class CentralCoordinator:
                     if (
                         workflow.failure_policy
                         is FailurePolicy.FAIL_FAST
+                        and ordered_assignments
                     ):
                         drops = [
                             item
@@ -1164,7 +1173,11 @@ class CentralCoordinator:
                 next_arrival_ms = float("inf")
                 if not fail_fast_waiting:
                     next_arrival_ms = min(
-                        (ready_at(task) for task in ready),
+                        (
+                            ready_at(task)
+                            for task in ready
+                            if task.task_id not in held_deferred_task_ids
+                        ),
                         default=float("inf"),
                     )
                 next_completion_ms = (

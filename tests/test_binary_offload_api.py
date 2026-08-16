@@ -59,7 +59,18 @@ def test_architecture_declares_bounded_multi_node_binary_optimizer() -> None:
     assert binary["search"]["strategy"] == "bounded_exhaustive"
     assert binary["default_formulation"] == "one_hot_placement"
     assert binary["supported_formulations"] == ["one_hot_placement"]
-    assert payload["formulations"] == ["one_hot_placement"]
+    assert payload["formulations"] == [
+        "assign_or_defer",
+        "one_hot_placement",
+    ]
+    deferred = next(
+        item
+        for item in capabilities["algorithms"]
+        if item["id"] == "deferred_offload"
+    )
+    assert deferred["search"]["strategy"] == "cp_sat"
+    assert deferred["default_formulation"] == "assign_or_defer"
+    assert deferred["supported_formulations"] == ["assign_or_defer"]
     assert payload["planning_pipeline"].index("formulation") < (
         payload["planning_pipeline"].index("optimizer")
     )
@@ -117,7 +128,7 @@ def test_binary_simulation_defaults_to_one_hot_formulation() -> None:
     )
 
 
-def test_optimizer_options_are_binary_specific() -> None:
+def test_optimizer_options_are_not_supported_by_policy_aliases() -> None:
     client = TestClient(api_main.app)
     response = client.post(
         "/api/simulate",

@@ -22,6 +22,7 @@ from mars.domain.topology import (
 from mars.domain.transfer import TransferEstimate
 from mars.optimizers import (
     BinaryOffloadOptimizer,
+    DeferredOffloadOptimizer,
     CandidateEstimate,
     HeuristicOptimizer,
     ObjectiveMetric,
@@ -368,6 +369,37 @@ def test_binary_offload_can_be_registered() -> None:
     resolved = registry.resolve("binary_offload")
 
     assert resolved.optimizer_id == "binary_offload"
+
+
+def test_deferred_offload_is_builtin_and_uses_assign_or_defer() -> None:
+    optimizer = DeferredOffloadOptimizer()
+    problem = _with_policy(_problem(), optimizer.default_policy)
+
+    plan = validate_plan(problem, optimizer.solve(problem))
+
+    assert plan.optimizer_id == "deferred_offload"
+    assert plan.formulation_id == "assign_or_defer"
+    assert plan.policy_id == "deferred_offload"
+    assert ObjectiveMetric.DEFERRED_PRIORITY_PENALTY in {
+        item.metric for item in plan.objective_evaluations
+    }
+
+
+def test_deferred_offload_can_choose_explicit_deferral() -> None:
+    optimizer = DeferredOffloadOptimizer(
+        alpha=0.0,
+        beta=0.0,
+        gamma=1.0,
+        delta=0.000001,
+    )
+    problem = _with_policy(_problem(), optimizer.default_policy)
+
+    plan = validate_plan(problem, optimizer.solve(problem))
+
+    assert not plan.assignments
+    assert set(plan.deferred_task_ids) == {
+        task.task_id for task in problem.epoch.ready_tasks
+    }
 
 
 def test_binary_offload_is_builtin_and_selects_its_configured_policy() -> None:

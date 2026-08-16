@@ -21,6 +21,7 @@ from .base import (
     validate_plan,
 )
 from .binary_offload import BinaryOffloadOptimizer
+from .deferred_offload import DeferredOffloadOptimizer
 from .evaluation import (
     BUILTIN_METRICS,
     CandidateFidelity,
@@ -57,7 +58,11 @@ from .formulation import (
     prepare_solve,
 )
 from .formulations import (
+    ASSIGN_OR_DEFER_SPEC,
     ONE_HOT_PLACEMENT_SPEC,
+    AssignOrDeferDecision,
+    AssignOrDeferFormulation,
+    AssignOrDeferModel,
     OneHotPlacementDecision,
     OneHotPlacementFormulation,
     OneHotPlacementModel,
@@ -76,6 +81,7 @@ from .policy import (
     SolveLimits,
     algorithm_aliases,
     binary_offload_policy,
+    deferred_offload_policy,
     built_in_policy,
     built_in_policy_ids,
 )
@@ -89,6 +95,10 @@ from .state import (
 )
 
 __all__ = [
+    "ASSIGN_OR_DEFER_SPEC",
+    "AssignOrDeferDecision",
+    "AssignOrDeferFormulation",
+    "AssignOrDeferModel",
     "BinaryOffloadOptimizer",
     "BUILTIN_METRICS",
     "CandidateFidelity",
@@ -98,6 +108,7 @@ __all__ = [
     "ConstraintEvaluation",
     "ConstraintRelation",
     "ConstraintSpec",
+    "DeferredOffloadOptimizer",
     "HeuristicOptimizer",
     "FormulatedOptimizer",
     "FormulationCompatibilityError",
@@ -144,6 +155,7 @@ __all__ = [
     "algorithm_aliases",
     "background_resource_demand",
     "binary_offload_policy",
+    "deferred_offload_policy",
     "built_in_registry",
     "built_in_formulation_registry",
     "build_solve_request",

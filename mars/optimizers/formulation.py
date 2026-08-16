@@ -169,6 +169,7 @@ class MaterializedSchedule:
     assignments: tuple[Assignment, ...]
     node_reservations: tuple[PlannedResourceReservation, ...]
     transfer_reservations: tuple[TransferReservation, ...]
+    deferred_task_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "assignments", tuple(self.assignments))
@@ -181,6 +182,11 @@ class MaterializedSchedule:
             self,
             "transfer_reservations",
             tuple(self.transfer_reservations),
+        )
+        object.__setattr__(
+            self,
+            "deferred_task_ids",
+            tuple(self.deferred_task_ids),
         )
 
 
@@ -587,10 +593,12 @@ def compile_solve_request(
 
 
 def built_in_formulation_registry() -> FormulationRegistry:
+    from .formulations.assign_or_defer import AssignOrDeferFormulation
     from .formulations.one_hot import OneHotPlacementFormulation
 
     registry = FormulationRegistry()
     registry.register(OneHotPlacementFormulation())
+    registry.register(AssignOrDeferFormulation())
     return registry
 
 

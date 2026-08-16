@@ -467,6 +467,7 @@ class BinaryOffloadOptimizer:
             assignments=materialized.assignments,
             node_reservations=materialized.node_reservations,
             transfer_reservations=materialized.transfer_reservations,
+            deferred_task_ids=materialized.deferred_task_ids,
         )
 
     def _record_failure(

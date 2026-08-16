@@ -368,7 +368,7 @@ class BenchmarkScene(BaseModel):
 
 class SimulateRequest(BaseModel):
     scene: BenchmarkScene
-    algorithm: Literal["binary_offload", "dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
+    algorithm: Literal["binary_offload", "deferred_offload", "dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
     formulation: Optional[str] = Field(
         default=None,
         min_length=1,
@@ -403,7 +403,7 @@ class SimulateRequest(BaseModel):
 
 class RuntimeWorkflowRequest(BaseModel):
     scene: BenchmarkScene
-    algorithm: Literal["binary_offload", "dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
+    algorithm: Literal["binary_offload", "deferred_offload", "dag_deadline", "rule_based", "local_first", "edge_first", "greedy_cost"] = "dag_deadline"
     formulation: Optional[str] = Field(
         default=None,
         min_length=1,

@@ -427,10 +427,12 @@ class HeuristicOptimizer:
 
 def built_in_registry() -> OptimizerRegistry:
     from .binary_offload import BinaryOffloadOptimizer
+    from .deferred_offload import DeferredOffloadOptimizer
 
     registry = OptimizerRegistry()
     registry.register(HeuristicOptimizer())
     registry.register(BinaryOffloadOptimizer())
+    registry.register(DeferredOffloadOptimizer())
     return registry
 
 

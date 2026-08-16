@@ -218,10 +218,13 @@ def test_builtin_metric_registry_is_complete_and_immutable() -> None:
         ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION: (
             "OBJECTIVE_METRIC_MAXIMUM_RESOURCE_UTILIZATION"
         ),
+        ObjectiveMetric.DEFERRED_PRIORITY_PENALTY: (
+            "OBJECTIVE_METRIC_DEFERRED_PRIORITY_PENALTY"
+        ),
     }
 
     assert set(BUILTIN_METRICS) == set(ObjectiveMetric)
-    assert len(BUILTIN_METRICS) == 15
+    assert len(BUILTIN_METRICS) == 16
     assert {
         metric: definition.proto_enum_name
         for metric, definition in BUILTIN_METRICS.items()
@@ -288,6 +291,7 @@ def test_builtin_metric_registry_preserves_raw_metric_semantics() -> None:
             ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO: 1.0,
             ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO: 0.0,
             ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION: 0.125,
+            ObjectiveMetric.DEFERRED_PRIORITY_PENALTY: 0.0,
         }
     )
 
@@ -295,10 +299,9 @@ def test_builtin_metric_registry_preserves_raw_metric_semantics() -> None:
     candidate = next(
         item for item in problem.candidates[task_id] if item.node_id == "robot"
     )
-    assert all(
-        definition.candidate_proxy is not None
-        for definition in BUILTIN_METRICS.values()
-    )
+    assert BUILTIN_METRICS[
+        ObjectiveMetric.DEFERRED_PRIORITY_PENALTY
+    ].candidate_proxy is None
     candidate_values = {
         metric: definition.candidate_proxy(problem, task_id, candidate)
         for metric, definition in BUILTIN_METRICS.items()

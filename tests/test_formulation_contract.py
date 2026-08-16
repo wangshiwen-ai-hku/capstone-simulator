@@ -15,9 +15,11 @@ from mars.domain import (
     TaskSpec,
 )
 from mars.optimizers import (
+    AssignOrDeferFormulation,
     BinaryOffloadOptimizer,
     ConstraintRelation,
     ConstraintSpec,
+    DeferredOffloadOptimizer,
     FormulationCompatibilityError,
     FormulationDomainError,
     FormulationRegistry,
@@ -236,12 +238,12 @@ def test_formulated_optimizer_rejects_foreign_config_identity(
 def test_builtin_registry_exposes_one_hot_placement() -> None:
     registry = built_in_formulation_registry()
 
-    assert registry.ids() == ("one_hot_placement",)
+    assert registry.ids() == ("assign_or_defer", "one_hot_placement")
     assert isinstance(
         registry.resolve("one_hot_placement"),
         OneHotPlacementFormulation,
     )
-    assert registry.specs()[0].options == {
+    assert registry.resolve("one_hot_placement").spec.options == {
         "assignment_cardinality": "exactly_one",
         "allow_drop": False,
         "allow_defer": False,
@@ -250,6 +252,24 @@ def test_builtin_registry_exposes_one_hot_placement() -> None:
         "task_order": "epoch",
         "candidate_order": "node_id",
     }
+
+
+def test_assign_or_defer_materializes_assignments_and_deferred_ids() -> None:
+    optimizer = DeferredOffloadOptimizer()
+    problem = _problem(policy=optimizer.default_policy)
+    formulation = AssignOrDeferFormulation()
+    model = formulation.compile(problem)
+    selected = model.candidate_options[0][0]
+
+    materialized = formulation.materialize(
+        problem,
+        model,
+        formulation.decision(model, (selected, None)),
+        optimizer_id=optimizer.optimizer_id,
+    )
+
+    assert tuple(item.task_id for item in materialized.assignments) == ("task_b",)
+    assert materialized.deferred_task_ids == ("task_a",)
 
 
 def test_registry_replacement_updates_canonical_spec_and_existing_aliases() -> None:

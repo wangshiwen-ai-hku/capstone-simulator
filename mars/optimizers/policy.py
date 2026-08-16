@@ -43,6 +43,7 @@ class ObjectiveMetric(str, enum.Enum):
     MAXIMUM_RESOURCE_UTILIZATION = (
         "maximum_resource_utilization"
     )
+    DEFERRED_PRIORITY_PENALTY = "deferred_priority_penalty"
 
 
 class ConstraintRelation(str, enum.Enum):
@@ -286,6 +287,37 @@ def binary_offload_policy(
         version="2",
         objectives=tuple(objectives),
         constraints=(_AVOID_DROPS,),
+        objective_aggregation=ObjectiveAggregation.WEIGHTED_SUM,
+    )
+
+
+def deferred_offload_policy(
+    *,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+    gamma: float = 2.0,
+    delta: float = 1.0,
+) -> SchedulingPolicy:
+    """Binary-offload trade-offs plus priority-weighted deferral cost."""
+
+    base = binary_offload_policy(alpha=alpha, beta=beta, gamma=gamma)
+    if not math.isfinite(delta) or delta <= 0.0:
+        raise ValueError("deferred-offload weight must be positive and finite")
+    return SchedulingPolicy(
+        policy_id="deferred_offload",
+        version="1",
+        objectives=(
+            *base.objectives,
+            ObjectiveSpec(
+                objective_id=ObjectiveMetric.DEFERRED_PRIORITY_PENALTY.value,
+                metric=ObjectiveMetric.DEFERRED_PRIORITY_PENALTY,
+                direction=OptimizationDirection.MINIMIZE,
+                weight=delta,
+            ),
+        ),
+        # The formulation itself forbids DROP. Deferred tasks are intentional
+        # rolling-horizon decisions and must not violate the legacy drop guard.
+        constraints=(),
         objective_aggregation=ObjectiveAggregation.WEIGHTED_SUM,
     )
 

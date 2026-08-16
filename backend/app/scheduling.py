@@ -9,6 +9,7 @@ from typing import Mapping
 from evals.workflow import WorkflowEvaluationWeights
 from mars.optimizers import (
     BinaryOffloadOptimizer,
+    DeferredOffloadOptimizer,
     HeuristicOptimizer,
     OptimizerRegistry,
     SolveLimits,
@@ -24,6 +25,9 @@ OPTIMIZER_FORMULATIONS = {
         sorted(BinaryOffloadOptimizer.supported_formulation_ids)
     ),
     "heuristic": tuple(sorted(HeuristicOptimizer.supported_formulation_ids)),
+    "deferred_offload": tuple(
+        sorted(DeferredOffloadOptimizer.supported_formulation_ids)
+    ),
 }
 SUPPORTED_FORMULATIONS = OPTIMIZER_FORMULATIONS["binary_offload"]
 
@@ -47,6 +51,67 @@ def configure_scheduling(
     """Validate API options and construct one request-local optimizer."""
 
     options = dict(optimizer_options or {})
+    if algorithm == "deferred_offload":
+        resolved_formulation = (
+            formulation.strip()
+            if formulation is not None
+            else DeferredOffloadOptimizer.default_formulation_id
+        )
+        supported = OPTIMIZER_FORMULATIONS["deferred_offload"]
+        if resolved_formulation not in supported:
+            raise ValueError(
+                "unsupported deferred_offload formulation: "
+                f"{resolved_formulation!r}; supported formulations: "
+                f"{list(supported)!r}"
+            )
+        allowed = {
+            "success_weight",
+            "communication_weight",
+            "utilization_weight",
+            "deferral_weight",
+        }
+        unknown = set(options) - allowed
+        if unknown:
+            raise ValueError(
+                "unknown deferred_offload optimizer options: "
+                f"{sorted(unknown)}"
+            )
+        success = options.get("success_weight", DEFAULT_SUCCESS_WEIGHT)
+        communication = options.get(
+            "communication_weight",
+            DEFAULT_COMMUNICATION_WEIGHT,
+        )
+        utilization = options.get(
+            "utilization_weight",
+            DEFAULT_UTILIZATION_WEIGHT,
+        )
+        deferral = options.get("deferral_weight", 1.0)
+        registry = OptimizerRegistry()
+        registry.register(
+            DeferredOffloadOptimizer(
+                alpha=success,
+                beta=communication,
+                gamma=utilization,
+                delta=deferral,
+            )
+        )
+        normalized = {
+            "success_weight": success,
+            "communication_weight": communication,
+            "utilization_weight": utilization,
+            "deferral_weight": deferral,
+        }
+        return SchedulingConfiguration(
+            registry=registry,
+            fallback_optimizer="heuristic",
+            formulation=resolved_formulation,
+            optimizer_options=normalized,
+            evaluation_weights=WorkflowEvaluationWeights(
+                success=success,
+                communication=communication,
+                utilization=utilization,
+            ),
+        )
     if algorithm != "binary_offload":
         resolved_formulation = (
             formulation.strip() if formulation is not None else None
@@ -234,6 +299,36 @@ def scheduling_capabilities() -> dict[str, object]:
             },
             "default_formulation": DEFAULT_FORMULATION,
             "supported_formulations": list(SUPPORTED_FORMULATIONS),
+        }
+    )
+    algorithms.append(
+        {
+            "id": "deferred_offload",
+            "label": "CP-SAT assign or defer",
+            "kind": "optimizer",
+            "stability": "experimental",
+            "execution_paths": ["runtime", "simulation"],
+            "parameters": {
+                "success_weight": {"type": "number", "default": 1.0, "minimum": 0.0},
+                "communication_weight": {"type": "number", "default": 1.0, "minimum": 0.0},
+                "utilization_weight": {"type": "number", "default": 2.0, "minimum": 0.0},
+                "deferral_weight": {"type": "number", "default": 1.0, "minimum": 0.0},
+            },
+            "compatibility": {
+                "supported_node_kinds": ["robot", "edge"],
+                "supports_multiple_nodes": True,
+                "requires_source_candidate": False,
+            },
+            "search": {
+                "scope": "ready_set",
+                "strategy": "cp_sat",
+                "solve_budget_ms": default_limits.solve_budget_ms,
+                "fallback_optimizer": "heuristic",
+            },
+            "default_formulation": DeferredOffloadOptimizer.default_formulation_id,
+            "supported_formulations": list(
+                OPTIMIZER_FORMULATIONS["deferred_offload"]
+            ),
         }
     )
     return {

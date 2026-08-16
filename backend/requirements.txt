@@ -5,3 +5,5 @@ pydantic>=2.10,<3
 pydantic-settings>=2.7,<3
 python-dotenv>=1.0,<2
 openai>=1.59,<3
+numpy>=1.26,<2
+ortools==9.14.6206

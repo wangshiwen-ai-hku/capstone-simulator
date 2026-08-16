@@ -116,18 +116,34 @@ class _TrackingOptimizer:
 class _DeferredOptimizer:
     optimizer_id = "deferred"
 
+    def __init__(self) -> None:
+        self.epochs: list[tuple[str, ...]] = []
+
     def solve(self, problem):
-        return SchedulingPlan(
-            problem_id=problem.problem_id,
-            snapshot_id=problem.snapshot.snapshot_id,
-            policy_id=problem.policy.policy_id,
-            policy_version=problem.policy.version,
-            epoch_id=problem.epoch.epoch_id,
+        task_ids = tuple(task.task_id for task in problem.epoch.ready_tasks)
+        self.epochs.append(task_ids)
+        baseline = HeuristicOptimizer().solve(problem)
+        deferred = task_ids[-1:] if len(task_ids) > 1 else ()
+        assigned = set(task_ids) - set(deferred)
+        return replace(
+            baseline,
             optimizer_id=self.optimizer_id,
-            assignments=(),
-            deferred_task_ids=tuple(
-                task.task_id for task in problem.epoch.ready_tasks
+            assignments=tuple(
+                replace(item, optimizer_id=self.optimizer_id)
+                for item in baseline.assignments
+                if item.task_id in assigned
             ),
+            node_reservations=tuple(
+                item
+                for item in baseline.node_reservations
+                if item.task_id in assigned
+            ),
+            transfer_reservations=tuple(
+                item
+                for item in baseline.transfer_reservations
+                if item.task_id in assigned
+            ),
+            deferred_task_ids=deferred,
         )
 
 
@@ -139,6 +155,37 @@ class _RecordingRuntime(InProcessRuntime):
     async def dispatch(self, command):
         self.dispatched_commands.append(command)
         return await super().dispatch(command)
+
+
+class _DeferUntilNewArrivalOptimizer:
+    optimizer_id = "defer_until_arrival"
+
+    def __init__(self) -> None:
+        self.epochs: list[tuple[str, ...]] = []
+
+    def solve(self, problem):
+        task_ids = tuple(task.task_id for task in problem.epoch.ready_tasks)
+        self.epochs.append(task_ids)
+        if len(self.epochs) == 1:
+            return SchedulingPlan(
+                problem_id=problem.problem_id,
+                snapshot_id=problem.snapshot.snapshot_id,
+                policy_id=problem.policy.policy_id,
+                policy_version=problem.policy.version,
+                epoch_id=problem.epoch.epoch_id,
+                optimizer_id=self.optimizer_id,
+                assignments=(),
+                deferred_task_ids=task_ids,
+            )
+        baseline = HeuristicOptimizer().solve(problem)
+        return replace(
+            baseline,
+            optimizer_id=self.optimizer_id,
+            assignments=tuple(
+                replace(item, optimizer_id=self.optimizer_id)
+                for item in baseline.assignments
+            ),
+        )
 
 
 def test_coordinator_plans_the_whole_ready_batch_before_commit() -> None:
@@ -276,23 +323,51 @@ def test_runtime_enforces_explicit_constraints_not_business_label() -> None:
     assert report.metrics["safety_violation_count"] == 0
 
 
-def test_deferred_only_plan_fails_fast_instead_of_spinning() -> None:
+def test_partial_deferred_plan_retries_after_completion() -> None:
     nodes, snapshots = _inventory()
     registry = OptimizerRegistry()
-    registry.register(_DeferredOptimizer())
+    optimizer = _DeferredOptimizer()
+    registry.register(optimizer)
+    runtime = _RecordingRuntime(nodes, snapshots)
+    coordinator = CentralCoordinator(
+        runtime,
+        link_specs=(),
+        link_snapshots=(),
+        optimizer_registry=registry,
+    )
+
+    report = coordinator.run(
+        WorkflowSpec(
+            "wf",
+            (_task("a"), _task("b")),
+        ),
+        algorithm="deferred",
+    )
+
+    assert report.workflow["state"] == "succeeded"
+    assert optimizer.epochs == [("a", "b"), ("b",)]
+    assert [
+        command.assignment.task_id for command in runtime.dispatched_commands
+    ] == ["a", "b"]
+
+
+def test_new_arrival_reconsiders_held_deferred_tasks() -> None:
+    nodes, snapshots = _inventory()
+    optimizer = _DeferUntilNewArrivalOptimizer()
+    registry = OptimizerRegistry()
+    registry.register(optimizer)
     coordinator = CentralCoordinator(
         InProcessRuntime(nodes, snapshots),
         link_specs=(),
         link_snapshots=(),
         optimizer_registry=registry,
     )
+    later = replace(_task("later"), arrival_time_ms=5.0)
 
-    try:
-        coordinator.run(
-            WorkflowSpec("wf", (_task("deferred"),)),
-            algorithm="deferred",
-        )
-    except RuntimeError as exc:
-        assert "deferred every ready task" in str(exc)
-    else:
-        raise AssertionError("deferred-only plan did not fail fast")
+    report = coordinator.run(
+        WorkflowSpec("wf", (_task("held"), later)),
+        algorithm="defer_until_arrival",
+    )
+
+    assert report.workflow["state"] == "succeeded"
+    assert optimizer.epochs == [("held",), ("held", "later")]
