@@ -103,6 +103,81 @@ def test_workflow_evaluation_uses_run_artifact_facts() -> None:
     assert metrics["total_energy_j"] == 1.23
 
 
+def test_resource_peak_uses_recorded_compute_start_time() -> None:
+    node = NodeSpec("robot", NodeKind.ROBOT, 1, 1, 1, 100, 0)
+    tasks = tuple(
+        TaskInstance(
+            task_id,
+            "workflow",
+            task_id,
+            "robot",
+            TaskSpec(
+                "custom",
+                TaskClass.REALTIME_OFFLOADABLE,
+                compute_demand=1,
+                gpu_demand=0.6,
+                latency_budget_ms=100,
+            ),
+        )
+        for task_id in ("a", "b")
+    )
+    attempts = (
+        {
+            "start_time_ms": 0.0,
+            "compute_start_time_ms": 0.0,
+            "finish_time_ms": 10.0,
+            "compute_time_ms": 10.0,
+        },
+        {
+            "start_time_ms": 10.0,
+            "compute_start_time_ms": 10.0,
+            "finish_time_ms": 19.9999,
+            "compute_time_ms": 10.0,
+        },
+    )
+    report = CoordinatorReport(
+        workflow={"workflow_id": "workflow", "state": "succeeded"},
+        metrics={},
+        task_results=tuple(
+            {
+                "task_id": task.task_id,
+                "state": "succeeded",
+                "target_node_id": "robot",
+                "mode": "local",
+                "attempts": [attempt],
+                "outputs": [],
+            }
+            for task, attempt in zip(tasks, attempts, strict=True)
+        ),
+        agents=(),
+        data_edges=(),
+        events=(),
+        logs=(),
+    )
+    artifact = build_run_artifact(
+        run_id="run",
+        workflow=WorkflowSpec("workflow", tasks),
+        node_specs=(node,),
+        node_snapshots=(NodeSnapshot("robot"),),
+        link_specs=(),
+        link_snapshots=(),
+        profiles=(),
+        raw_report=report,
+        algorithm="heuristic",
+        formulation=None,
+        seed=7,
+        deterministic=True,
+        max_attempts=1,
+        network_jitter=0,
+        resource_noise=0,
+    )
+
+    metrics = evaluate_run_artifact(artifact).as_dict()
+
+    assert metrics["peak_gpu_utilization"] == 0.6
+    assert metrics["maximum_resource_utilization"] == 0.6
+
+
 def test_ratio_metrics_aggregate_as_ratio_of_sums() -> None:
     definition = MetricDefinition(
         "success_rate",

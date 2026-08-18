@@ -362,6 +362,7 @@ def test_arrival_before_a_delayed_completion_watermark_still_plans() -> None:
     arriving_attempt = by_id["b-arriving"]["attempts"][0]
     running_attempt = by_id["a-running"]["attempts"][0]
     assert arriving_attempt["start_time_ms"] == pytest.approx(5.0)
+    assert arriving_attempt["compute_start_time_ms"] == pytest.approx(5.0)
     assert arriving_attempt["finish_time_ms"] < running_attempt["finish_time_ms"]
 
 

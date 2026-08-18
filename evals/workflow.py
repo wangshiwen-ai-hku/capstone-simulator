@@ -243,9 +243,14 @@ def evaluate_run_artifact(
             attempt_start_ms = _number(attempt.get("start_time_ms"))
             attempt_finish_ms = _number(attempt.get("finish_time_ms"))
             attempt_compute_ms = _number(attempt.get("compute_time_ms"))
-            compute_start_ms = max(
-                attempt_start_ms,
-                attempt_finish_ms - attempt_compute_ms,
+            compute_start_ms = _number(
+                attempt.get(
+                    "compute_start_time_ms",
+                    max(
+                        attempt_start_ms,
+                        attempt_finish_ms - attempt_compute_ms,
+                    ),
+                )
             )
             if attempt_finish_ms <= compute_start_ms:
                 continue

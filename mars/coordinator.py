@@ -77,6 +77,7 @@ class AttemptRecord:
     target_node_id: str
     mode: str
     start_time_ms: float
+    compute_start_time_ms: float
     finish_time_ms: float
     compute_time_ms: float
     communication_time_ms: float
@@ -586,6 +587,7 @@ class CentralCoordinator:
                         target_node_id="",
                         mode=ExecutionMode.DROP.value,
                         start_time_ms=event_time,
+                        compute_start_time_ms=event_time,
                         finish_time_ms=event_time,
                         compute_time_ms=0.0,
                         communication_time_ms=0.0,
@@ -681,6 +683,7 @@ class CentralCoordinator:
                         target_node_id=assignment.target_node_id,
                         mode=assignment.execution_mode.value,
                         start_time_ms=current_time_ms,
+                        compute_start_time_ms=current_time_ms,
                         finish_time_ms=current_time_ms,
                         compute_time_ms=0.0,
                         communication_time_ms=0.0,
@@ -914,6 +917,10 @@ class CentralCoordinator:
                 mode=active.assignment.execution_mode.value,
                 start_time_ms=round(
                     attempt_start_ms,
+                    4,
+                ),
+                compute_start_time_ms=round(
+                    execution.started_time_ms,
                     4,
                 ),
                 finish_time_ms=round(
