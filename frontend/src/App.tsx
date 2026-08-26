@@ -40,8 +40,10 @@ import {
 import {
   generateScene,
   getArchitecture,
+  getRealWorkflow,
   getRuntimeWorkflow,
   health,
+  submitRealWorkflow,
   submitRuntimeWorkflow,
 } from './api';
 import { canonicalDag } from './dag';
@@ -111,6 +113,7 @@ type PlaybackState =
   | 'failed'
   | 'error';
 type FlowKind = 'central' | 'task' | 'agent';
+type RuntimeMode = 'local' | 'real';
 
 interface LlmStatus {
   configured: boolean;
@@ -689,6 +692,7 @@ export default function App() {
   const [difficulty, setDifficulty] = useState<Difficulty>('medium');
   const [hardware, setHardware] = useState<HardwareId>('orin_nx');
   const [algorithm, setAlgorithm] = useState<Algorithm>('dag_deadline');
+  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>('local');
   const [algorithmCapabilities, setAlgorithmCapabilities] = useState<
     SchedulingAlgorithmCapability[]
   >([]);
@@ -706,6 +710,7 @@ export default function App() {
     'local_control',
   ]);
   const [scene, setScene] = useState<BenchmarkScene | null>(null);
+  const [appliedSettingsKey, setAppliedSettingsKey] = useState<string | null>(null);
   const [runtimeRun, setRuntimeRun] = useState<RuntimeWorkflowRun | null>(null);
   const [playbackState, setPlaybackState] = useState<PlaybackState>('idle');
   const [playhead, setPlayhead] = useState(0);
@@ -803,6 +808,29 @@ export default function App() {
     seed,
     useLlm,
   ]);
+  const sceneSettingsKey = useMemo(() => JSON.stringify({
+    scenarioType,
+    customScene,
+    robotCount,
+    edgeCount,
+    taskCategories,
+    difficulty,
+    hardware,
+    useLlm,
+  }), [
+    scenarioType,
+    customScene,
+    robotCount,
+    edgeCount,
+    taskCategories,
+    difficulty,
+    hardware,
+    useLlm,
+  ]);
+  const settingsDirty = (
+    appliedSettingsKey !== null
+    && appliedSettingsKey !== sceneSettingsKey
+  );
 
   useEffect(() => {
     health()
@@ -873,7 +901,10 @@ export default function App() {
     };
   }, [hardware]);
 
-  const buildScene = useCallback(async (payload: GenerateSceneRequest) => {
+  const buildScene = useCallback(async (
+    payload: GenerateSceneRequest,
+    settingsKey: string,
+  ) => {
     setBuilding(true);
     setError(null);
     setPlaybackState('idle');
@@ -883,6 +914,7 @@ export default function App() {
       if (payload.task_categories.length === 0) throw new Error('Select at least one atomic task.');
       const generated = applyHardware(await generateScene(payload));
       setScene(generated);
+      setAppliedSettingsKey(settingsKey);
       setLayoutRevision((value) => value + 1);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -894,8 +926,8 @@ export default function App() {
   useEffect(() => {
     if (initialBuildDone.current) return;
     initialBuildDone.current = true;
-    void buildScene(requestPayload);
-  }, [buildScene, requestPayload]);
+    void buildScene(requestPayload, sceneSettingsKey);
+  }, [buildScene, requestPayload, sceneSettingsKey]);
 
   useEffect(() => {
     if (!scene) return;
@@ -1003,15 +1035,18 @@ export default function App() {
     return null;
   }, [algorithm, binaryParameter, communicationWeight, communicationWeightValue]);
   const schedulerIssue = selectedCompatibilityIssue ?? communicationWeightIssue;
+  const runIssue = settingsDirty ? 'Apply settings first' : schedulerIssue;
 
   async function run() {
-    if (!scene || playbackState === 'submitting' || schedulerIssue) return;
+    if (!scene || playbackState === 'submitting' || runIssue) return;
     setError(null);
     setRuntimeRun(null);
     setPlayhead(0);
     setPlaybackState('submitting');
     try {
-      const accepted = await submitRuntimeWorkflow(
+      const accepted = await (
+        runtimeMode === 'real' ? submitRealWorkflow : submitRuntimeWorkflow
+      )(
         scene,
         algorithm,
         seed,
@@ -1025,7 +1060,9 @@ export default function App() {
       const start = Date.now();
       let current: RuntimeWorkflowRun | null = null;
       while (Date.now() - start < POLL_TIMEOUT_MS) {
-        current = await getRuntimeWorkflow(accepted.run_id);
+        current = await (
+          runtimeMode === 'real' ? getRealWorkflow : getRuntimeWorkflow
+        )(accepted.run_id);
         setRuntimeRun(current);
         if (current.status === 'succeeded' || current.status === 'failed') break;
         await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL_MS));
@@ -1193,6 +1230,15 @@ export default function App() {
             </SettingsSection>
 
             <SettingsSection icon={<Gauge size={15} />} title="Scheduler">
+              <label htmlFor="runtime-mode">Execution path</label>
+              <select
+                id="runtime-mode"
+                value={runtimeMode}
+                onChange={(event) => setRuntimeMode(event.target.value as RuntimeMode)}
+              >
+                <option value="local">In-process runtime</option>
+                <option value="real">gRPC agents</option>
+              </select>
               <label htmlFor="algorithm">Scheduling method</label>
               <select id="algorithm" value={algorithm} onChange={(event) => setAlgorithm(event.target.value as Algorithm)}>
                 {algorithms.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
@@ -1248,7 +1294,7 @@ export default function App() {
             <button
               type="button"
               className="apply-button"
-              onClick={() => void buildScene(requestPayload)}
+              onClick={() => void buildScene(requestPayload, sceneSettingsKey)}
               disabled={building || playbackState === 'submitting'}
             >
               <RefreshCcw size={15} className={building ? 'spin' : ''} />
@@ -1265,24 +1311,32 @@ export default function App() {
             <div>
               <strong>{scene?.title ?? 'Loading scene'}</strong>
               <small title={scene?.generation_note || undefined}>
-                {apiStatus} | {scene?.workflow_id ?? 'No workflow'}
+                {apiStatus} | {runtimeMode === 'real' ? 'gRPC agents' : 'in-process'}
+                {' | '}{scene?.workflow_id ?? 'No workflow'}
                 {scene ? ` | ${scene.generation_source}` : ''}
               </small>
             </div>
           </div>
-          <div className="run-controls" aria-label="Runtime controls">
-            <button type="button" className="run" onClick={() => void run()} disabled={!scene || Boolean(schedulerIssue) || playbackState === 'submitting' || playbackState === 'running' || playbackState === 'paused'} title={schedulerIssue ?? 'Run workflow'}>
-              <Play size={15} fill="currentColor" /> Run
-            </button>
-            <button type="button" onClick={pausePlayback} disabled={playbackState !== 'running'} title="Pause playback">
-              <Pause size={15} /> Pause
-            </button>
-            <button type="button" onClick={reset} disabled={!scene || playbackState === 'submitting'} title="Reset workflow">
-              <RotateCcw size={15} /> Reset
-            </button>
-            <button type="button" onClick={continuePlayback} disabled={playbackState !== 'paused' || !runtimeRun?.result} title="Continue playback">
-              <Play size={15} /> Continue
-            </button>
+          <div className="run-action-group">
+            <div className="run-controls" aria-label="Runtime controls">
+              <button type="button" className="run" onClick={() => void run()} disabled={!scene || Boolean(runIssue) || playbackState === 'submitting' || playbackState === 'running' || playbackState === 'paused'} title={runIssue ?? 'Run workflow'} aria-describedby={settingsDirty ? 'apply-settings-hint' : undefined}>
+                <Play size={15} fill="currentColor" /> Run
+              </button>
+              <button type="button" onClick={pausePlayback} disabled={playbackState !== 'running'} title="Pause playback">
+                <Pause size={15} /> Pause
+              </button>
+              <button type="button" onClick={reset} disabled={!scene || playbackState === 'submitting'} title="Reset workflow">
+                <RotateCcw size={15} /> Reset
+              </button>
+              <button type="button" onClick={continuePlayback} disabled={playbackState !== 'paused' || !runtimeRun?.result} title="Continue playback">
+                <Play size={15} /> Continue
+              </button>
+            </div>
+            {settingsDirty && (
+              <small id="apply-settings-hint" className="run-settings-hint" aria-live="polite">
+                Apply settings first
+              </small>
+            )}
           </div>
           <div className="runtime-summary">
             <span className={`runtime-state ${playbackState}`}>{playbackState}</span>

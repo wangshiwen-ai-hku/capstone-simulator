@@ -56,6 +56,9 @@ message RegisterAgentResponse {
   double heartbeat_interval_ms = 4;
   string error_code = 5;
   string error_message = 6;
+  // The agent's self-declared node identity and capacity. Coordinator-side
+  // clients learn the agent's NodeSpec from registration rather than config.
+  NodeSpec node = 7;
 }
 
 message HeartbeatRequest {

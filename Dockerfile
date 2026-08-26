@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 
 # Copy source packages and configs
 COPY mars /app/mars
+COPY interfaces /app/interfaces
 COPY backend /app/backend
 COPY configs /app/configs
 COPY evals /app/evals

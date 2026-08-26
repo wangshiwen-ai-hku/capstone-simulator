@@ -156,9 +156,73 @@ class ApiTests(unittest.TestCase):
             payload["runtime"],
             "central_scheduler_with_async_runtime_port",
         )
-        self.assertEqual(payload["runtime_adapters"], ["in_process"])
-        self.assertEqual(payload["network_adapters"], [])
+        self.assertEqual(
+            payload["runtime_adapters"],
+            ["in_process", "grpc_agents"],
+        )
+        self.assertEqual(payload["network_adapters"], ["grpc"])
         self.assertNotIn("transport_interfaces", payload)
+
+    def test_real_runtime_routes_reuse_the_runtime_response_contract(self):
+        scene = build_deterministic_scene(
+            GenerateSceneRequest(
+                robot_count=2,
+                edge_count=1,
+                use_llm=False,
+                seed=13,
+            )
+        )
+        accepted = {
+            "run_id": "real_test",
+            "workflow_id": scene.workflow_id,
+            "status": "accepted",
+        }
+        finished = {
+            **accepted,
+            "status": "succeeded",
+            "result": {"events": []},
+            "error": "",
+        }
+        with (
+            patch.object(
+                api_main.real_runtime_service,
+                "bootstrap",
+                return_value={"runtime": "grpc_agents", "agents": []},
+            ),
+            patch.object(
+                api_main.real_runtime_service,
+                "submit",
+                return_value=accepted,
+            ),
+            patch.object(
+                api_main.real_runtime_service,
+                "get_run",
+                return_value=finished,
+            ),
+            patch.object(
+                api_main.real_runtime_service,
+                "events",
+                return_value={
+                    "run_id": "real_test",
+                    "status": "succeeded",
+                    "events": [],
+                    "next_sequence": 0,
+                },
+            ),
+        ):
+            bootstrapped = self.client.post("/api/real/bootstrap")
+            submitted = self.client.post(
+                "/api/real/run",
+                json={"scene": scene.model_dump(mode="json")},
+            )
+            run = self.client.get("/api/real/runs/real_test")
+            events = self.client.get("/api/real/runs/real_test/events")
+
+        self.assertEqual(bootstrapped.status_code, 200)
+        self.assertEqual(submitted.status_code, 202)
+        self.assertEqual(submitted.json(), accepted)
+        self.assertEqual(run.json()["status"], "succeeded")
+        self.assertEqual(events.json()["events"], [])
 
     def test_local_runtime_bootstrap_submit_retry_and_result_flow(self):
         bootstrapped = self.client.post("/api/runtime/bootstrap")

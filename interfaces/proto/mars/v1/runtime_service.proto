@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package mars.v1;
+
+import "interfaces/proto/mars/v1/runtime.proto";
+
+// Control-plane RPC service implemented by every real agent process.
+//
+// The coordinator-side GrpcRuntimeAdapter is the client; each agent hosts this
+// service. Message payloads reuse the data-only contracts in runtime.proto.
+// State freshness is pull-based: the adapter calls GetState before each
+// planning iteration instead of relying on agent-pushed heartbeats.
+service AgentRuntime {
+  // Handshake at adapter start: the request carries the NodeSpec the
+  // coordinator expects; the agent accepts only when its configured node_id
+  // matches.
+  rpc RegisterAgent(RegisterAgentRequest) returns (RegisterAgentResponse);
+
+  // Pull the agent's current dynamic state.
+  rpc GetState(GetStateRequest) returns (GetStateResponse);
+
+  // Commit one validated plan fragment to this agent.
+  rpc DispatchTask(DispatchCommand) returns (DispatchAck);
+
+  // Server-streaming completion feed: the agent pushes one AttemptCompletion
+  // per terminal attempt over a stream opened at adapter start.
+  rpc StreamCompletions(CompletionSubscription)
+      returns (stream AttemptCompletion);
+
+  rpc CancelAttempt(CancelAttemptRequest) returns (CancelAttemptResponse);
+}
+
+message GetStateRequest {
+  string agent_id = 1;
+}
+
+message GetStateResponse {
+  AgentHeartbeat heartbeat = 1;
+  string error_code = 2;
+  string error_message = 3;
+}
+
+message CompletionSubscription {
+  string agent_id = 1;
+}

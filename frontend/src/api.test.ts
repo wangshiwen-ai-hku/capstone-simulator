@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { simulate, submitRuntimeWorkflow } from './api';
+import { simulate, submitRealWorkflow, submitRuntimeWorkflow } from './api';
 import type { BenchmarkScene } from './types';
 
 const scene = { id: 'scene-wire-test' } as BenchmarkScene;
@@ -75,5 +75,17 @@ describe('scheduler API payloads', () => {
     expect(payload).not.toHaveProperty('formulation');
     expect(payload).not.toHaveProperty('optimizer_options');
     expect(payload).not.toHaveProperty('beta');
+  });
+
+  it('uses the real runtime endpoint without changing the request contract', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response({ run_id: 'real-1' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await submitRealWorkflow(scene, 'dag_deadline', 7);
+
+    expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:8000/api/real/run');
+    const payload = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    expect(payload.algorithm).toBe('dag_deadline');
+    expect(payload.max_attempts).toBe(2);
   });
 });

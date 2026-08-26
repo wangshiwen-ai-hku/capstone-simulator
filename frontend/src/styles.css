@@ -530,6 +530,19 @@ textarea:focus-visible {
   border-radius: 5px;
 }
 
+.run-action-group {
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+}
+
+.run-settings-hint {
+  color: var(--yellow);
+  font-size: 9px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .run-controls button {
   display: flex;
   height: 32px;

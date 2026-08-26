@@ -18,6 +18,7 @@ PROTO_FILES = (
     "runtime.proto",
     "profiling.proto",
 )
+SERVICE_PROTO_FILES = ("runtime_service.proto",)
 
 OBJECTIVE_METRIC_PROTO_LEGACY_NAMES = {
     "TOTAL_COMMUNICATION_MS": "TOTAL_COMMUNICATION_TIME_MS",
@@ -215,6 +216,22 @@ def test_proto_boundary_is_versioned_and_data_only() -> None:
         assert "service " not in source
 
 
+def test_runtime_service_reuses_the_data_only_runtime_contract() -> None:
+    source = (PROTO_ROOT / "runtime_service.proto").read_text(encoding="utf-8")
+    assert 'syntax = "proto3";' in source
+    assert "package mars.v1;" in source
+    assert 'import "interfaces/proto/mars/v1/runtime.proto";' in source
+    assert "service AgentRuntime" in source
+    for method in (
+        "RegisterAgent",
+        "GetState",
+        "DispatchTask",
+        "StreamCompletions",
+        "CancelAttempt",
+    ):
+        assert f"rpc {method}" in source
+
+
 def test_proto_contract_matches_executable_v1_boundaries() -> None:
     workflow = (PROTO_ROOT / "workflow.proto").read_text(encoding="utf-8")
     optimization = (PROTO_ROOT / "optimization.proto").read_text(encoding="utf-8")
@@ -304,7 +321,10 @@ def test_proto_contracts_compile_together(tmp_path: Path) -> None:
             str(REPO_ROOT),
             "--include_imports",
             f"--descriptor_set_out={descriptor}",
-            *(str(PROTO_ROOT / filename) for filename in PROTO_FILES),
+            *(
+                str(PROTO_ROOT / filename)
+                for filename in (*PROTO_FILES, *SERVICE_PROTO_FILES)
+            ),
         ],
         check=True,
         capture_output=True,

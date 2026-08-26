@@ -217,7 +217,8 @@ tracing or cross-frame warm starts additionally implement the optional
 
 ## Quick start
 
-The CI runtime is Python 3.12.
+Backend CI covers Python 3.10 and 3.12; the web-app smoke job uses Python 3.12.
+The backend Docker image uses Python 3.11.
 
 ### Backend
 
@@ -432,11 +433,10 @@ profiling, scheduling problems and plans, and runtime commands/events. They are
 the language-neutral interface source; Python domain classes remain the
 in-process implementation model.
 
-Current scope does not include generated Proto bindings, RPC service
-definitions, a gRPC or DDS network adapter, deployment middleware integration,
-or production optimizer implementations such as MILP, ADMM, or primal-dual
-solvers. Those components can be added against the defined Problem, Plan, and
-RuntimePort boundaries.
+The repository includes generated Python Proto bindings, an Agent-hosted gRPC
+service, a `GrpcRuntimeAdapter`, and a three-Agent localhost mock deployment.
+Real Jetson executors, payload transfer, TLS, service discovery, deployment
+middleware, and production optimizers such as MILP or ADMM remain out of scope.
 
 ## API
 
@@ -457,6 +457,24 @@ Central runtime:
 - `POST /api/runtime/workflows`
 - `GET /api/runtime/workflows/{run_id}`
 - `GET /api/runtime/workflows/{run_id}/events?after_sequence=N`
+
+gRPC Agent runtime:
+
+- `POST /api/real/bootstrap`
+- `GET /api/real/agents`
+- `POST /api/real/run`
+- `GET /api/real/runs/{run_id}`
+- `GET /api/real/runs/{run_id}/events?after_sequence=N`
+
+Start the three localhost mock Agents before using this path:
+
+```bash
+python scripts/run_mock_agents.py
+```
+
+For a three-device LAN smoke test, run one Agent per device with
+`configs/mars/agents.hardware.example.json` and set `REAL_AGENT_ENDPOINTS` to
+the devices' actual IP addresses as described in the hardware deployment guide.
 
 ## Runtime boundary
 
@@ -656,7 +674,8 @@ Web 仿真和运行时工作流提交都通过 `InProcessRuntime` 使用这一�
 
 ## 快速开始
 
-CI 运行环境使用 Python 3.12。
+后端 CI 覆盖 Python 3.10 和 3.12；Web 应用冒烟测试使用 Python 3.12。
+后端 Docker 镜像使用 Python 3.11。
 
 ### 后端
 
@@ -853,9 +872,9 @@ scripts/                       精简命令行与演示入口
 Proto 文件为工作流、拓扑、性能剖析、调度问题与调度方案，以及运行时命令/事件定义
 带版本的数据消息。它们是与语言无关的接口源；Python 领域类仍作为进程内实现模型。
 
-当前范围不包括生成的 Proto 绑定、RPC 服务定义、gRPC 或 DDS 网络适配器、部署中间件
-集成，或 MILP、ADMM、原始-对偶求解器等生产级优化器实现。上述组件可以基于已定义的
-调度问题、调度方案和 `RuntimePort` 边界添加。
+仓库已经包含生成的 Python Proto 绑定、Agent 托管的 gRPC 服务、
+`GrpcRuntimeAdapter` 和三个 Agent 的 localhost Mock 部署。真实 Jetson 执行器、payload
+传输、TLS、服务发现、部署中间件以及 MILP、ADMM 等生产级优化器仍不在当前范围内。
 
 ## API
 

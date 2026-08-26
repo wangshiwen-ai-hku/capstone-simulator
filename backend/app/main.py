@@ -17,6 +17,7 @@ from mars.synthetic_workloads import load_default_synthetic_workloads
 from .config import get_settings
 from .llm_client import generate_scene_with_llm
 from .mars_adapter import SceneValidationError, validate_scene
+from .real_runtime import real_runtime_service
 from .runtime import runtime_service
 from .scheduling import scheduling_capabilities
 from .scene_generator import (
@@ -109,8 +110,8 @@ def architecture():
         "core_version": mars_version,
         "workflow": "validated DAG with blocked/ready/running/terminal lifecycle",
         "runtime": "central_scheduler_with_async_runtime_port",
-        "runtime_adapters": ["in_process"],
-        "network_adapters": [],
+        "runtime_adapters": ["in_process", "grpc_agents"],
+        "network_adapters": ["grpc"],
         "network_model": "directed_link_topology",
         "planning_pipeline": [
             "hard_constraint_filtering",
@@ -226,6 +227,56 @@ def get_runtime_events(
     payload = runtime_service.events(run_id, after_sequence)
     if payload is None:
         raise HTTPException(status_code=404, detail="runtime workflow not found")
+    return payload
+
+
+@app.post("/api/real/bootstrap")
+def bootstrap_real_runtime():
+    try:
+        return real_runtime_service.bootstrap()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/api/real/agents")
+def real_runtime_agents():
+    return real_runtime_service.status()
+
+
+@app.post("/api/real/run", status_code=202)
+def submit_real_workflow(req: RuntimeWorkflowRequest):
+    _validate_scene_request(req.scene)
+    trace = begin_session(
+        "real",
+        settings,
+        scene_trace_id=req.scene.trace_id,
+        algorithm=req.algorithm,
+        scene_id=req.scene.id,
+    )
+    if trace is not None:
+        trace.write_request(req)
+    try:
+        return real_runtime_service.submit(req, trace_session=trace)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/real/runs/{run_id}")
+def get_real_workflow(run_id: str):
+    payload = real_runtime_service.get_run(run_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="real workflow not found")
+    return payload
+
+
+@app.get("/api/real/runs/{run_id}/events")
+def get_real_events(
+    run_id: str,
+    after_sequence: int = Query(default=0, ge=0),
+):
+    payload = real_runtime_service.events(run_id, after_sequence)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="real workflow not found")
     return payload
 
 

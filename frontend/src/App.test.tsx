@@ -6,8 +6,10 @@ import App, { slotUtilization, taskPlayback } from './App';
 import {
   generateScene,
   getArchitecture,
+  getRealWorkflow,
   getRuntimeWorkflow,
   health,
+  submitRealWorkflow,
   submitRuntimeWorkflow,
 } from './api';
 import type { BenchmarkScene, SchedulingAlgorithmCapability } from './types';
@@ -144,7 +146,9 @@ vi.mock('./api', () => ({
   }),
   generateScene: vi.fn().mockResolvedValue(scene),
   getArchitecture: vi.fn().mockResolvedValue({}),
+  getRealWorkflow: vi.fn(),
   getRuntimeWorkflow: vi.fn(),
+  submitRealWorkflow: vi.fn(),
   submitRuntimeWorkflow: vi.fn(),
 }));
 
@@ -168,7 +172,9 @@ beforeEach(() => {
   });
   vi.mocked(generateScene).mockReset().mockResolvedValue(scene);
   vi.mocked(getArchitecture).mockReset().mockResolvedValue({});
+  vi.mocked(getRealWorkflow).mockReset();
   vi.mocked(getRuntimeWorkflow).mockReset();
+  vi.mocked(submitRealWorkflow).mockReset();
   vi.mocked(submitRuntimeWorkflow).mockReset();
 });
 
@@ -191,6 +197,62 @@ describe('MARS Studio', () => {
       (screen.getByRole('checkbox', { name: 'Use LLM scene generation' }) as HTMLInputElement).disabled,
     ).toBe(true);
     expect(screen.getByLabelText('Scheduling method')).toBeTruthy();
+    expect(screen.getByLabelText('Execution path')).toBeTruthy();
+  });
+
+  it('requires Apply only after scene settings change', async () => {
+    render(<App />);
+
+    await screen.findByText('Warehouse test scene');
+    const run = screen.getByRole('button', { name: 'Run' }) as HTMLButtonElement;
+    await waitFor(() => expect(run.disabled).toBe(false));
+
+    fireEvent.change(screen.getByLabelText('Deterministic seed'), {
+      target: { value: '99' },
+    });
+    fireEvent.change(screen.getByLabelText('Scheduling method'), {
+      target: { value: 'edge_first' },
+    });
+    expect(run.disabled).toBe(false);
+    expect(screen.queryByText('Apply settings first')).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('Robot nodes'), {
+      target: { value: '3' },
+    });
+    expect(run.disabled).toBe(true);
+    expect(screen.getByText('Apply settings first')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Apply settings' }));
+    await waitFor(() => expect(run.disabled).toBe(false));
+    expect(screen.queryByText('Apply settings first')).toBeNull();
+  });
+
+  it('runs the same view through the gRPC agent API path', async () => {
+    vi.mocked(submitRealWorkflow).mockResolvedValue({
+      run_id: 'real-1',
+      workflow_id: scene.workflow_id,
+      status: 'accepted',
+    });
+    vi.mocked(getRealWorkflow).mockResolvedValue({
+      run_id: 'real-1',
+      workflow_id: scene.workflow_id,
+      status: 'failed',
+      result: null,
+      error: 'expected test stop',
+    });
+    render(<App />);
+
+    await screen.findByText('Warehouse test scene');
+    fireEvent.change(screen.getByLabelText('Execution path'), {
+      target: { value: 'real' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    await waitFor(() => {
+      expect(submitRealWorkflow).toHaveBeenCalled();
+      expect(getRealWorkflow).toHaveBeenCalledWith('real-1');
+    });
+    expect(submitRuntimeWorkflow).not.toHaveBeenCalled();
   });
 
   it('keeps the five stable methods when capability discovery fails', async () => {

@@ -10,6 +10,7 @@ from .base import (
     RuntimePort,
 )
 from .inprocess import ExecutionInvocation, InProcessRuntime
+from .grpc import GrpcRuntimeAdapter
 
 __all__ = [
     "AgentHeartbeat",
@@ -17,6 +18,7 @@ __all__ = [
     "DispatchAck",
     "DispatchCommand",
     "ExecutionInvocation",
+    "GrpcRuntimeAdapter",
     "InProcessRuntime",
     "RuntimeCapabilities",
     "RuntimeInventory",

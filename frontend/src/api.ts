@@ -78,10 +78,29 @@ export function submitRuntimeWorkflow(
   seed: number,
   options: SchedulerRunOptions = {},
 ) {
+  return submitWorkflow('/api/runtime/workflows', scene, algorithm, seed, options);
+}
+
+export function submitRealWorkflow(
+  scene: BenchmarkScene,
+  algorithm: Algorithm,
+  seed: number,
+  options: SchedulerRunOptions = {},
+) {
+  return submitWorkflow('/api/real/run', scene, algorithm, seed, options);
+}
+
+function submitWorkflow(
+  path: string,
+  scene: BenchmarkScene,
+  algorithm: Algorithm,
+  seed: number,
+  options: SchedulerRunOptions,
+) {
   const optimizerOptions = serializedOptimizerOptions(algorithm, options);
   const formulation = serializedFormulation(algorithm, options);
   return request<{ run_id: string; workflow_id: string; status: string }>(
-    '/api/runtime/workflows',
+    path,
     {
       method: 'POST',
       body: JSON.stringify({
@@ -100,6 +119,10 @@ export function submitRuntimeWorkflow(
 
 export function getRuntimeWorkflow(runId: string) {
   return request<RuntimeWorkflowRun>(`/api/runtime/workflows/${runId}`);
+}
+
+export function getRealWorkflow(runId: string) {
+  return request<RuntimeWorkflowRun>(`/api/real/runs/${runId}`);
 }
 
 function serializedOptimizerOptions(

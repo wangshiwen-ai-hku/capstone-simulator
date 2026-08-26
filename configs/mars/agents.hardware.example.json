@@ -1,0 +1,82 @@
+{
+  "description": "LAN binding example for hardware smoke tests; node and snapshot values remain synthetic.",
+  "agents": [
+    {
+      "agent_id": "robot_1",
+      "listen": "0.0.0.0:50051",
+      "node": {
+        "kind": "robot",
+        "architecture": "jetson-orin",
+        "cpu_capacity": 8.0,
+        "gpu_capacity": 1.0,
+        "memory_gb": 32.0,
+        "bandwidth_mbps": 100.0,
+        "base_latency_ms": 10.0,
+        "battery_capacity_wh": 80.0,
+        "safety_capable": true,
+        "capabilities": ["cpu", "cuda", "tensorrt", "local_safety"],
+        "supported_models": [],
+        "max_concurrency": 1
+      },
+      "snapshot": {
+        "cpu_util": 0.2,
+        "gpu_util": 0.15,
+        "memory_util": 0.25,
+        "temperature_c": 52.0,
+        "power_w": 18.0,
+        "network_latency_ms": 10.0
+      }
+    },
+    {
+      "agent_id": "robot_2",
+      "listen": "0.0.0.0:50051",
+      "node": {
+        "kind": "robot",
+        "architecture": "jetson-orin",
+        "cpu_capacity": 8.0,
+        "gpu_capacity": 1.0,
+        "memory_gb": 32.0,
+        "bandwidth_mbps": 100.0,
+        "base_latency_ms": 10.0,
+        "battery_capacity_wh": 80.0,
+        "safety_capable": true,
+        "capabilities": ["cpu", "cuda", "tensorrt", "local_safety"],
+        "supported_models": [],
+        "max_concurrency": 1
+      },
+      "snapshot": {
+        "cpu_util": 0.2,
+        "gpu_util": 0.15,
+        "memory_util": 0.25,
+        "temperature_c": 52.0,
+        "power_w": 18.0,
+        "network_latency_ms": 10.0
+      }
+    },
+    {
+      "agent_id": "edge_pc",
+      "listen": "0.0.0.0:50051",
+      "node": {
+        "kind": "edge",
+        "architecture": "x86_64-cuda",
+        "cpu_capacity": 16.0,
+        "gpu_capacity": 4.0,
+        "memory_gb": 64.0,
+        "bandwidth_mbps": 1000.0,
+        "base_latency_ms": 20.0,
+        "safety_capable": false,
+        "capabilities": ["cpu", "cuda", "high_memory"],
+        "supported_models": [],
+        "max_concurrency": 2
+      },
+      "snapshot": {
+        "cpu_util": 0.3,
+        "gpu_util": 0.35,
+        "memory_util": 0.3,
+        "temperature_c": 60.0,
+        "power_w": 140.0,
+        "network_latency_ms": 20.0
+      }
+    }
+  ]
+}

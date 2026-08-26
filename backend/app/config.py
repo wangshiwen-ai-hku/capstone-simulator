@@ -73,9 +73,28 @@ class Settings(BaseSettings):
         default="tmp/mars-traces",
         alias="MARS_TRACE_DIR",
     )
+    real_agent_endpoints: str = Field(
+        default=(
+            "robot_1=127.0.0.1:50051,"
+            "robot_2=127.0.0.1:50052,"
+            "edge_pc=127.0.0.1:50053"
+        ),
+        alias="REAL_AGENT_ENDPOINTS",
+    )
 
     def cors_origin_list(self) -> List[str]:
         return [x.strip() for x in self.cors_origins.split(",") if x.strip()]
+
+    def real_agent_endpoint_map(self) -> dict[str, str]:
+        endpoints: dict[str, str] = {}
+        for item in self.real_agent_endpoints.split(","):
+            agent_id, separator, endpoint = item.strip().partition("=")
+            if not separator or not agent_id or not endpoint:
+                raise ValueError(
+                    "REAL_AGENT_ENDPOINTS must use agent_id=host:port entries"
+                )
+            endpoints[agent_id] = endpoint
+        return endpoints
 
     def current_llm(self) -> dict:
         provider = self.model_provider.lower().strip()

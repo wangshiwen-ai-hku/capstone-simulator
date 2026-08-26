@@ -1,9 +1,9 @@
 # MARS protocol contracts
 
-`mars/v1/` contains transport-neutral, data-only Protocol Buffer contracts.
-They can be carried by gRPC, DDS, deployment-specific middleware, files, or
-replay logs. No RPC service, generated stub, or transport implementation is
-defined here.
+`mars/v1/` contains transport-neutral Protocol Buffer data contracts plus the
+small `AgentRuntime` gRPC service used by the real-runtime adapter. Generated
+Python messages and stubs are checked in so Agent deployments do not need the
+compiler at runtime.
 
 ## Contract boundaries
 
@@ -14,6 +14,7 @@ defined here.
 | `topology.proto` | Node/link inventory, dynamic state, and reservations |
 | `optimization.proto` | Shared optimization problem and scheduling plan |
 | `runtime.proto` | Registration, heartbeat, dispatch, completion, and cancellation messages |
+| `runtime_service.proto` | Agent-hosted gRPC control-plane service |
 | `profiling.proto` | Raw execution observations and aggregated profile snapshots |
 
 The optimization boundary is:
@@ -181,9 +182,9 @@ protoc -I . \
 
 # MARS 协议契约（中文说明）
 
-`mars/v1/` 包含与传输机制无关、仅承载数据的 Protocol Buffer 契约。
-这些契约可通过 gRPC、DDS、部署专用中间件、文件或回放日志传输。
-此处不定义任何 RPC 服务、生成的存根或传输实现。
+`mars/v1/` 包含与传输机制无关的 Protocol Buffer 数据契约，以及真实运行时适配器使用的
+小型 `AgentRuntime` gRPC 服务。Python 消息和 stub 会提交到仓库，因此 Agent 的运行环境
+不需要安装编译器。
 
 ## 契约边界
 
@@ -194,6 +195,7 @@ protoc -I . \
 | `topology.proto` | 节点/链路清单、动态状态和预留信息 |
 | `optimization.proto` | 共享优化问题和调度计划 |
 | `runtime.proto` | 注册、心跳、分派、完成和取消消息 |
+| `runtime_service.proto` | Agent 托管的 gRPC 控制面服务 |
 | `profiling.proto` | 原始执行观测和聚合后的性能剖析快照 |
 
 优化边界如下：
