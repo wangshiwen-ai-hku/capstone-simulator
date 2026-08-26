@@ -111,16 +111,17 @@ def solver_audit(
     requested_algorithm: str,
     invocation_summaries: tuple[Mapping[str, object], ...],
 ) -> dict[str, object]:
-    """Describe requested binary solves without confusing them with fallback."""
+    """Describe requested optimizer solves without confusing them with fallback."""
 
-    summaries = (
-        tuple(
-            item
-            for item in invocation_summaries
-            if item.get("optimizer_id") == "binary_offload"
-        )
-        if requested_algorithm == "binary_offload"
-        else ()
+    requested_optimizer = (
+        requested_algorithm
+        if requested_algorithm in {"binary_offload", "deferred_offload"}
+        else None
+    )
+    summaries = tuple(
+        item
+        for item in invocation_summaries
+        if item.get("optimizer_id") == requested_optimizer
     )
     budgets = sorted({float(item["solve_budget_ms"]) for item in summaries})
     iteration_limits = sorted(
@@ -131,7 +132,7 @@ def solver_audit(
         reasons = _json_counter(
             item["termination_reason"] for item in summaries
         )
-    elif requested_algorithm == "binary_offload":
+    elif requested_optimizer is not None:
         statuses = "{}"
         reasons = "{}"
     else:
@@ -152,7 +153,7 @@ def solver_audit(
         ),
         "requested_placement_search_exhaustive": (
             all(
-                bool(item["placement_search_exhaustive"])
+                bool(item.get("placement_search_exhaustive", False))
                 for item in summaries
             )
             if summaries
@@ -160,7 +161,7 @@ def solver_audit(
         ),
         "search_scope": (
             "receding_horizon_ready_epoch"
-            if requested_algorithm == "binary_offload"
+            if requested_optimizer is not None
             else "policy_alias_per_ready_epoch"
         ),
         "global_workflow_exact": False,

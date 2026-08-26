@@ -205,6 +205,7 @@ class SchedulingSnapshot:
         PlannedResourceReservation, ...
     ] = ()
     critical_tail_ms: Mapping[str, float] = field(default_factory=dict)
+    chain_priority_weights: Mapping[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.schema_version.strip():
@@ -268,6 +269,11 @@ class SchedulingSnapshot:
             self,
             "critical_tail_ms",
             MappingProxyType(dict(self.critical_tail_ms)),
+        )
+        object.__setattr__(
+            self,
+            "chain_priority_weights",
+            MappingProxyType(dict(self.chain_priority_weights)),
         )
         node_ids = tuple(item.node_id for item in self.node_specs)
         snapshot_ids = tuple(item.node_id for item in self.node_snapshots)
@@ -438,6 +444,15 @@ class SchedulingSnapshot:
             raise ValueError(
                 "critical-tail estimates must be non-negative"
             )
+        if set(self.chain_priority_weights) - set(task_ids):
+            raise ValueError(
+                "chain-priority weights reference an unknown task"
+            )
+        if any(
+            not math.isfinite(value) or value <= 0
+            for value in self.chain_priority_weights.values()
+        ):
+            raise ValueError("chain-priority weights must be positive")
 
 
 @dataclass(frozen=True)
@@ -512,6 +527,10 @@ class SchedulingProblem:
     @property
     def critical_tail_ms(self) -> Mapping[str, float]:
         return self.snapshot.critical_tail_ms
+
+    @property
+    def chain_priority_weights(self) -> Mapping[str, float]:
+        return self.snapshot.chain_priority_weights
 
     @property
     def solve_budget_ms(self) -> float:

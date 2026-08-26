@@ -7,18 +7,29 @@ import math
 from time import perf_counter
 
 from .base import (
+    PlannedResourceReservation,
     SchedulingPlan,
     SolveStatus,
     background_resource_demand,
+    maximum_resource_utilization,
 )
 from .binary_offload import BinaryOffloadOptimizer
-from .formulation import FormulationSpec, PreparedSolve
+from .formulation import (
+    FormulationCompatibilityError,
+    FormulationSpec,
+    PreparedSolve,
+)
 from .formulations.assign_or_defer import (
     ASSIGN_OR_DEFER_SPEC,
     AssignOrDeferFormulation,
     AssignOrDeferModel,
 )
-from .policy import ObjectiveMetric, deferred_offload_policy
+from .policy import (
+    ObjectiveAggregation,
+    ObjectiveMetric,
+    OptimizationDirection,
+    deferred_offload_policy,
+)
 from .state import OptimizerSolveState, SolveTraceContext, SolveTracePhase
 
 try:
@@ -83,6 +94,7 @@ class DeferredOffloadOptimizer(BinaryOffloadOptimizer):
         model = prepared.model
         assert isinstance(formulation, AssignOrDeferFormulation)
         assert isinstance(model, AssignOrDeferModel)
+        self._validate_policy_encoding(problem.policy)
 
         cp = cp_model.CpModel()
         assignment_vars = {
@@ -114,7 +126,41 @@ class DeferredOffloadOptimizer(BinaryOffloadOptimizer):
         utilization_scale = 10_000
         objective_scale = 1_000_000
         u_max = cp.new_int_var(0, utilization_scale, "maximum_utilization")
+        cp.add(
+            u_max
+            >= round(
+                maximum_resource_utilization(problem) * utilization_scale
+            )
+        )
         now_ms = problem.epoch.now_ms
+        for options in model.candidate_options:
+            for candidate in options:
+                compute_start_ms = max(
+                    candidate.ready_time_ms,
+                    candidate.finish_ms - candidate.compute_ms,
+                )
+                candidate_peak = maximum_resource_utilization(
+                    problem,
+                    (
+                        PlannedResourceReservation(
+                            reservation_id=(
+                                "deferred-candidate-utilization:"
+                                f"{candidate.task_id}:{candidate.node_id}"
+                            ),
+                            epoch_id=problem.epoch.epoch_id,
+                            task_id=candidate.task_id,
+                            node_id=candidate.node_id,
+                            start_ms=compute_start_ms,
+                            finish_ms=candidate.finish_ms,
+                            demand=candidate.resource_demand,
+                        ),
+                    ),
+                )
+                cp.add(
+                    u_max
+                    >= round(candidate_peak * utilization_scale)
+                    * assignment_vars[candidate.task_id, candidate.node_id]
+                )
         for node in problem.node_specs:
             candidates = tuple(
                 candidate
@@ -173,13 +219,22 @@ class DeferredOffloadOptimizer(BinaryOffloadOptimizer):
         }
         total_priority = max(
             1.0,
-            sum(max(0.0, float(task.priority)) for task in problem.epoch.ready_tasks),
+            sum(
+                problem.chain_priority_weights.get(
+                    task.task_id,
+                    float(2 ** task.priority),
+                )
+                for task in problem.epoch.ready_tasks
+            ),
         )
         total_budget = max(
             1.0,
             sum(max(1.0, task.spec.latency_budget_ms) for task in problem.epoch.ready_tasks),
         )
-        success_weight = weights.get(ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO, 0.0)
+        success_weight = weights.get(
+            ObjectiveMetric.EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO,
+            0.0,
+        )
         communication_weight = weights.get(ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO, 0.0)
         utilization_weight = weights.get(ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION, 0.0)
         deferred_weight = weights.get(ObjectiveMetric.DEFERRED_PRIORITY_PENALTY, 0.0)
@@ -191,7 +246,10 @@ class DeferredOffloadOptimizer(BinaryOffloadOptimizer):
                 task = task_by_id[candidate.task_id]
                 coefficient = (
                     -success_weight
-                    * max(0.0, float(task.priority))
+                    * problem.chain_priority_weights.get(
+                        task.task_id,
+                        float(2 ** task.priority),
+                    )
                     * candidate.success_probability
                     / total_priority
                     + communication_weight
@@ -252,6 +310,26 @@ class DeferredOffloadOptimizer(BinaryOffloadOptimizer):
             iteration_count=int(solver.num_branches),
         )
         evaluation = formulation.evaluate(problem, model, draft)
+        if evaluation.has_hard_violation:
+            raise FormulationCompatibilityError(
+                "deferred_offload CP-SAT result violates a hard policy constraint"
+            )
+        cp_objective = solver.objective_value / objective_scale
+        platform_objective = (
+            evaluation.objective_key[0] if evaluation.objective_key else 0.0
+        )
+        if not math.isclose(
+            cp_objective,
+            platform_objective,
+            rel_tol=0.0,
+            abs_tol=1e-3,
+        ):
+            raise FormulationCompatibilityError(
+                "deferred_offload CP-SAT objective does not match the shared "
+                f"policy evaluation: {cp_objective} != {platform_objective}; "
+                "components="
+                f"{ {item.metric.value: item.raw_value for item in evaluation.objective_evaluations} }"
+            )
         solve_status = (
             SolveStatus.OPTIMAL
             if status == cp_model.OPTIMAL
@@ -263,12 +341,12 @@ class DeferredOffloadOptimizer(BinaryOffloadOptimizer):
             solve_status=solve_status,
             solve_elapsed_ms=elapsed_ms,
             termination_reason=solver.status_name(status),
-            objective_value=(evaluation.objective_key[0] if evaluation.objective_key else 0.0),
+            objective_value=platform_objective,
             objective_key=evaluation.objective_key,
             objective_evaluations=evaluation.objective_evaluations,
             constraint_evaluations=evaluation.constraint_evaluations,
             diagnostics={
-                "cp_sat_objective": solver.objective_value / objective_scale,
+                "cp_sat_objective": cp_objective,
                 "deferred_task_count": len(materialized.deferred_task_ids),
             },
         )
@@ -301,6 +379,52 @@ class DeferredOffloadOptimizer(BinaryOffloadOptimizer):
             },
         )
         return final
+
+    @staticmethod
+    def _validate_policy_encoding(policy) -> None:
+        supported_directions = {
+            ObjectiveMetric.EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO: (
+                OptimizationDirection.MAXIMIZE
+            ),
+            ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO: (
+                OptimizationDirection.MINIMIZE
+            ),
+            ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION: (
+                OptimizationDirection.MINIMIZE
+            ),
+            ObjectiveMetric.DEFERRED_PRIORITY_PENALTY: (
+                OptimizationDirection.MINIMIZE
+            ),
+        }
+        if policy.objective_aggregation is not ObjectiveAggregation.WEIGHTED_SUM:
+            raise FormulationCompatibilityError(
+                "deferred_offload CP-SAT supports only weighted-sum policies"
+            )
+        metrics = tuple(item.metric for item in policy.objectives)
+        if len(metrics) != len(set(metrics)):
+            raise FormulationCompatibilityError(
+                "deferred_offload CP-SAT requires unique objective metrics"
+            )
+        for objective in policy.objectives:
+            expected_direction = supported_directions.get(objective.metric)
+            if expected_direction is None:
+                raise FormulationCompatibilityError(
+                    "deferred_offload CP-SAT does not encode objective metric "
+                    f"{objective.metric.value!r}"
+                )
+            if objective.direction is not expected_direction:
+                raise FormulationCompatibilityError(
+                    "deferred_offload CP-SAT does not encode direction "
+                    f"{objective.direction.value!r} for {objective.metric.value!r}"
+                )
+            if objective.normalization_scale != 1.0:
+                raise FormulationCompatibilityError(
+                    "deferred_offload CP-SAT requires objective normalization_scale=1"
+                )
+        if policy.constraints:
+            raise FormulationCompatibilityError(
+                "deferred_offload CP-SAT does not encode policy constraints"
+            )
 
     def _validate_prepared(self, prepared: PreparedSolve) -> None:
         if not isinstance(prepared.model, AssignOrDeferModel):

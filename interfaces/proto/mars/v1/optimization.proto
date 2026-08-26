@@ -54,6 +54,11 @@ message CriticalTailEstimate {
   double critical_tail_ms = 2;
 }
 
+message ChainPriorityWeight {
+  string task_id = 1;
+  double weight = 2;
+}
+
 // Immutable facts captured for one optimization run. This message does not
 // contain scheduling intent or solver configuration.
 message SchedulingSnapshot {
@@ -75,6 +80,7 @@ message SchedulingSnapshot {
 
   // Identifies the profiling snapshot used to derive candidate estimates.
   string profile_snapshot_id = 16;
+  repeated ChainPriorityWeight chain_priority_weights = 17;
 }
 
 enum ObjectiveMetric {
@@ -95,6 +101,7 @@ enum ObjectiveMetric {
   OBJECTIVE_METRIC_NORMALIZED_COMMUNICATION_RATIO = 14;
   OBJECTIVE_METRIC_MAXIMUM_RESOURCE_UTILIZATION = 15;
   OBJECTIVE_METRIC_DEFERRED_PRIORITY_PENALTY = 16;
+  OBJECTIVE_METRIC_EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO = 17;
 }
 
 enum OptimizationDirection {

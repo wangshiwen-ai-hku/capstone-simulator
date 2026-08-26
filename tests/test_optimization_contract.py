@@ -212,6 +212,9 @@ def test_builtin_metric_registry_is_complete_and_immutable() -> None:
         ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO: (
             "OBJECTIVE_METRIC_EXPECTED_WEIGHTED_SUCCESS_RATIO"
         ),
+        ObjectiveMetric.EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO: (
+            "OBJECTIVE_METRIC_EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO"
+        ),
         ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO: (
             "OBJECTIVE_METRIC_NORMALIZED_COMMUNICATION_RATIO"
         ),
@@ -224,7 +227,7 @@ def test_builtin_metric_registry_is_complete_and_immutable() -> None:
     }
 
     assert set(BUILTIN_METRICS) == set(ObjectiveMetric)
-    assert len(BUILTIN_METRICS) == 16
+    assert len(BUILTIN_METRICS) == 17
     assert {
         metric: definition.proto_enum_name
         for metric, definition in BUILTIN_METRICS.items()
@@ -289,6 +292,7 @@ def test_builtin_metric_registry_preserves_raw_metric_semantics() -> None:
             ObjectiveMetric.PLACEMENT_PREFERENCE_PENALTY: 0.0,
             ObjectiveMetric.RULE_MISMATCH_COUNT: 0.0,
             ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO: 1.0,
+            ObjectiveMetric.EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO: 1.0,
             ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO: 0.0,
             ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION: 0.125,
             ObjectiveMetric.DEFERRED_PRIORITY_PENALTY: 0.0,
@@ -322,6 +326,7 @@ def test_builtin_metric_registry_preserves_raw_metric_semantics() -> None:
             ObjectiveMetric.PLACEMENT_PREFERENCE_PENALTY: 1.0,
             ObjectiveMetric.RULE_MISMATCH_COUNT: 1.0,
             ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO: 1.0,
+            ObjectiveMetric.EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO: 1.0,
             ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO: 0.0,
             ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION: 0.5,
         }
@@ -531,6 +536,8 @@ def test_snapshot_maps_and_nested_candidate_sequences_are_immutable() -> None:
         problem.link_available_ms["missing"] = 99  # type: ignore[index]
     with pytest.raises(TypeError):
         problem.critical_tail_ms["perception"] = 99  # type: ignore[index]
+    with pytest.raises(TypeError):
+        problem.chain_priority_weights["perception"] = 99  # type: ignore[index]
     with pytest.raises(TypeError):
         problem.candidates["perception"][0] = (  # type: ignore[index]
             problem.candidates["perception"][0]

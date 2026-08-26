@@ -51,7 +51,11 @@ from .runtime import (
     RuntimeInventory,
     RuntimePort,
 )
-from .scheduler import critical_path, plan_scheduling_epoch
+from .scheduler import (
+    chain_priority_weights,
+    critical_path,
+    plan_scheduling_epoch,
+)
 from .synthetic_workloads import (
     SyntheticWorkloadCatalog,
     load_default_synthetic_workloads,
@@ -324,6 +328,7 @@ class CentralCoordinator:
             workflow.tasks,
             index,
         )
+        chain_weights = chain_priority_weights(workflow.tasks, index)
         if self._configured_link_specs is None:
             resolved_link_specs, resolved_link_snapshots = (
                 synthesize_legacy_full_mesh(
@@ -473,6 +478,10 @@ class CentralCoordinator:
                 existing_node_reservations=carry_in,
                 critical_tail_ms={
                     task.task_id: critical_tail[task.task_id]
+                    for task in tasks
+                },
+                chain_priority_weights={
+                    task.task_id: chain_weights[task.task_id]
                     for task in tasks
                 },
                 profiles=profiles,

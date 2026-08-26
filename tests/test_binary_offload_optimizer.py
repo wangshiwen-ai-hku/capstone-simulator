@@ -26,6 +26,9 @@ from mars.optimizers import (
     CandidateEstimate,
     HeuristicOptimizer,
     ObjectiveMetric,
+    ObjectiveAggregation,
+    ObjectiveSpec,
+    OptimizationDirection,
     OptimizerRegistry,
     OptimizerSolveState,
     PlanValidationError,
@@ -33,6 +36,7 @@ from mars.optimizers import (
     ResourceDemand,
     SchedulingEpoch,
     SchedulingProblem,
+    SchedulingPolicy,
     SchedulingSnapshot,
     SolveLimits,
     SolveStatus,
@@ -383,6 +387,12 @@ def test_deferred_offload_is_builtin_and_uses_assign_or_defer() -> None:
     assert ObjectiveMetric.DEFERRED_PRIORITY_PENALTY in {
         item.metric for item in plan.objective_evaluations
     }
+    assert ObjectiveMetric.EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO in {
+        item.metric for item in plan.objective_evaluations
+    }
+    assert ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO not in {
+        item.metric for item in plan.objective_evaluations
+    }
 
 
 def test_deferred_offload_can_choose_explicit_deferral() -> None:
@@ -400,6 +410,26 @@ def test_deferred_offload_can_choose_explicit_deferral() -> None:
     assert set(plan.deferred_task_ids) == {
         task.task_id for task in problem.epoch.ready_tasks
     }
+
+
+def test_deferred_offload_rejects_unencoded_policy_metric() -> None:
+    optimizer = DeferredOffloadOptimizer()
+    unsupported = SchedulingPolicy(
+        policy_id="unsupported_deferred_metric",
+        version="1",
+        objectives=(
+            ObjectiveSpec(
+                objective_id="energy",
+                metric=ObjectiveMetric.TOTAL_ENERGY_J,
+                direction=OptimizationDirection.MINIMIZE,
+            ),
+        ),
+        objective_aggregation=ObjectiveAggregation.WEIGHTED_SUM,
+    )
+    problem = _with_policy(_problem(), unsupported)
+
+    with pytest.raises(ValueError, match="does not encode objective metric"):
+        optimizer.solve(problem)
 
 
 def test_binary_offload_is_builtin_and_selects_its_configured_policy() -> None:

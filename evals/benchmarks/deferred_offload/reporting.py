@@ -8,9 +8,8 @@ from pathlib import Path
 from statistics import mean, stdev
 
 from evals.benchmarks.binary_offload.reporting import SUMMARY_METRICS
-from evals.benchmarks.binary_offload.spec import SCENARIOS
-
-from .runner import DEFERRED_METHODS, DeferredBenchmarkResults
+from .runner import DeferredBenchmarkResults
+from .spec import DEFERRED_METHODS, DEFERRED_SCENARIOS
 
 
 ARTIFACT_FILENAMES = (
@@ -34,7 +33,7 @@ def summarize_results(
     rows: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     summaries: list[dict[str, object]] = []
-    for scenario in SCENARIOS:
+    for scenario in DEFERRED_SCENARIOS:
         for optimizer, policy, _ in DEFERRED_METHODS:
             method = optimizer if policy is None else policy
             selected = [
@@ -43,38 +42,22 @@ def summarize_results(
                 if row["scenario"] == scenario["id"]
                 and row["method"] == method
             ]
-            succeeded = [
-                row
-                for row in selected
-                if row.get("case_status") == "succeeded"
-            ]
             summary: dict[str, object] = {
                 "scenario": scenario["id"],
                 "method": method,
-                "runs_attempted": len(selected),
-                "runs_succeeded": len(succeeded),
-                "runs_failed": len(selected) - len(succeeded),
+                "runs": len(selected),
             }
             for metric in DEFERRED_SUMMARY_METRICS:
-                values = [float(row[metric]) for row in succeeded]
-                summary[f"{metric}_mean"] = (
-                    round(mean(values), 6) if values else ""
-                )
-                summary[f"{metric}_std"] = (
-                    round(stdev(values), 6)
-                    if len(values) > 1
-                    else 0.0
-                    if values
-                    else ""
-                )
+                values = [float(row[metric]) for row in selected]
+                summary[f"{metric}_mean"] = round(mean(values), 6)
+                summary[f"{metric}_std"] = round(stdev(values), 6)
             summaries.append(summary)
     return summaries
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
-    fieldnames = list(dict.fromkeys(key for row in rows for key in row))
     with path.open("w", encoding="utf-8-sig", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
 

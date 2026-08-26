@@ -37,6 +37,9 @@ class ObjectiveMetric(str, enum.Enum):
     EXPECTED_WEIGHTED_SUCCESS_RATIO = (
         "expected_weighted_success_ratio"
     )
+    EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO = (
+        "expected_chain_weighted_success_ratio"
+    )
     NORMALIZED_COMMUNICATION_RATIO = (
         "normalized_communication_ratio"
     )
@@ -307,7 +310,22 @@ def deferred_offload_policy(
         policy_id="deferred_offload",
         version="1",
         objectives=(
-            *base.objectives,
+            *(
+                ObjectiveSpec(
+                    objective_id=(
+                        ObjectiveMetric.EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO.value
+                    ),
+                    metric=ObjectiveMetric.EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO,
+                    direction=item.direction,
+                    weight=item.weight,
+                    normalization_scale=item.normalization_scale,
+                    priority_order=item.priority_order,
+                )
+                if item.metric
+                is ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO
+                else item
+                for item in base.objectives
+            ),
             ObjectiveSpec(
                 objective_id=ObjectiveMetric.DEFERRED_PRIORITY_PENALTY.value,
                 metric=ObjectiveMetric.DEFERRED_PRIORITY_PENALTY,

@@ -293,6 +293,7 @@ def build_scheduling_problem(
         PlannedResourceReservation
     ] = (),
     critical_tail_ms: Mapping[str, float] | None = None,
+    chain_priority_weights: Mapping[str, float] | None = None,
     profiles: ProfileCatalog | None = None,
     excluded_node_ids: Mapping[str, frozenset[str]] | None = None,
     policy: str | SchedulingPolicy | None = None,
@@ -409,6 +410,13 @@ def build_scheduling_problem(
         )
         for task in epoch.ready_tasks
     }
+    resolved_chain_priority_weights = {
+        task.task_id: (chain_priority_weights or {}).get(
+            task.task_id,
+            2 ** task.priority,
+        )
+        for task in epoch.ready_tasks
+    }
     snapshot_digest = _contract_digest(
         {
             "schema_version": "mars.scheduling-snapshot.v1",
@@ -426,6 +434,7 @@ def build_scheduling_problem(
                 resolved_existing_reservations
             ),
             "critical_tail_ms": resolved_critical_tail,
+            "chain_priority_weights": resolved_chain_priority_weights,
         }
     )
     snapshot_id = f"{epoch.epoch_id}:snapshot:{snapshot_digest}"
@@ -444,6 +453,7 @@ def build_scheduling_problem(
         link_available_ms=resolved_link_available,
         existing_node_reservations=resolved_existing_reservations,
         critical_tail_ms=resolved_critical_tail,
+        chain_priority_weights=resolved_chain_priority_weights,
     )
     problem_digest = _contract_digest(
         {
@@ -482,6 +492,7 @@ def plan_scheduling_epoch(
         PlannedResourceReservation
     ] = (),
     critical_tail_ms: Mapping[str, float] | None = None,
+    chain_priority_weights: Mapping[str, float] | None = None,
     profiles: ProfileCatalog | None = None,
     excluded_node_ids: Mapping[str, frozenset[str]] | None = None,
     policy: str | SchedulingPolicy | None = None,
@@ -532,6 +543,7 @@ def plan_scheduling_epoch(
         link_available_ms=link_available_ms,
         existing_node_reservations=existing_node_reservations,
         critical_tail_ms=critical_tail_ms,
+        chain_priority_weights=chain_priority_weights,
         profiles=profiles,
         excluded_node_ids=excluded_node_ids,
         policy=resolved_policy,
@@ -824,6 +836,31 @@ def critical_path(
     # Candidate scoring uses successor cost and excludes the task's own cost.
     critical_tail = {task_id: tail[task_id] - own_cost[task_id] for task_id in tail}
     return tuple(path), tail[root], critical_tail
+
+
+def chain_priority_weights(
+    tasks: Iterable[TaskInstance],
+    index: DagIndex,
+) -> dict[str, float]:
+    """Return each task's exponential priority plus all unique descendants."""
+
+    task_by_id = {task.task_id: task for task in tasks}
+    descendants: dict[str, set[str]] = {}
+    for task_id in reversed(index.topological_order):
+        reachable: set[str] = set()
+        for child in index.children[task_id]:
+            reachable.add(child)
+            reachable.update(descendants[child])
+        descendants[task_id] = reachable
+    return {
+        task_id: float(
+            sum(
+                2 ** task_by_id[member].priority
+                for member in {task_id, *descendants[task_id]}
+            )
+        )
+        for task_id in index.topological_order
+    }
 
 
 def apply_load(node: NodeSnapshot, task: TaskInstance) -> NodeSnapshot:

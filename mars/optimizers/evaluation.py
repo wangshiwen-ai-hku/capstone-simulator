@@ -329,6 +329,20 @@ def _task_priority_weights(
     return weights, max(1.0, total)
 
 
+def _task_chain_priority_weights(
+    problem: SchedulingProblem,
+) -> tuple[dict[str, float], float]:
+    weights = {
+        task.task_id: problem.chain_priority_weights.get(
+            task.task_id,
+            float(2 ** task.priority),
+        )
+        for task in problem.epoch.ready_tasks
+    }
+    total = sum(weights.values())
+    return weights, max(1.0, total)
+
+
 def normalized_communication_ratio(
     communication_ms: float,
     latency_budget_ms: float,
@@ -345,6 +359,23 @@ def expected_weighted_success_ratio(
     """Return priority-weighted nominal success over all ready tasks."""
 
     weights, total_weight = _task_priority_weights(problem)
+    return (
+        sum(
+            weights[item.task_id] * item.success_probability
+            for item in assignments
+            if item.execution_mode is not ExecutionMode.DROP
+        )
+        / total_weight
+    )
+
+
+def expected_chain_weighted_success_ratio(
+    problem: SchedulingProblem,
+    assignments: tuple[Assignment, ...],
+) -> float:
+    """Return chain-priority-weighted nominal success over ready tasks."""
+
+    weights, total_weight = _task_chain_priority_weights(problem)
     return (
         sum(
             weights[item.task_id] * item.success_probability
@@ -543,6 +574,15 @@ def _candidate_expected_weighted_success_ratio(
     return weights[task_id] * candidate.success_probability / total_weight
 
 
+def _candidate_expected_chain_weighted_success_ratio(
+    problem: SchedulingProblem,
+    task_id: str,
+    candidate: CandidateEstimate,
+) -> float:
+    weights, total_weight = _task_chain_priority_weights(problem)
+    return weights[task_id] * candidate.success_probability / total_weight
+
+
 def _candidate_normalized_communication_ratio(
     problem: SchedulingProblem,
     task_id: str,
@@ -736,6 +776,16 @@ def _plan_expected_weighted_success_ratio(
     )
 
 
+def _plan_expected_chain_weighted_success_ratio(
+    problem: SchedulingProblem,
+    plan: SchedulingPlan,
+) -> float:
+    return expected_chain_weighted_success_ratio(
+        problem,
+        _non_drop_assignments(plan),
+    )
+
+
 def _plan_normalized_communication_ratio_metric(
     problem: SchedulingProblem,
     plan: SchedulingPlan,
@@ -899,6 +949,18 @@ BUILTIN_METRICS: Mapping[ObjectiveMetric, MetricDefinition] = MappingProxyType(
             candidate_proxy=(_candidate_expected_weighted_success_ratio),
             candidate_fidelity=CandidateFidelity.EXACT,
             proto_enum_name=("OBJECTIVE_METRIC_EXPECTED_WEIGHTED_SUCCESS_RATIO"),
+        ),
+        ObjectiveMetric.EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO: MetricDefinition(
+            metric=ObjectiveMetric.EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO,
+            semantics_version="1",
+            unit="ratio",
+            scope=MetricScope.ASSIGNMENT_ADDITIVE,
+            evaluate_plan=_plan_expected_chain_weighted_success_ratio,
+            candidate_proxy=(_candidate_expected_chain_weighted_success_ratio),
+            candidate_fidelity=CandidateFidelity.EXACT,
+            proto_enum_name=(
+                "OBJECTIVE_METRIC_EXPECTED_CHAIN_WEIGHTED_SUCCESS_RATIO"
+            ),
         ),
         ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO: MetricDefinition(
             metric=ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO,
