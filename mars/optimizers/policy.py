@@ -162,7 +162,11 @@ class SchedulingPolicy:
 class SolveLimits:
     """Generic solve controls; optimizer-specific tuning stays in the solver."""
 
-    solve_budget_ms: float = 50.0
+    # The generated 3-robot/2-edge workload can require ~75 ms per epoch on
+    # hosted Linux runners once physical-core/TOPS demands remain authoritative.
+    # Keep the default bounded while leaving enough headroom for that supported
+    # scene on modest production hardware.
+    solve_budget_ms: float = 100.0
     max_iterations: int = 0
     deterministic: bool = True
     random_seed: int = 0

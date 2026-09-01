@@ -205,7 +205,7 @@ def test_engine_preserves_free_capacity_across_scheduling_epochs() -> None:
     assert scheduling["deterministic"] is True
     assert scheduling["execution_seed"] == 7
     assert scheduling["solve_limits"] == {
-        "solve_budget_ms": 50.0,
+        "solve_budget_ms": 100.0,
         "max_iterations": 0,
         "deterministic": True,
         "random_seed": 7,

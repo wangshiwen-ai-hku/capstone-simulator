@@ -327,12 +327,10 @@ def build_scheduling_problem(
     resolved_solve_limits = (
         solve_limits
         if solve_limits is not None
-        else SolveLimits(
-            solve_budget_ms=(
-                50.0
-                if solve_budget_ms is None
-                else solve_budget_ms
-            )
+        else (
+            SolveLimits()
+            if solve_budget_ms is None
+            else SolveLimits(solve_budget_ms=solve_budget_ms)
         )
     )
     resolved_metric_contract_id = metric_contract_id(resolved_policy)
