@@ -27,10 +27,10 @@ def task_resource_demand(
     """Return the canonical CPU, GPU, and memory reservation for a task."""
 
     return (
-        min(
-            node.cpu_capacity,
-            max(0.05, task.spec.compute_demand * 0.15),
-        ),
+        # ``compute_demand`` is expressed in physical CPU cores. Do not scale
+        # or clamp it to the target capacity: candidate generation must be
+        # able to reject a four-core task on a one-core node.
+        task.spec.compute_demand,
         max(0.0, task.spec.gpu_demand),
         min(
             node.memory_gb,

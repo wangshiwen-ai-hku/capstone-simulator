@@ -1,8 +1,10 @@
 from dataclasses import asdict
 import logging
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 
 from mars import __version__ as mars_version
 from mars.domain.task import TASK_CLASS_LABELS, TaskClass
@@ -35,7 +37,7 @@ from .schemas import (
     RuntimeWorkflowRequest,
     SimulateRequest,
 )
-from .template_store import TemplateStore
+from .template_store import TemplateStore, validate_workspace_token
 from .simulation import run_simulation_with_artifact
 from .trace_archive import begin_session, log_startup_banner, trace_status
 
@@ -45,6 +47,9 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+TEMPLATE_WORKSPACE_HEADER = "X-MARS-Workspace-Token"
+TEMPLATE_API_PATH = "/api/templates"
 
 settings = get_settings()
 agent_service = MarsAgentService(settings)
@@ -70,11 +75,58 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def protect_template_workspace_responses(request: Request, call_next):
+    """Prevent capability-scoped template responses from being shared."""
+
+    response = await call_next(request)
+    if (
+        request.url.path == TEMPLATE_API_PATH
+        or request.url.path.startswith(f"{TEMPLATE_API_PATH}/")
+    ):
+        response.headers["Cache-Control"] = "private, no-store"
+        vary = response.headers.get("Vary", "")
+        vary_fields = {
+            field.strip().lower()
+            for field in vary.split(",")
+            if field.strip()
+        }
+        if TEMPLATE_WORKSPACE_HEADER.lower() not in vary_fields:
+            response.headers["Vary"] = ", ".join(
+                filter(None, (vary, TEMPLATE_WORKSPACE_HEADER))
+            )
+    return response
+
+
 def _validate_scene_request(scene: BenchmarkScene):
     try:
         return validate_scene(scene)
     except SceneValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+_template_workspace_capability = APIKeyHeader(
+    name=TEMPLATE_WORKSPACE_HEADER,
+    auto_error=False,
+)
+
+
+def _require_template_workspace(
+    workspace_token: Annotated[
+        str | None,
+        Security(_template_workspace_capability),
+    ],
+) -> str:
+    try:
+        return validate_workspace_token(workspace_token or "")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="a valid template workspace capability is required",
+        ) from exc
+
+
+TemplateWorkspace = Annotated[str, Depends(_require_template_workspace)]
 
 
 @app.get("/api/health")
@@ -137,28 +189,31 @@ def agent_chat(request: AgentChatRequest):
 
 
 @app.get("/api/templates", response_model=BenchmarkTemplateList)
-def list_templates():
-    return BenchmarkTemplateList(templates=template_store.list())
+def list_templates(workspace_token: TemplateWorkspace):
+    return BenchmarkTemplateList(templates=template_store.list(workspace_token))
 
 
 @app.post("/api/templates", response_model=BenchmarkTemplate, status_code=201)
-def create_template(request: BenchmarkTemplateCreate):
+def create_template(
+    request: BenchmarkTemplateCreate,
+    workspace_token: TemplateWorkspace,
+):
     _validate_scene_request(request.scene)
-    return template_store.create(request)
+    return template_store.create(workspace_token, request)
 
 
 @app.get("/api/templates/{template_id}", response_model=BenchmarkTemplate)
-def get_template(template_id: str):
+def get_template(template_id: str, workspace_token: TemplateWorkspace):
     try:
-        return template_store.get(template_id)
+        return template_store.get(workspace_token, template_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="template not found") from exc
 
 
 @app.delete("/api/templates/{template_id}", status_code=204)
-def delete_template(template_id: str):
+def delete_template(template_id: str, workspace_token: TemplateWorkspace):
     try:
-        template_store.delete(template_id)
+        template_store.delete(workspace_token, template_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="template not found") from exc
 

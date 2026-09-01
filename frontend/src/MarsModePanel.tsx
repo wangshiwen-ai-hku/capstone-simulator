@@ -52,7 +52,7 @@ export default function MarsModePanel({
 }: Props) {
   const [threadId, setThreadId] = useState<string>();
   const [model, setModel] = useState<MarsAgentModel>('gemini-3.1-flash-lite');
-  const [webSearch, setWebSearch] = useState(true);
+  const [webSearch, setWebSearch] = useState(false);
   const [input, setInput] = useState('');
   const [turns, setTurns] = useState<ChatTurn[]>([{
     role: 'agent',
@@ -205,9 +205,9 @@ export default function MarsModePanel({
             <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (recommended)</option>
             <option value="deepseek-v4-flash">deepseek-v4-flash</option>
           </select>
-          <label>
+          <label title="When enabled, MARS sends generic workflow keywords to arXiv and includes the results in planning.">
             <input type="checkbox" checked={webSearch} onChange={(event) => setWebSearch(event.target.checked)} />
-            <Globe2 size={12} /> Retrieval
+            <Globe2 size={12} /> Retrieval via arXiv
           </label>
         </div>
         <div className="agent-phase" aria-label="Agent modelling phase">

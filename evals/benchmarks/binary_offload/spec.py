@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from evals.workflow import WorkflowEvaluationWeights
-from backend.app.schemas import BenchmarkScene
+from backend.app.schemas import BenchmarkScene, RESOURCE_CONTRACT_VERSION
 from mars.domain.task import TaskClass
 from mars.optimizers.policy import SolveLimits
 
@@ -366,6 +366,7 @@ def build_scene(
                 created[task_type] = task_id
     return BenchmarkScene(
         id=str(scenario["id"]),
+        resource_contract_version=RESOURCE_CONTRACT_VERSION,
         title=str(scenario["name"]),
         natural_language_description=str(scenario["description"]),
         scenario_type=str(scenario["id"]),
@@ -414,15 +415,14 @@ def profile_summary(catalog) -> list[dict[str, object]]:
     )
     for task_type in used:
         workload = catalog.get(task_type)
+        task_spec = workload.to_task_spec()
         targets = {}
         for target in ("orin", "edge"):
             profile = workload.profile_for(target)
             targets[target] = {
                 "supported": profile.supported,
                 "latency_ms": asdict(profile.latency),
-                "cpu_units": profile.resources.cpu_cores,
-                "gpu_units": profile.resources.gpu_units,
-                "memory_mb": profile.resources.memory_mb,
+                "peak_memory_mb": profile.resources.memory_mb,
                 "input_size_mb": asdict(profile.input_size_mb),
                 "output_size_mb": asdict(profile.output_size_mb),
                 "energy_j": asdict(profile.energy_j),
@@ -433,6 +433,12 @@ def profile_summary(catalog) -> list[dict[str, object]]:
         result.append(
             {
                 "task_type": task_type,
+                "declared_resource_demand": {
+                    "cpu_cores": task_spec.compute_demand,
+                    "accelerator_sparse_int8_tops": (
+                        workload.accelerator_demand_tops
+                    ),
+                },
                 "experiment_model_assumption": model_names[task_type],
                 "provenance": "synthetic_placeholder_not_measured",
                 "targets": targets,
@@ -445,7 +451,21 @@ def build_benchmark_manifest(catalog) -> dict[str, object]:
     """Build the stable metadata document written as ``benchmark.json``."""
 
     return {
-        "schema_version": "mars.binary-offload-benchmark.v2",
+        "schema_version": "mars.binary-offload-benchmark.v3",
+        "resource_contract": {
+            "version": RESOURCE_CONTRACT_VERSION,
+            "cpu_capacity_and_demand": "physical_cores",
+            "accelerator_capacity_and_demand": "sparse_int8_tops",
+            "task_cpu_and_accelerator_demands_are_authoritative": True,
+            "target_profiles_supply": [
+                "latency",
+                "energy",
+                "peak_memory",
+                "output_size",
+                "failure_rate",
+                "accuracy",
+            ],
+        },
         "formal_experiment": FORMAL_EXPERIMENT,
         "formal_experiment_seeds": list(SEEDS),
         "provenance": "synthetic_placeholder_not_hardware_measurement",

@@ -185,6 +185,7 @@ export interface DataEdgeSpec {
 
 export interface BenchmarkScene {
   id: string;
+  resource_contract_version: 'mars.resources.absolute.v1';
   title: string;
   natural_language_description: string;
   scenario_type: string;

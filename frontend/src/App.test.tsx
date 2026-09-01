@@ -14,6 +14,7 @@ import type { BenchmarkScene, SchedulingAlgorithmCapability } from './types';
 
 const { scene } = vi.hoisted(() => ({ scene: {
   id: 'scene-test',
+  resource_contract_version: 'mars.resources.absolute.v1',
   title: 'Warehouse test scene',
   natural_language_description: 'A minimal scheduler UI fixture.',
   scenario_type: 'warehouse',

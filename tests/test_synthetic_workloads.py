@@ -9,6 +9,7 @@ from mars.synthetic_workloads import (
     SyntheticWorkloadCatalog,
     UnsupportedTargetError,
     load_default_synthetic_workloads,
+    workload_from_dict,
 )
 
 
@@ -119,6 +120,13 @@ class SyntheticCatalogTests(unittest.TestCase):
         self.assertEqual(component.execute_sample().task_type, "custom_inspector")
         with self.assertRaisesRegex(ValueError, "already registered"):
             catalog.register_dict(custom_workload())
+
+    def test_custom_workload_requires_explicit_absolute_accelerator_demand(self):
+        payload = custom_workload()
+        payload.pop("accelerator_demand_tops")
+
+        with self.assertRaisesRegex(KeyError, "accelerator_demand_tops"):
+            workload_from_dict(payload)
 
     def test_workload_can_create_scheduler_task_spec(self):
         workload = self.catalog.get("local_llm_7b")

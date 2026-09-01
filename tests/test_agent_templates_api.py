@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import certifi
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -72,6 +73,8 @@ def test_agent_structures_natural_language_as_studio_scene():
 
 def test_template_save_list_get_and_delete_round_trip():
     client = TestClient(api_main.app)
+    owner_headers = {"X-MARS-Workspace-Token": "a" * 64}
+    other_headers = {"X-MARS-Workspace-Token": "b" * 64}
     scene = client.post(
         "/api/generate-scene",
         json={"robot_count": 2, "edge_count": 1, "use_llm": False},
@@ -84,6 +87,7 @@ def test_template_save_list_get_and_delete_round_trip():
     ):
         created = client.post(
             "/api/templates",
+            headers=owner_headers,
             json={
                 "name": "Two robot pickup benchmark",
                 "description": "Arrival-time scheduling regression.",
@@ -92,16 +96,73 @@ def test_template_save_list_get_and_delete_round_trip():
             },
         )
         assert created.status_code == 201
+        assert created.headers["Cache-Control"] == "private, no-store"
+        assert "x-mars-workspace-token" in created.headers["Vary"].lower()
         template = created.json()
         assert template["schema_version"] == "mars.benchmark.template.v1"
         assert template["tags"] == ["pickup", "scheduling"]
 
-        listed = client.get("/api/templates").json()["templates"]
+        # A fresh store instance models a process restart over the same disk.
+        api_main.template_store = TemplateStore(directory)
+        listed_response = client.get("/api/templates", headers=owner_headers)
+        assert listed_response.headers["Cache-Control"] == "private, no-store"
+        assert (
+            "x-mars-workspace-token"
+            in listed_response.headers["Vary"].lower()
+        )
+        listed = listed_response.json()["templates"]
         assert [item["id"] for item in listed] == [template["id"]]
-        fetched = client.get(f"/api/templates/{template['id']}")
+        assert client.get("/api/templates", headers=other_headers).json() == {
+            "templates": []
+        }
+        assert client.get(
+            f"/api/templates/{template['id']}",
+            headers=other_headers,
+        ).status_code == 404
+        assert client.delete(
+            f"/api/templates/{template['id']}",
+            headers=other_headers,
+        ).status_code == 404
+
+        fetched = client.get(
+            f"/api/templates/{template['id']}",
+            headers=owner_headers,
+        )
         assert fetched.json()["scene"] == scene
-        assert client.delete(f"/api/templates/{template['id']}").status_code == 204
-        assert client.get(f"/api/templates/{template['id']}").status_code == 404
+        assert client.delete(
+            f"/api/templates/{template['id']}",
+            headers=owner_headers,
+        ).status_code == 204
+        assert client.get(
+            f"/api/templates/{template['id']}",
+            headers=owner_headers,
+        ).status_code == 404
+
+
+def test_template_workspace_capability_is_required_and_rejects_traversal():
+    client = TestClient(api_main.app)
+    with TemporaryDirectory() as directory, patch.object(
+        api_main,
+        "template_store",
+        TemplateStore(directory),
+    ):
+        missing_capability = client.get("/api/templates")
+        invalid_capability = client.get(
+            "/api/templates",
+            headers={"X-MARS-Workspace-Token": "../../other-workspace"},
+        )
+        assert missing_capability.status_code == 401
+        assert invalid_capability.status_code == 401
+        for response in (missing_capability, invalid_capability):
+            assert response.headers["Cache-Control"] == "private, no-store"
+            assert (
+                "x-mars-workspace-token"
+                in response.headers["Vary"].lower()
+            )
+        assert not list(TemplateStore(directory).directory.iterdir())
+
+        with pytest.raises(ValueError, match="invalid template workspace token"):
+            TemplateStore(directory).list("../../other-workspace")
 
 
 def test_agent_uses_one_bounded_model_turn_then_compiles_confirmed_plan():

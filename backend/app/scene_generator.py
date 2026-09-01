@@ -18,6 +18,7 @@ from .schemas import (
     NodeSpec,
     PlacementConstraintsSpec,
     PortSpec,
+    RESOURCE_CONTRACT_VERSION,
     ResourceSnapshot,
     TaskCategory,
     Workload,
@@ -387,7 +388,11 @@ def _category_definition(
     return definition, inputs, outputs, placement
 
 
-def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
+def build_deterministic_scene(
+    req: GenerateSceneRequest,
+    *,
+    preflight: bool = True,
+) -> BenchmarkScene:
     rng = random.Random(req.seed)
     factor = DIFFICULTY_FACTOR[req.difficulty]
     robot_hardware = ROBOT_HARDWARE[req.robot_hardware]
@@ -571,6 +576,7 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
     links, link_snapshots = _directed_links(nodes, resources)
     scene = BenchmarkScene(
         id=scene_id,
+        resource_contract_version=RESOURCE_CONTRACT_VERSION,
         title=f"{req.scenario_type.value.title()} multi-robot scheduling scenario",
         natural_language_description=scene_name,
         scenario_type=req.scenario_type.value,
@@ -592,10 +598,11 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
         ],
     )
     apply_absolute_resource_contract(scene, req.robot_hardware)
-    # Import lazily to keep scene schemas independent from scheduler wiring.
-    from .schedulability import ensure_generated_scene_schedulable
+    if preflight:
+        # Import lazily to keep scene schemas independent from scheduler wiring.
+        from .schedulability import ensure_generated_scene_schedulable
 
-    ensure_generated_scene_schedulable(scene)
+        ensure_generated_scene_schedulable(scene)
     return scene
 
 

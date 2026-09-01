@@ -6,6 +6,54 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mars.domain.task import TaskClass, infer_task_class
 from mars.domain.workflow import FailurePolicy
+from mars.synthetic_workloads import load_default_synthetic_workloads
+
+
+RESOURCE_CONTRACT_VERSION = "mars.resources.absolute.v1"
+
+# These are UI/category aliases, not distinct executable workloads. Normalize
+# them at the scene boundary so profiling, placement, and resource validation
+# all see the same canonical task type.
+SCENE_TASK_TYPE_ALIASES = {
+    "segmentation": "semantic_segmentation",
+    "path_planning": "local_planning",
+    "vla_inference": "local_llm_10b",
+    "llm_planning": "local_llm_7b",
+}
+
+_SCENE_WORKLOAD_CATALOG = load_default_synthetic_workloads()
+_SCENE_WORKLOAD_TYPES = frozenset(
+    workload.task_type for workload in _SCENE_WORKLOAD_CATALOG
+)
+
+
+def canonical_scene_task_type(task_type: str) -> str:
+    """Return the executable workload id for a scene-facing task name."""
+
+    normalized = task_type.strip()
+    lowered = normalized.lower()
+    if lowered in SCENE_TASK_TYPE_ALIASES:
+        return SCENE_TASK_TYPE_ALIASES[lowered]
+    if lowered in _SCENE_WORKLOAD_TYPES:
+        return lowered
+    # Explicit absolute-v1 scenes may carry custom workload ids and demands.
+    # Preserve those ids so extension catalogs and fallback estimation remain
+    # possible instead of silently pretending they are built-in workloads.
+    return normalized
+
+
+def expected_accelerator_demand_tops(task_type: str) -> float:
+    """Resolve the fixed accelerator demand for a supported scene workload."""
+
+    canonical = canonical_scene_task_type(task_type)
+    try:
+        return _SCENE_WORKLOAD_CATALOG.get(
+            canonical
+        ).accelerator_demand_tops
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported scene task_type: {task_type}"
+        ) from exc
 
 
 class Difficulty(str, Enum):
@@ -254,6 +302,13 @@ class Workload(BaseModel):
     input_ports: List[PortSpec] = Field(default_factory=list)
     output_ports: List[PortSpec] = Field(default_factory=list)
 
+    @field_validator("task_type", mode="before")
+    @classmethod
+    def normalize_task_type(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("task_type must be a non-blank string")
+        return canonical_scene_task_type(value)
+
     @model_validator(mode="after")
     def apply_compatibility_defaults(self):
         """Normalize legacy scenes without overriding explicit placement."""
@@ -286,6 +341,15 @@ class Workload(BaseModel):
 
 class BenchmarkScene(BaseModel):
     id: str
+    resource_contract_version: Literal[
+        "mars.resources.absolute.v1"
+    ] = Field(
+        description=(
+            "Required resource-unit contract: compute_demand/cpu_capacity "
+            "are physical CPU cores and gpu_demand/gpu_capacity are sparse "
+            "INT8 TOPS. Unversioned normalized-GPU scenes are rejected."
+        )
+    )
     title: str
     natural_language_description: str
     scenario_type: str
@@ -325,6 +389,25 @@ class BenchmarkScene(BaseModel):
 
     @model_validator(mode="after")
     def apply_workflow_defaults(self):
+        for task in self.tasks:
+            try:
+                expected_gpu = expected_accelerator_demand_tops(
+                    task.task_type
+                )
+            except ValueError:
+                # Absolute-v1 scenes may define custom task ids and demands.
+                continue
+            if not math.isclose(
+                task.gpu_demand,
+                expected_gpu,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            ):
+                raise ValueError(
+                    f"task {task.id} declares {task.gpu_demand:g} TOPS for "
+                    f"built-in workload {task.task_type}; expected "
+                    f"{expected_gpu:g} TOPS"
+                )
         if not self.workflow_id:
             self.workflow_id = f"workflow_{self.id}"
         if self.workflow_deadline_ms <= 0:
@@ -393,7 +476,7 @@ class AgentChatRequest(BaseModel):
     thread_id: Optional[str] = None
     message: str = Field(min_length=1, max_length=12_000)
     model: AgentModel = "gemini-3.1-flash-lite"
-    enable_web_search: bool = True
+    enable_web_search: bool = False
     current_scene: Optional[BenchmarkScene] = None
     action: Literal["message", "confirm", "restart"] = "message"
 

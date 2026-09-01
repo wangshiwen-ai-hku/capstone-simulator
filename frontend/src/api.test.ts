@@ -1,8 +1,18 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { simulate, submitRuntimeWorkflow } from './api';
+// @vitest-environment jsdom
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  createTemplate,
+  deleteTemplate,
+  listTemplates,
+  simulate,
+  submitRuntimeWorkflow,
+} from './api';
 import type { BenchmarkScene } from './types';
 
 const scene = { id: 'scene-wire-test' } as BenchmarkScene;
+const STORAGE_KEY = 'mars.template.workspace-token.v1';
+const WORKSPACE_HEADER = 'X-MARS-Workspace-Token';
 
 function response(payload: unknown) {
   return {
@@ -16,6 +26,7 @@ function response(payload: unknown) {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  window.localStorage.clear();
 });
 
 describe('scheduler API payloads', () => {
@@ -75,5 +86,50 @@ describe('scheduler API payloads', () => {
     expect(payload).not.toHaveProperty('formulation');
     expect(payload).not.toHaveProperty('optimizer_options');
     expect(payload).not.toHaveProperty('beta');
+  });
+});
+
+describe('template workspace capability', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ templates: [] }),
+      text: async () => '',
+    }));
+  });
+
+  it('persists one strong token and sends it on template list/create/delete', async () => {
+    await listTemplates();
+    await createTemplate({
+      name: 'Saved benchmark',
+      description: '',
+      tags: [],
+      scene: {} as BenchmarkScene,
+    });
+    await deleteTemplate('template_0123456789ab');
+
+    const fetchMock = vi.mocked(fetch);
+    const workspaceTokens = fetchMock.mock.calls.map(([, init]) => (
+      new Headers(init?.headers).get(WORKSPACE_HEADER)
+    ));
+    expect(workspaceTokens).toHaveLength(3);
+    expect(workspaceTokens[0]).toMatch(/^[a-f0-9]{64}$/);
+    expect(new Set(workspaceTokens).size).toBe(1);
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe(workspaceTokens[0]);
+  });
+
+  it('replaces an invalid stored token instead of sending it', async () => {
+    window.localStorage.setItem(STORAGE_KEY, '../../another-workspace');
+
+    await listTemplates();
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const sent = new Headers(init?.headers).get(WORKSPACE_HEADER);
+    expect(sent).toMatch(/^[a-f0-9]{64}$/);
+    expect(sent).not.toBe('../../another-workspace');
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe(sent);
   });
 });

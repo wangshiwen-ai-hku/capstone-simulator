@@ -380,9 +380,10 @@ def workload_from_dict(item: Mapping[str, Any]) -> SyntheticWorkload:
         task_class=TaskClass(item["task_class"]),
         description=item.get("description", ""),
         model_variant=item.get("model_variant", "synthetic"),
-        accelerator_demand_tops=float(
-            item.get("accelerator_demand_tops", 0.0)
-        ),
+        # Resource units changed from target-relative ``gpu_units`` to a
+        # workload-level absolute TOPS demand. Missing data is ambiguous and
+        # must fail closed instead of silently becoming a CPU-only workload.
+        accelerator_demand_tops=float(item["accelerator_demand_tops"]),
         inputs=ports(item.get("inputs", [])),
         outputs=ports(item.get("outputs", [])),
         profiles=tuple(profiles),

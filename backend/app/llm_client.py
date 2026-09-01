@@ -9,7 +9,13 @@ from openai import OpenAI
 from .config import Settings
 from .mars_adapter import validate_scene
 from .scene_generator import build_deterministic_scene
-from .schemas import BenchmarkScene, GenerateSceneRequest
+from .schemas import (
+    BenchmarkScene,
+    GenerateSceneRequest,
+    RESOURCE_CONTRACT_VERSION,
+    canonical_scene_task_type,
+    expected_accelerator_demand_tops,
+)
 from .trace_archive import (
     TraceSession,
     archive_llm_request,
@@ -27,6 +33,7 @@ Return strict JSON without Markdown.
 The JSON schema must match the following high-level fields:
 {
   "id": string,
+  "resource_contract_version": "mars.resources.absolute.v1",
   "title": string,
   "natural_language_description": string,
   "scenario_type": string,
@@ -108,10 +115,15 @@ def _extract_json(text: str) -> Dict[str, Any]:
 
 
 def _normalize_llm_scene_payload(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Repair harmless omissions and reject ambiguous placement authority."""
+    """Compile LLM output into the explicit absolute-resource contract."""
+
+    data["resource_contract_version"] = RESOURCE_CONTRACT_VERSION
     for task in data.get("tasks") or []:
         if not isinstance(task, dict):
             continue
+        task_type = canonical_scene_task_type(str(task.get("task_type", "")))
+        task["task_type"] = task_type
+        task["gpu_demand"] = expected_accelerator_demand_tops(task_type)
         placement = task.get("placement_constraints")
         if not isinstance(placement, dict):
             continue

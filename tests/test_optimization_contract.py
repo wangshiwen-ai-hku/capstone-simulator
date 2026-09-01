@@ -273,11 +273,11 @@ def test_builtin_metric_registry_preserves_raw_metric_semantics() -> None:
 
     assert plan_values == pytest.approx(
         {
-            ObjectiveMetric.MAKESPAN_MS: 8.333333333333334,
+            ObjectiveMetric.MAKESPAN_MS: 16.666666666666664,
             ObjectiveMetric.TOTAL_DEADLINE_VIOLATION_MS: 0.0,
-            ObjectiveMetric.TOTAL_COMPLETION_TIME_MS: 8.333333333333334,
-            ObjectiveMetric.CRITICAL_PATH_FINISH_MS: 8.333333333333334,
-            ObjectiveMetric.TOTAL_ENERGY_J: 1.0,
+            ObjectiveMetric.TOTAL_COMPLETION_TIME_MS: 16.666666666666664,
+            ObjectiveMetric.CRITICAL_PATH_FINISH_MS: 16.666666666666664,
+            ObjectiveMetric.TOTAL_ENERGY_J: 1.9999999999999996,
             ObjectiveMetric.TOTAL_COMMUNICATION_MS: 0.0,
             ObjectiveMetric.LOCALITY_PENALTY: 2.0,
             ObjectiveMetric.DROPPED_TASKS: 0.0,
@@ -287,7 +287,7 @@ def test_builtin_metric_registry_preserves_raw_metric_semantics() -> None:
             ObjectiveMetric.RULE_MISMATCH_COUNT: 0.0,
             ObjectiveMetric.EXPECTED_WEIGHTED_SUCCESS_RATIO: 1.0,
             ObjectiveMetric.NORMALIZED_COMMUNICATION_RATIO: 0.0,
-            ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION: 0.125,
+            ObjectiveMetric.MAXIMUM_RESOURCE_UTILIZATION: 1.0 / 6.0,
         }
     )
 
@@ -306,11 +306,11 @@ def test_builtin_metric_registry_preserves_raw_metric_semantics() -> None:
     }
     assert candidate_values == pytest.approx(
         {
-            ObjectiveMetric.MAKESPAN_MS: 28.571428571428573,
+            ObjectiveMetric.MAKESPAN_MS: 50.0,
             ObjectiveMetric.TOTAL_DEADLINE_VIOLATION_MS: 0.0,
-            ObjectiveMetric.TOTAL_COMPLETION_TIME_MS: 28.571428571428573,
-            ObjectiveMetric.CRITICAL_PATH_FINISH_MS: 28.571428571428573,
-            ObjectiveMetric.TOTAL_ENERGY_J: 0.7142857142857143,
+            ObjectiveMetric.TOTAL_COMPLETION_TIME_MS: 50.0,
+            ObjectiveMetric.CRITICAL_PATH_FINISH_MS: 50.0,
+            ObjectiveMetric.TOTAL_ENERGY_J: 1.25,
             ObjectiveMetric.TOTAL_COMMUNICATION_MS: 0.0,
             ObjectiveMetric.LOCALITY_PENALTY: 0.0,
             ObjectiveMetric.DROPPED_TASKS: 0.0,

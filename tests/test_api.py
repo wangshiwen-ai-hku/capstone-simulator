@@ -10,7 +10,10 @@ from fastapi.testclient import TestClient
 
 from backend.app import main as api_main
 from backend.app.config import Settings
-from backend.app.llm_client import generate_scene_with_llm
+from backend.app.llm_client import (
+    _normalize_llm_scene_payload,
+    generate_scene_with_llm,
+)
 from backend.app.mars_adapter import validate_scene
 from backend.app.scene_generator import (
     TASK_TYPE_TEMPLATES,
@@ -54,6 +57,29 @@ class ApiTests(unittest.TestCase):
                 "configured": True,
             },
         )
+
+    def test_llm_alias_is_compiled_to_canonical_absolute_tops(self):
+        payload = _normalize_llm_scene_payload(
+            {
+                "tasks": [
+                    {
+                        "id": "segmentation-task",
+                        "task_type": "segmentation",
+                        "gpu_demand": 0.85,
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(
+            payload["resource_contract_version"],
+            "mars.resources.absolute.v1",
+        )
+        self.assertEqual(
+            payload["tasks"][0]["task_type"],
+            "semantic_segmentation",
+        )
+        self.assertEqual(payload["tasks"][0]["gpu_demand"], 36.0)
 
     def test_deepseek_provider_status_never_exposes_credentials(self):
         secret = "sentinel-deepseek-secret-that-must-not-leak"

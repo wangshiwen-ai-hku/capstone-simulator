@@ -253,7 +253,14 @@ models are routed through APIYI and currently allow `deepseek-v4-flash` and
 `gemini-3.1-flash-lite`. Configure `APIYI_KEY`; optional settings are documented in
 `backend/.env.example`. Without a key, the Agent remains usable in a local,
 deterministic structured-draft mode. Saved templates contain a complete,
-validated `BenchmarkScene` and can be imported directly into Studio.
+validated `BenchmarkScene` and can be imported directly into Studio. The Web
+client creates a cryptographically random template-workspace capability, keeps
+it in browser local storage, and sends it only to template endpoints. Template
+list/read/delete operations are isolated to that capability instead of exposing
+one global library. This is lightweight isolation for the demo, not user-account
+authentication: anyone who obtains the capability can access that workspace,
+and clearing site data loses the browser's reference to it. Export important
+templates as JSON backups.
 
 MARS Agent uses an incremental conversation: discovery, atomic-task planning,
 review, then schema compilation after confirmation. Model calls are bounded by
@@ -264,15 +271,40 @@ startup does not require manually exporting `SSL_CERT_FILE`.
 Generated accelerator resources use absolute sparse INT8 TOPS: Jetson Orin
 Nano/NX/AGX capacities are 67/157/275 TOPS, while each workload declares one
 fixed `accelerator_demand_tops` independent of board, difficulty, seed, and
-utilization. Synthetic scenes run a schedulability preflight before they are
-returned so random background load cannot silently leave a task without an
-execution candidate.
+utilization. Every `BenchmarkScene` must declare
+`resource_contract_version: "mars.resources.absolute.v1"`; under that contract,
+CPU values are physical cores and accelerator values are sparse INT8 TOPS.
+Unversioned scenes are rejected because normalized GPU fractions cannot be
+distinguished safely from absolute demands. Synthetic scenes run a
+schedulability preflight before they are returned so random background load
+cannot silently leave a task without an execution candidate.
 
 Restart the backend and confirm that `GET /api/health` reports
 `"provider": "deepseek"` and `"llm_configured": true`. Enable **Use LLM** in
 the Web interface when generating a scene. Provider credentials remain in the
 backend; they are not returned by the API or sent to the browser. Invalid model
 output falls back to the deterministic scene generator.
+
+### Fly template storage
+
+`fly.toml` stores templates at `/data/mars-templates` on the `mars_data`
+persistent volume. Create that volume once in the app's primary region before
+the first deployment containing the mount, then deploy normally:
+
+```bash
+fly volumes create mars_data \
+  --app capstone-simulator-backend \
+  --region sin \
+  --size 1
+fly deploy --app capstone-simulator-backend
+```
+
+Fly volumes attach to one Machine and are not shared filesystems. This app is
+currently configured as a single always-running Machine; create one volume per
+Machine or move templates to shared object/database storage before scaling out.
+Files previously written to the container-local `tmp/mars-templates` directory
+cannot be assigned safely to a browser workspace and are intentionally not
+served by the capability-scoped store.
 
 ### Optional API trace archive
 
