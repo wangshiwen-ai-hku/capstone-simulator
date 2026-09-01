@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from evals.workflow import WorkflowEvaluationWeights
-from backend.app.schemas import BenchmarkScene
+from backend.app.schemas import BenchmarkScene, RESOURCE_CONTRACT_VERSION
 from mars.domain.task import TaskClass
 from mars.optimizers.policy import SolveLimits
 
@@ -29,7 +29,7 @@ HARDWARE = {
         "label": "Jetson AGX Orin 32GB",
         "power_mode": "40W fixed",
         "cpu_capacity": 8.0,
-        "gpu_capacity": 1.0,
+        "gpu_capacity": 275.0,
         "memory_gb": 32.0,
         "max_concurrency": 1,
         "initial_utilization": {
@@ -51,8 +51,7 @@ HARDWARE = {
                 "to the official 8-core CPU"
             ),
             "gpu_capacity": (
-                "synthetic_data: normalized MARS unit, not CUDA-core count "
-                "or utilization percentage"
+                "reference_data: sparse INT8 TOPS for Jetson AGX Orin"
             ),
             "max_concurrency": (
                 "synthetic_data: conservative experiment setting"
@@ -67,7 +66,7 @@ HARDWARE = {
         "label": "x86 workstation + discrete NVIDIA GPU",
         "power_mode": "mains powered",
         "cpu_capacity": 16.0,
-        "gpu_capacity": 4.0,
+        "gpu_capacity": 500.0,
         "memory_gb": 64.0,
         "max_concurrency": 4,
         "initial_utilization": {
@@ -188,7 +187,7 @@ def build_scene(
             "display_name": f"Jetson AGX Orin {index}",
             "architecture": "aarch64-jetson-agx-orin-32gb-40w",
             "cpu_capacity": 8.0,
-            "gpu_capacity": 1.0,
+            "gpu_capacity": 275.0,
             "memory_gb": 32.0,
             "bandwidth_mbps": 300.0,
             "base_latency_ms": 2.0,
@@ -206,7 +205,7 @@ def build_scene(
             "display_name": "Edge PC",
             "architecture": "x86_64-discrete-nvidia-gpu",
             "cpu_capacity": 16.0,
-            "gpu_capacity": 4.0,
+            "gpu_capacity": 500.0,
             "memory_gb": 64.0,
             "bandwidth_mbps": 1000.0,
             "base_latency_ms": 1.0,
@@ -367,6 +366,7 @@ def build_scene(
                 created[task_type] = task_id
     return BenchmarkScene(
         id=str(scenario["id"]),
+        resource_contract_version=RESOURCE_CONTRACT_VERSION,
         title=str(scenario["name"]),
         natural_language_description=str(scenario["description"]),
         scenario_type=str(scenario["id"]),
@@ -415,15 +415,14 @@ def profile_summary(catalog) -> list[dict[str, object]]:
     )
     for task_type in used:
         workload = catalog.get(task_type)
+        task_spec = workload.to_task_spec()
         targets = {}
         for target in ("orin", "edge"):
             profile = workload.profile_for(target)
             targets[target] = {
                 "supported": profile.supported,
                 "latency_ms": asdict(profile.latency),
-                "cpu_units": profile.resources.cpu_cores,
-                "gpu_units": profile.resources.gpu_units,
-                "memory_mb": profile.resources.memory_mb,
+                "peak_memory_mb": profile.resources.memory_mb,
                 "input_size_mb": asdict(profile.input_size_mb),
                 "output_size_mb": asdict(profile.output_size_mb),
                 "energy_j": asdict(profile.energy_j),
@@ -434,6 +433,12 @@ def profile_summary(catalog) -> list[dict[str, object]]:
         result.append(
             {
                 "task_type": task_type,
+                "declared_resource_demand": {
+                    "cpu_cores": task_spec.compute_demand,
+                    "accelerator_sparse_int8_tops": (
+                        workload.accelerator_demand_tops
+                    ),
+                },
                 "experiment_model_assumption": model_names[task_type],
                 "provenance": "synthetic_placeholder_not_measured",
                 "targets": targets,
@@ -446,7 +451,21 @@ def build_benchmark_manifest(catalog) -> dict[str, object]:
     """Build the stable metadata document written as ``benchmark.json``."""
 
     return {
-        "schema_version": "mars.binary-offload-benchmark.v2",
+        "schema_version": "mars.binary-offload-benchmark.v3",
+        "resource_contract": {
+            "version": RESOURCE_CONTRACT_VERSION,
+            "cpu_capacity_and_demand": "physical_cores",
+            "accelerator_capacity_and_demand": "sparse_int8_tops",
+            "task_cpu_and_accelerator_demands_are_authoritative": True,
+            "target_profiles_supply": [
+                "latency",
+                "energy",
+                "peak_memory",
+                "output_size",
+                "failure_rate",
+                "accuracy",
+            ],
+        },
         "formal_experiment": FORMAL_EXPERIMENT,
         "formal_experiment_seeds": list(SEEDS),
         "provenance": "synthetic_placeholder_not_hardware_measurement",

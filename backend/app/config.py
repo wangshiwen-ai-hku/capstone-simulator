@@ -58,6 +58,10 @@ class Settings(BaseSettings):
         default="deepseek-v4-flash",
         alias="APIYI_MODEL",
     )
+    apiyi_gemini_model: str = Field(
+        default="gemini-3.1-flash-lite",
+        alias="APIYI_GEMINI_MODEL",
+    )
 
     cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173", alias="CORS_ORIGINS")
     llm_temperature: float = Field(default=0.35, alias="LLM_TEMPERATURE")
@@ -72,6 +76,23 @@ class Settings(BaseSettings):
     mars_trace_dir: str = Field(
         default="tmp/mars-traces",
         alias="MARS_TRACE_DIR",
+    )
+    mars_template_dir: str = Field(
+        default="tmp/mars-templates",
+        alias="MARS_TEMPLATE_DIR",
+    )
+    agent_web_search: bool = Field(default=True, alias="MARS_AGENT_WEB_SEARCH")
+    agent_search_timeout_seconds: int = Field(
+        default=4,
+        ge=1,
+        le=20,
+        alias="MARS_AGENT_SEARCH_TIMEOUT_SECONDS",
+    )
+    agent_model_timeout_seconds: int = Field(
+        default=35,
+        ge=5,
+        le=120,
+        alias="MARS_AGENT_MODEL_TIMEOUT_SECONDS",
     )
 
     def cors_origin_list(self) -> List[str]:
@@ -110,6 +131,28 @@ class Settings(BaseSettings):
             "provider": str(config["provider"]),
             "model": str(config["model"]),
             "configured": bool(config.get("api_key")),
+        }
+
+    def apiyi_agent_config(self, model: str) -> dict[str, str | None]:
+        """Resolve the allow-listed Agent model through APIYI only."""
+        if model not in {
+            "deepseek-v4-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-3.1-flash",
+        }:
+            raise ValueError(f"unsupported MARS Agent model: {model}")
+        resolved = self.apiyi_model
+        if model != "deepseek-v4-flash":
+            resolved = self.apiyi_gemini_model
+            # APIYI does not expose a text model under the historical
+            # gemini-3.1-flash identifier. Migrate old .env files safely.
+            if resolved == "gemini-3.1-flash":
+                resolved = "gemini-3.1-flash-lite"
+        return {
+            "provider": "apiyi",
+            "api_key": self.apiyi_api_key,
+            "base_url": self.apiyi_base_url,
+            "model": resolved,
         }
 
 

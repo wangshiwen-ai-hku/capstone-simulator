@@ -92,11 +92,11 @@ def test_workflow_evaluation_uses_run_artifact_facts() -> None:
 
     assert metrics["expected_success_ratio"] == 1
     assert metrics["normalized_communication"] == 0.1
-    assert metrics["peak_cpu_utilization"] == 0.25
+    assert metrics["peak_cpu_utilization"] == 1.1
     assert metrics["peak_gpu_utilization"] == 0.4
     assert metrics["peak_memory_utilization"] == 0.38
-    assert metrics["maximum_resource_utilization"] == 0.4
-    assert metrics["workflow_evaluation_objective"] == -0.1
+    assert metrics["maximum_resource_utilization"] == 1.1
+    assert metrics["workflow_evaluation_objective"] == 1.3
     assert metrics["avg_latency_ms"] == 50.0
     assert metrics["makespan_ms"] == 50.0
     assert metrics["avg_energy_j"] == 1.23

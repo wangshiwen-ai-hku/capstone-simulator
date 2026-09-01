@@ -9,6 +9,7 @@ from mars.synthetic_workloads import (
     SyntheticWorkloadCatalog,
     UnsupportedTargetError,
     load_default_synthetic_workloads,
+    workload_from_dict,
 )
 
 
@@ -29,6 +30,7 @@ def custom_workload() -> dict:
         "task_class": "realtime_offloadable",
         "description": "Test fixture",
         "model_variant": "custom-fixture",
+        "accelerator_demand_tops": 3.5,
         "inputs": [{"name": "sample", "semantic_type": "sample"}],
         "outputs": [{"name": "result", "semantic_type": "inspection_result"}],
         "profiles": {"orin": dict(profile), "edge": dict(profile)},
@@ -61,6 +63,7 @@ class SyntheticCatalogTests(unittest.TestCase):
 
     def test_every_workload_has_complete_orin_and_edge_profiles(self):
         for workload in self.catalog:
+            self.assertGreaterEqual(workload.accelerator_demand_tops, 0)
             for target in ExecutionTarget:
                 profile = workload.profile_for(target)
                 self.assertGreater(profile.latency.p99_ms, 0)
@@ -118,6 +121,13 @@ class SyntheticCatalogTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already registered"):
             catalog.register_dict(custom_workload())
 
+    def test_custom_workload_requires_explicit_absolute_accelerator_demand(self):
+        payload = custom_workload()
+        payload.pop("accelerator_demand_tops")
+
+        with self.assertRaisesRegex(KeyError, "accelerator_demand_tops"):
+            workload_from_dict(payload)
+
     def test_workload_can_create_scheduler_task_spec(self):
         workload = self.catalog.get("local_llm_7b")
         spec = workload.to_task_spec("edge", allow_local_fallback=False)
@@ -126,6 +136,7 @@ class SyntheticCatalogTests(unittest.TestCase):
         self.assertIs(spec.task_class, TaskClass.EDGE_HEAVY)
         self.assertEqual(spec.input_size_mb, profile.input_size_mb.typical)
         self.assertEqual(spec.output_size_mb, profile.output_size_mb.typical)
+        self.assertEqual(spec.gpu_demand, workload.accelerator_demand_tops)
         self.assertFalse(spec.allow_local_fallback)
         self.assertEqual(
             [(port.name, port.message_type) for port in spec.input_ports],

@@ -9,7 +9,13 @@ from openai import OpenAI
 from .config import Settings
 from .mars_adapter import validate_scene
 from .scene_generator import build_deterministic_scene
-from .schemas import BenchmarkScene, GenerateSceneRequest
+from .schemas import (
+    BenchmarkScene,
+    GenerateSceneRequest,
+    RESOURCE_CONTRACT_VERSION,
+    canonical_scene_task_type,
+    expected_accelerator_demand_tops,
+)
 from .trace_archive import (
     TraceSession,
     archive_llm_request,
@@ -27,6 +33,7 @@ Return strict JSON without Markdown.
 The JSON schema must match the following high-level fields:
 {
   "id": string,
+  "resource_contract_version": "mars.resources.absolute.v1",
   "title": string,
   "natural_language_description": string,
   "scenario_type": string,
@@ -108,10 +115,15 @@ def _extract_json(text: str) -> Dict[str, Any]:
 
 
 def _normalize_llm_scene_payload(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Repair harmless omissions and reject ambiguous placement authority."""
+    """Compile LLM output into the explicit absolute-resource contract."""
+
+    data["resource_contract_version"] = RESOURCE_CONTRACT_VERSION
     for task in data.get("tasks") or []:
         if not isinstance(task, dict):
             continue
+        task_type = canonical_scene_task_type(str(task.get("task_type", "")))
+        task["task_type"] = task_type
+        task["gpu_demand"] = expected_accelerator_demand_tops(task_type)
         placement = task.get("placement_constraints")
         if not isinstance(placement, dict):
             continue
@@ -135,9 +147,11 @@ Scene controls:
 - task_categories: {[x.value for x in req.task_categories]}
 - difficulty: {req.difficulty.value}
 - seed: {req.seed}
+- robot_hardware: {req.robot_hardware}
 
 Domain constraints:
-- Robot nodes are Jetson Orin-like and can execute local inference and safety tasks.
+- Robot node accelerator capacity and task accelerator demand use absolute sparse INT8 TOPS, never normalized GPU fractions.
+- A task's GPU TOPS demand is fixed by its workload/model and must not scale with difficulty, seed, utilization, or selected Jetson board.
 - Edge nodes are PC/control-plane-like and can run heavier VLA/LLM/VLM workloads.
 - Generate only the requested robot and edge nodes. Do not add cloud nodes.
 - Use workload abstraction fields: task_type, compute_demand, latency_budget, safety_level, model_requirement, data_size, bandwidth_requirement, energy_budget, allow_local_fallback, result_verification.
@@ -293,7 +307,12 @@ def generate_scene_with_llm(
         logger.info("Received scene-generation response (%d bytes)", len(content))
         data = _normalize_llm_scene_payload(_extract_json(content))
         scene = BenchmarkScene.model_validate(data)
+        from .scene_generator import apply_absolute_resource_contract
+        from .schedulability import ensure_generated_scene_schedulable
+
+        apply_absolute_resource_contract(scene, req.robot_hardware)
         _validate_llm_contract(scene, req)
+        ensure_generated_scene_schedulable(scene)
         validate_scene(scene)
         archive_llm_result(
             trace_session,

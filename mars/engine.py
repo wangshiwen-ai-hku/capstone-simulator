@@ -35,6 +35,7 @@ from .optimizers import (
     FormulationRegistry,
     OptimizerRegistry,
     SchedulingFormulation,
+    SolveLimits,
 )
 from .profiling import ProfileCatalog
 from .run_artifact import RunArtifact, build_run_artifact
@@ -109,6 +110,7 @@ def run_workflow_simulation(
     fallback_optimizer: str | None = "heuristic",
     fail_first_task_ids: Iterable[str] = (),
     run_id: str | None = None,
+    solve_limits: SolveLimits | None = None,
 ) -> SimulationReport:
     """Execute, evaluate, and project one run for compatibility callers."""
 
@@ -129,6 +131,7 @@ def run_workflow_simulation(
         fallback_optimizer=fallback_optimizer,
         fail_first_task_ids=fail_first_task_ids,
         run_id=run_id,
+        solve_limits=solve_limits,
     )
     return project_run_artifact(
         artifact,
@@ -192,6 +195,7 @@ def run_workflow_artifact(
     max_attempts: int = 1,
     deterministic: bool = True,
     run_id: str | None = None,
+    solve_limits: SolveLimits | None = None,
 ) -> RunArtifact:
     """Execute one workflow and return its unevaluated factual artifact."""
 
@@ -229,6 +233,7 @@ def run_workflow_artifact(
         max_attempts=max_attempts,
         fail_first_task_ids=fail_first_task_ids,
         deterministic=deterministic,
+        solve_limits=solve_limits,
     )
     return build_run_artifact(
         run_id=(

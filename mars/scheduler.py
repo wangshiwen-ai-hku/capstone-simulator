@@ -178,9 +178,17 @@ def estimate_candidate(
     if profile is not None:
         compute_ms = profile.p95_ms * util_penalty
     else:
-        capacity = max(0.15, node.cpu_capacity + 1.5 * node.gpu_capacity)
-        gpu_pressure = 1.0 + max(0.0, task.spec.gpu_demand - node.gpu_capacity) * 2.5
-        compute_ms = 100.0 * task.spec.compute_demand / capacity * util_penalty * gpu_pressure
+        # CPU cores and accelerator TOPS are different units. Convert each to
+        # a utilization ratio and use the dominant resource instead of adding
+        # unlike capacities together. Capacity infeasibility was rejected
+        # above, so these ratios are finite and at most one.
+        cpu_ratio = task.spec.compute_demand / node.cpu_capacity
+        gpu_ratio = (
+            task.spec.gpu_demand / node.gpu_capacity
+            if task.spec.gpu_demand > 0 and node.gpu_capacity > 0
+            else 0.0
+        )
+        compute_ms = 100.0 * max(cpu_ratio, gpu_ratio) * util_penalty
 
     artifacts = tuple(parent_artifacts)
     transfer_inputs: list[tuple[str, str, float]]
@@ -319,12 +327,10 @@ def build_scheduling_problem(
     resolved_solve_limits = (
         solve_limits
         if solve_limits is not None
-        else SolveLimits(
-            solve_budget_ms=(
-                50.0
-                if solve_budget_ms is None
-                else solve_budget_ms
-            )
+        else (
+            SolveLimits()
+            if solve_budget_ms is None
+            else SolveLimits(solve_budget_ms=solve_budget_ms)
         )
     )
     resolved_metric_contract_id = metric_contract_id(resolved_policy)
@@ -844,12 +850,9 @@ def _resource_demand(
 ) -> ResourceDemand:
     cpu_units, gpu_units, memory_gb = task_resource_demand(task, node)
     if profile is not None:
-        cpu_units = (
-            cpu_units if profile.cpu_units is None else profile.cpu_units
-        )
-        gpu_units = (
-            gpu_units if profile.gpu_units is None else profile.gpu_units
-        )
+        # TaskSpec owns the portable CPU/GPU reservation contract. Execution
+        # profiles provide target-specific timing, energy, output, and measured
+        # peak memory, but must not resize the declared work for a target.
         memory_gb = profile.peak_memory_mb / 1024.0
     return ResourceDemand(
         cpu_units=cpu_units,

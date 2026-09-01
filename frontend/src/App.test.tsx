@@ -14,6 +14,7 @@ import type { BenchmarkScene, SchedulingAlgorithmCapability } from './types';
 
 const { scene } = vi.hoisted(() => ({ scene: {
   id: 'scene-test',
+  resource_contract_version: 'mars.resources.absolute.v1',
   title: 'Warehouse test scene',
   natural_language_description: 'A minimal scheduler UI fixture.',
   scenario_type: 'warehouse',
@@ -134,6 +135,10 @@ const optionalFormulationDeadlineCapability = {
 } satisfies SchedulingAlgorithmCapability;
 
 vi.mock('./api', () => ({
+  chatWithAgent: vi.fn(),
+  createTemplate: vi.fn(),
+  deleteTemplate: vi.fn(),
+  listTemplates: vi.fn().mockResolvedValue({ templates: [] }),
   health: vi.fn().mockResolvedValue({
     status: 'ok',
     provider: 'test',
@@ -175,6 +180,21 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('MARS Studio', () => {
+  it('switches among Studio, Agent, and Templates and expands the Agent', async () => {
+    render(<App />);
+    await screen.findByText('Warehouse test scene');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Agent' }));
+    expect(screen.getAllByText('Modelling copilot')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Expand MARS Agent' }));
+    expect(document.querySelector('.studio-shell')?.className).toContain('agent-expanded');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Templates' }));
+    expect(screen.getAllByText('Benchmark library')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Studio' }));
+    expect(screen.getByLabelText('Scheduling method')).toBeTruthy();
+  });
+
   it('mounts the generated graph and runtime controls without a render loop', async () => {
     render(<App />);
 

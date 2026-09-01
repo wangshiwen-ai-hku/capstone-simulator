@@ -235,6 +235,7 @@ class CentralCoordinator:
         max_attempts: int = 2,
         fail_first_task_ids: Iterable[str] = (),
         deterministic: bool = True,
+        solve_limits: SolveLimits | None = None,
     ) -> CoordinatorReport:
         """Run one workflow from synchronous application code."""
 
@@ -247,6 +248,7 @@ class CentralCoordinator:
                 max_attempts=max_attempts,
                 fail_first_task_ids=fail_first_task_ids,
                 deterministic=deterministic,
+                solve_limits=solve_limits,
             )
         )
 
@@ -260,6 +262,7 @@ class CentralCoordinator:
         max_attempts: int = 2,
         fail_first_task_ids: Iterable[str] = (),
         deterministic: bool = True,
+        solve_limits: SolveLimits | None = None,
     ) -> CoordinatorReport:
         """Run the single event loop shared by local and remote adapters."""
 
@@ -283,7 +286,8 @@ class CentralCoordinator:
             if deterministic
             else SystemRandom().randrange(0, 2**63)
         )
-        solve_limits = SolveLimits(
+        solve_limits = replace(
+            solve_limits or SolveLimits(),
             deterministic=deterministic,
             random_seed=execution_seed,
         )

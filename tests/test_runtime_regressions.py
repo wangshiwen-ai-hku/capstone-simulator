@@ -205,7 +205,7 @@ def test_engine_preserves_free_capacity_across_scheduling_epochs() -> None:
     assert scheduling["deterministic"] is True
     assert scheduling["execution_seed"] == 7
     assert scheduling["solve_limits"] == {
-        "solve_budget_ms": 50.0,
+        "solve_budget_ms": 100.0,
         "max_iterations": 0,
         "deterministic": True,
         "random_seed": 7,
@@ -488,7 +488,9 @@ def test_optimizers_honor_declared_node_kind_preference(
 ) -> None:
     nodes = {
         "robot": _node("robot", NodeKind.ROBOT, cpu=30, gpu=8),
-        "edge": _node("edge", NodeKind.EDGE, cpu=1, gpu=0),
+        # The preferred node must physically fit this ten-core workload; the
+        # CPU contract no longer scales demands down to a normalized fraction.
+        "edge": _node("edge", NodeKind.EDGE, cpu=10, gpu=0),
     }
     snapshots = {
         node_id: NodeSnapshot(node_id)

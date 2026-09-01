@@ -77,6 +77,7 @@ export interface GenerateSceneRequest {
   difficulty: Difficulty;
   seed: number;
   use_llm: boolean;
+  robot_hardware: 'orin_nano' | 'orin_nx' | 'orin_agx';
 }
 
 export interface NodeSpec {
@@ -184,6 +185,7 @@ export interface DataEdgeSpec {
 
 export interface BenchmarkScene {
   id: string;
+  resource_contract_version: 'mars.resources.absolute.v1';
   title: string;
   natural_language_description: string;
   scenario_type: string;
@@ -202,6 +204,65 @@ export interface BenchmarkScene {
   generation_source: 'deterministic' | 'llm' | 'deterministic_fallback';
   generation_note: string;
   trace_id?: string | null;
+}
+
+export type MarsAgentModel = 'deepseek-v4-flash' | 'gemini-3.1-flash-lite' | 'gemini-3.1-flash';
+
+export interface AgentSource {
+  title: string;
+  url: string;
+  snippet: string;
+  kind: 'mars' | 'web';
+}
+
+export interface AgentStructuredInfo {
+  task_spec: Record<string, unknown>;
+  workflow_spec: Record<string, unknown>;
+  assumptions: string[];
+}
+
+export interface AgentChatResponse {
+  thread_id: string;
+  message: string;
+  model: MarsAgentModel;
+  fallback: boolean;
+  questions: string[];
+  insights: string[];
+  suggested_nodes: string[];
+  sources: AgentSource[];
+  structured_info: AgentStructuredInfo;
+  scene_draft?: BenchmarkScene | null;
+  ready_to_import: boolean;
+  phase: 'discovery' | 'planning' | 'review' | 'ready';
+  progress: number;
+  atomic_tasks: AgentAtomicTaskPlan[];
+  provenance: 'api' | 'api_recovered' | 'local_intake' | 'local_fallback';
+  effective_model?: string | null;
+  diagnostic: string;
+}
+
+export interface AgentAtomicTaskPlan {
+  id: string;
+  name: string;
+  task_type: string;
+  purpose: string;
+  source_robot_id: string;
+  dependencies: string[];
+  arrival_time_ms: number;
+  deadline_ms: number;
+  priority: number;
+  placement_hint: string;
+}
+
+export interface BenchmarkTemplate {
+  schema_version: 'mars.benchmark.template.v1' | string;
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+  scene: BenchmarkScene;
 }
 
 export interface SimulationMetrics {

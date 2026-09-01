@@ -13,7 +13,7 @@ from evals.benchmarks.binary_offload.spec import (
     build_scene,
 )
 from mars.engine import run_workflow_simulation
-from mars.optimizers import OptimizerRegistry
+from mars.optimizers import OptimizerRegistry, SolveLimits
 from mars.optimizers.binary_offload import BinaryOffloadOptimizer
 from mars.synthetic_workloads import load_default_synthetic_workloads
 
@@ -51,6 +51,7 @@ def test_high_load_binary_offload_can_use_future_capacity() -> None:
         link_snapshots=link_snapshots,
         optimizer_registry=registry,
         fallback_optimizer=None,
+        solve_limits=SolveLimits(solve_budget_ms=500.0),
     )
 
     assert len(report.task_results) == 32

@@ -126,9 +126,9 @@ class MarsAdapterValidationTests(unittest.TestCase):
             snapshot.node_id: snapshot for snapshot in build_node_snapshots(self.scene)
         }
         robot_id = next(node.id for node in self.scene.nodes if node.kind == "robot")
-        self.assertEqual(specs[robot_id].architecture, "jetson-orin")
+        self.assertEqual(specs[robot_id].architecture, "jetson-orin-nx")
         self.assertEqual(specs[robot_id].cpu_capacity, 8)
-        self.assertEqual(specs[robot_id].memory_gb, 32)
+        self.assertEqual(specs[robot_id].memory_gb, 16)
         self.assertEqual(
             snapshots[robot_id].network_latency_ms,
             next(item.network_latency_ms for item in self.scene.initial_resources if item.node_id == robot_id),

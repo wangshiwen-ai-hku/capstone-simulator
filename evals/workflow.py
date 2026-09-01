@@ -487,10 +487,10 @@ def _resource_demand(
     profile = profiles.lookup(task.spec.task_type, node.kind)
     if profile is None:
         return task_resource_demand(task, node)
-    default_cpu, default_gpu, _ = task_resource_demand(task, node)
+    cpu, gpu, _ = task_resource_demand(task, node)
     return (
-        float(default_cpu if profile.cpu_units is None else profile.cpu_units),
-        float(default_gpu if profile.gpu_units is None else profile.gpu_units),
+        float(cpu),
+        float(gpu),
         float(profile.peak_memory_mb) / 1024.0,
     )
 

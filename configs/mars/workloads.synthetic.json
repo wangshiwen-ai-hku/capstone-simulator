@@ -9,6 +9,7 @@
       "task_class": "local_safety",
       "description": "Produces an immediate safe-motion adjustment from nearby hazards.",
       "model_variant": "synthetic-safety-policy",
+      "accelerator_demand_tops": 10,
       "inputs": [{"name": "near_field", "semantic_type": "near_field_observation"}, {"name": "motion_state", "semantic_type": "motion_state"}],
       "outputs": [{"name": "safe_motion", "semantic_type": "safe_motion_command"}],
       "profiles": {
@@ -22,6 +23,7 @@
       "task_class": "local_safety",
       "description": "Evaluates stop triggers and emits a local stop command.",
       "model_variant": "synthetic-stop-guard",
+      "accelerator_demand_tops": 0,
       "inputs": [{"name": "safety_signals", "semantic_type": "safety_signals"}],
       "outputs": [{"name": "stop_command", "semantic_type": "stop_command"}],
       "profiles": {
@@ -35,6 +37,7 @@
       "task_class": "local_safety",
       "description": "Converts a short-horizon trajectory into actuator-level commands.",
       "model_variant": "synthetic-motion-controller",
+      "accelerator_demand_tops": 0,
       "inputs": [{"name": "trajectory", "semantic_type": "local_trajectory"}, {"name": "motion_state", "semantic_type": "motion_state"}],
       "outputs": [{"name": "control", "semantic_type": "control_command"}],
       "profiles": {
@@ -48,6 +51,7 @@
       "task_class": "realtime_offloadable",
       "description": "Estimates the current pose and motion state for downstream scene understanding and planning.",
       "model_variant": "synthetic-localizer",
+      "accelerator_demand_tops": 12,
       "inputs": [{"name": "motion_observations", "semantic_type": "motion_observation_batch"}, {"name": "map", "semantic_type": "local_map"}],
       "outputs": [{"name": "localization", "semantic_type": "localization_state"}],
       "profiles": {
@@ -61,6 +65,7 @@
       "task_class": "realtime_offloadable",
       "description": "Builds a structured local scene representation from fused observations.",
       "model_variant": "synthetic-scene-encoder",
+      "accelerator_demand_tops": 48,
       "inputs": [{"name": "observations", "semantic_type": "sensor_observation_batch"}, {"name": "localization", "semantic_type": "localization_state"}],
       "outputs": [{"name": "scene", "semantic_type": "environment_model"}],
       "profiles": {
@@ -74,6 +79,7 @@
       "task_class": "realtime_offloadable",
       "description": "Detects and classifies objects in an observation frame.",
       "model_variant": "synthetic-detector",
+      "accelerator_demand_tops": 24,
       "inputs": [{"name": "image", "semantic_type": "image_frame"}],
       "outputs": [{"name": "detections", "semantic_type": "object_detections"}],
       "profiles": {
@@ -87,6 +93,7 @@
       "task_class": "realtime_offloadable",
       "description": "Labels image regions for traversability and scene semantics.",
       "model_variant": "synthetic-segmentation-model",
+      "accelerator_demand_tops": 36,
       "inputs": [{"name": "image", "semantic_type": "image_frame"}],
       "outputs": [{"name": "semantic_map", "semantic_type": "semantic_mask"}],
       "profiles": {
@@ -100,6 +107,7 @@
       "task_class": "realtime_offloadable",
       "description": "Generates a collision-aware short-horizon trajectory.",
       "model_variant": "synthetic-local-planner",
+      "accelerator_demand_tops": 8,
       "inputs": [{"name": "scene", "semantic_type": "environment_model"}, {"name": "localization", "semantic_type": "localization_state"}],
       "outputs": [{"name": "trajectory", "semantic_type": "local_trajectory"}],
       "profiles": {
@@ -113,6 +121,7 @@
       "task_class": "edge_heavy",
       "description": "Generates a structured decision or summary using a synthetic 7B workload.",
       "model_variant": "synthetic-7b",
+      "accelerator_demand_tops": 55,
       "inputs": [{"name": "context", "semantic_type": "text_context"}],
       "outputs": [{"name": "response", "semantic_type": "structured_text"}],
       "profiles": {
@@ -126,6 +135,7 @@
       "task_class": "edge_heavy",
       "description": "Represents a larger local reasoning workload with a 10B-scale footprint.",
       "model_variant": "synthetic-10b",
+      "accelerator_demand_tops": 72,
       "inputs": [{"name": "context", "semantic_type": "multimodal_context"}],
       "outputs": [{"name": "response", "semantic_type": "structured_decision"}],
       "profiles": {
@@ -139,6 +149,7 @@
       "task_class": "edge_heavy",
       "description": "Compresses an artifact before transmission or storage.",
       "model_variant": "synthetic-codec",
+      "accelerator_demand_tops": 0,
       "inputs": [{"name": "payload", "semantic_type": "binary_payload"}],
       "outputs": [{"name": "compressed_payload", "semantic_type": "compressed_payload"}],
       "profiles": {
@@ -152,6 +163,7 @@
       "task_class": "realtime_offloadable",
       "description": "Checks a candidate result and emits a structured verification report.",
       "model_variant": "synthetic-vlm-verifier",
+      "accelerator_demand_tops": 30,
       "inputs": [{"name": "candidate", "semantic_type": "structured_decision"}],
       "outputs": [{"name": "verification", "semantic_type": "verification_report"}],
       "profiles": {
@@ -165,6 +177,7 @@
       "task_class": "edge_heavy",
       "description": "Combines local map fragments into a shared spatial representation.",
       "model_variant": "synthetic-map-fusion",
+      "accelerator_demand_tops": 20,
       "inputs": [{"name": "map_fragments", "semantic_type": "map_fragment_set"}, {"name": "localization", "semantic_type": "localization_state"}],
       "outputs": [{"name": "fused_map", "semantic_type": "fused_map"}],
       "profiles": {

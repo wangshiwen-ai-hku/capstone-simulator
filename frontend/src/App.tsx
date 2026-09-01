@@ -23,6 +23,7 @@ import {
 } from '@xyflow/react';
 import {
   Box,
+  Bot,
   ChevronLeft,
   ChevronRight,
   CircleStop,
@@ -34,9 +35,11 @@ import {
   RotateCcw,
   Server,
   SlidersHorizontal,
+  SquareStack,
   Workflow,
   Zap,
 } from 'lucide-react';
+import MarsModePanel, { type MarsMode } from './MarsModePanel';
 import {
   generateScene,
   getArchitecture,
@@ -81,22 +84,22 @@ const HARDWARE = {
   orin_nano: {
     label: 'Orin Nano',
     architecture: 'jetson-orin-nano',
-    cpu: 1.2,
-    gpu: 1.1,
+    cpu: 6,
+    gpu: 67,
     memory: 8,
   },
   orin_nx: {
     label: 'Orin NX',
     architecture: 'jetson-orin-nx',
-    cpu: 2.2,
-    gpu: 2.6,
+    cpu: 8,
+    gpu: 157,
     memory: 16,
   },
   orin_agx: {
     label: 'AGX Orin',
     architecture: 'jetson-agx-orin',
-    cpu: 3.4,
-    gpu: 4.2,
+    cpu: 12,
+    gpu: 275,
     memory: 32,
   },
 } as const;
@@ -427,7 +430,7 @@ function TaskNode({ data, selected }: NodeProps<FlowNode>) {
         <div className="task-meta">
           <span>P{task?.priority ?? 0}</span>
           <span>{task?.compute_demand.toFixed(1)} CPU</span>
-          <span>{task?.gpu_demand.toFixed(1)} GPU</span>
+          <span>{task?.gpu_demand.toFixed(1)} TOPS</span>
         </div>
         <div className="progress-label">
           <span>{data.subtitle || 'Unassigned'}</span>
@@ -682,6 +685,8 @@ function initialGraph(
 
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarMode, setSidebarMode] = useState<MarsMode>('studio');
+  const [agentExpanded, setAgentExpanded] = useState(false);
   const [scenarioType, setScenarioType] = useState<ScenarioType>('warehouse');
   const [customScene, setCustomScene] = useState('');
   const [robotCount, setRobotCount] = useState(2);
@@ -793,6 +798,7 @@ export default function App() {
     difficulty,
     seed,
     use_llm: useLlm,
+    robot_hardware: hardware,
   }), [
     scenarioType,
     customScene,
@@ -802,6 +808,7 @@ export default function App() {
     difficulty,
     seed,
     useLlm,
+    hardware,
   ]);
 
   useEffect(() => {
@@ -890,6 +897,18 @@ export default function App() {
       setBuilding(false);
     }
   }, [applyHardware]);
+
+  const importScene = useCallback((imported: BenchmarkScene, source: string) => {
+    setError(null);
+    setRuntimeRun(null);
+    setPlaybackState('idle');
+    setPlayhead(0);
+    setScene(imported);
+    setSidebarMode('studio');
+    setAgentExpanded(false);
+    setLayoutRevision((value) => value + 1);
+    setApiStatus((current) => current.startsWith('MARS') ? current : `Imported from ${source}`);
+  }, []);
 
   useEffect(() => {
     if (initialBuildDone.current) return;
@@ -1077,14 +1096,14 @@ export default function App() {
   const runningCount = playback.filter((task) => task.state === 'running').length;
 
   return (
-    <div className={`studio-shell ${sidebarOpen ? '' : 'sidebar-collapsed'}`}>
+    <div className={`studio-shell ${sidebarOpen ? '' : 'sidebar-collapsed'} ${agentExpanded && sidebarMode === 'agent' ? 'agent-expanded' : ''}`}>
       <aside className="settings-sidebar">
         <div className="sidebar-brand">
           <div className="brand-mark"><Workflow size={19} /></div>
           {sidebarOpen && (
             <div>
-              <strong>MARS Studio</strong>
-              <small>Scheduler graph</small>
+              <strong>{sidebarMode === 'studio' ? 'MARS Studio' : sidebarMode === 'agent' ? 'MARS Agent' : 'MARS Templates'}</strong>
+              <small>{sidebarMode === 'studio' ? 'Scheduler graph' : sidebarMode === 'agent' ? 'Modelling copilot' : 'Benchmark library'}</small>
             </div>
           )}
           <button
@@ -1099,7 +1118,19 @@ export default function App() {
         </div>
 
         {sidebarOpen && (
-          <div className="settings-scroll">
+          <>
+            <nav className="mars-mode-switcher" aria-label="MARS workspace mode">
+              <button type="button" className={sidebarMode === 'studio' ? 'active' : ''} onClick={() => { setSidebarMode('studio'); setAgentExpanded(false); }}><SlidersHorizontal size={13} />Studio</button>
+              <button type="button" className={sidebarMode === 'agent' ? 'active' : ''} onClick={() => setSidebarMode('agent')}><Bot size={13} />Agent</button>
+              <button type="button" className={sidebarMode === 'templates' ? 'active' : ''} onClick={() => { setSidebarMode('templates'); setAgentExpanded(false); }}><SquareStack size={13} />Templates</button>
+            </nav>
+            <MarsModePanel
+              mode={sidebarMode}
+              scene={scene}
+              expanded={agentExpanded}
+              onExpandedChange={setAgentExpanded}
+              onImportScene={importScene}
+              studio={<div className="settings-scroll">
             <SettingsSection icon={<SlidersHorizontal size={15} />} title="Scene">
               <label htmlFor="scenario">Scene</label>
               <select id="scenario" value={scenarioType} onChange={(event) => setScenarioType(event.target.value as ScenarioType)}>
@@ -1171,7 +1202,7 @@ export default function App() {
                   >
                     <Cpu size={14} />
                     <span>{profile.label}</span>
-                    <small>{profile.memory} GB</small>
+                    <small>{profile.memory} GB / {profile.gpu} TOPS</small>
                   </button>
                 ))}
               </div>
@@ -1254,7 +1285,9 @@ export default function App() {
               <RefreshCcw size={15} className={building ? 'spin' : ''} />
               {building ? 'Building graph' : 'Apply settings'}
             </button>
-          </div>
+          </div>}
+            />
+          </>
         )}
       </aside>
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
+import pytest
 
 from backend.app import main as api_main
 from backend.app.mars_adapter import (
@@ -11,7 +13,12 @@ from backend.app.mars_adapter import (
 )
 from backend.app.runtime import runtime_for_scene
 from backend.app.scene_generator import build_deterministic_scene
-from backend.app.schemas import BenchmarkScene, GenerateSceneRequest
+from backend.app.schemas import (
+    BenchmarkScene,
+    BenchmarkTemplateCreate,
+    GenerateSceneRequest,
+    SimulateRequest,
+)
 from mars.optimizers import (
     algorithm_aliases,
     built_in_policy_ids,
@@ -78,6 +85,48 @@ def test_legacy_scene_without_link_fields_still_simulates() -> None:
     assert response.json()["metrics"]["task_count"] == len(
         payload["tasks"]
     )
+
+
+def test_unversioned_resource_units_fail_closed_at_request_boundaries() -> None:
+    payload = _scene().model_dump(mode="json")
+    payload.pop("resource_contract_version")
+
+    with pytest.raises(ValidationError, match="resource_contract_version"):
+        SimulateRequest.model_validate({"scene": payload})
+    with pytest.raises(ValidationError, match="resource_contract_version"):
+        BenchmarkTemplateCreate.model_validate(
+            {"name": "legacy", "scene": payload}
+        )
+
+
+def test_absolute_resource_scene_preserves_explicit_custom_workload() -> None:
+    payload = _scene().model_dump(mode="json")
+    payload["tasks"][0]["task_type"] = "company.custom_detector.v2"
+    payload["tasks"][0]["gpu_demand"] = 3.75
+
+    parsed = BenchmarkScene.model_validate(payload)
+
+    assert parsed.tasks[0].task_type == "company.custom_detector.v2"
+    assert parsed.tasks[0].gpu_demand == 3.75
+
+
+def test_known_scene_task_alias_is_canonicalized() -> None:
+    payload = _scene().model_dump(mode="json")
+    payload["tasks"][0]["task_type"] = "segmentation"
+    payload["tasks"][0]["gpu_demand"] = 36.0
+
+    parsed = BenchmarkScene.model_validate(payload)
+
+    assert parsed.tasks[0].task_type == "semantic_segmentation"
+
+
+def test_known_workload_rejects_noncanonical_accelerator_demand() -> None:
+    payload = _scene().model_dump(mode="json")
+    payload["tasks"][0]["task_type"] = "segmentation"
+    payload["tasks"][0]["gpu_demand"] = 0.85
+
+    with pytest.raises(ValidationError, match="expected 36 TOPS"):
+        BenchmarkScene.model_validate(payload)
 
 
 def test_complete_legacy_scene_works_for_both_api_views() -> None:

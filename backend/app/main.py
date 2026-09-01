@@ -1,8 +1,10 @@
 from dataclasses import asdict
 import logging
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 
 from mars import __version__ as mars_version
 from mars.domain.task import TASK_CLASS_LABELS, TaskClass
@@ -15,6 +17,7 @@ from mars.optimizers import (
 from mars.synthetic_workloads import load_default_synthetic_workloads
 
 from .config import get_settings
+from .agent_service import MarsAgentService
 from .llm_client import generate_scene_with_llm
 from .mars_adapter import SceneValidationError, validate_scene
 from .runtime import runtime_service
@@ -24,11 +27,17 @@ from .scene_generator import (
     placement_constraints_for,
 )
 from .schemas import (
+    AgentChatRequest,
+    AgentChatResponse,
     BenchmarkScene,
+    BenchmarkTemplate,
+    BenchmarkTemplateCreate,
+    BenchmarkTemplateList,
     GenerateSceneRequest,
     RuntimeWorkflowRequest,
     SimulateRequest,
 )
+from .template_store import TemplateStore, validate_workspace_token
 from .simulation import run_simulation_with_artifact
 from .trace_archive import begin_session, log_startup_banner, trace_status
 
@@ -39,7 +48,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+TEMPLATE_WORKSPACE_HEADER = "X-MARS-Workspace-Token"
+TEMPLATE_API_PATH = "/api/templates"
+
 settings = get_settings()
+agent_service = MarsAgentService(settings)
+template_store = TemplateStore(settings.mars_template_dir)
 synthetic_workloads = load_default_synthetic_workloads()
 log_startup_banner(settings)
 
@@ -61,11 +75,58 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def protect_template_workspace_responses(request: Request, call_next):
+    """Prevent capability-scoped template responses from being shared."""
+
+    response = await call_next(request)
+    if (
+        request.url.path == TEMPLATE_API_PATH
+        or request.url.path.startswith(f"{TEMPLATE_API_PATH}/")
+    ):
+        response.headers["Cache-Control"] = "private, no-store"
+        vary = response.headers.get("Vary", "")
+        vary_fields = {
+            field.strip().lower()
+            for field in vary.split(",")
+            if field.strip()
+        }
+        if TEMPLATE_WORKSPACE_HEADER.lower() not in vary_fields:
+            response.headers["Vary"] = ", ".join(
+                filter(None, (vary, TEMPLATE_WORKSPACE_HEADER))
+            )
+    return response
+
+
 def _validate_scene_request(scene: BenchmarkScene):
     try:
         return validate_scene(scene)
     except SceneValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+_template_workspace_capability = APIKeyHeader(
+    name=TEMPLATE_WORKSPACE_HEADER,
+    auto_error=False,
+)
+
+
+def _require_template_workspace(
+    workspace_token: Annotated[
+        str | None,
+        Security(_template_workspace_capability),
+    ],
+) -> str:
+    try:
+        return validate_workspace_token(workspace_token or "")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="a valid template workspace capability is required",
+        ) from exc
+
+
+TemplateWorkspace = Annotated[str, Depends(_require_template_workspace)]
 
 
 @app.get("/api/health")
@@ -100,6 +161,61 @@ def providers():
             "OpenAI-compatible client."
         ),
     }
+
+
+@app.get("/api/agent/status")
+def agent_status():
+    return {
+        "provider": "apiyi",
+        "configured": bool(settings.apiyi_api_key),
+        "models": ["gemini-3.1-flash-lite", "deepseek-v4-flash"],
+        "orchestrator": "langgraph_incremental_workflow",
+        "planning_mode": "bounded_single_model_turn",
+        "memory": "thread-scoped",
+        "retrieval": settings.agent_web_search,
+        "scene_schema": "BenchmarkScene",
+    }
+
+
+@app.post("/api/agent/chat", response_model=AgentChatResponse)
+def agent_chat(request: AgentChatRequest):
+    try:
+        response = agent_service.chat(request)
+        if response.scene_draft is not None:
+            _validate_scene_request(response.scene_draft)
+        return response
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/templates", response_model=BenchmarkTemplateList)
+def list_templates(workspace_token: TemplateWorkspace):
+    return BenchmarkTemplateList(templates=template_store.list(workspace_token))
+
+
+@app.post("/api/templates", response_model=BenchmarkTemplate, status_code=201)
+def create_template(
+    request: BenchmarkTemplateCreate,
+    workspace_token: TemplateWorkspace,
+):
+    _validate_scene_request(request.scene)
+    return template_store.create(workspace_token, request)
+
+
+@app.get("/api/templates/{template_id}", response_model=BenchmarkTemplate)
+def get_template(template_id: str, workspace_token: TemplateWorkspace):
+    try:
+        return template_store.get(workspace_token, template_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="template not found") from exc
+
+
+@app.delete("/api/templates/{template_id}", status_code=204)
+def delete_template(template_id: str, workspace_token: TemplateWorkspace):
+    try:
+        template_store.delete(workspace_token, template_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="template not found") from exc
 
 
 @app.get("/api/architecture")

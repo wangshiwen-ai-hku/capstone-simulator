@@ -18,6 +18,7 @@ from .schemas import (
     NodeSpec,
     PlacementConstraintsSpec,
     PortSpec,
+    RESOURCE_CONTRACT_VERSION,
     ResourceSnapshot,
     TaskCategory,
     Workload,
@@ -32,6 +33,27 @@ DIFFICULTY_FACTOR = {
     Difficulty.medium: 1.0,
     Difficulty.hard: 1.45,
     Difficulty.stress: 2.1,
+}
+
+ROBOT_HARDWARE = {
+    "orin_nano": {
+        "architecture": "jetson-orin-nano",
+        "cpu_capacity": 6.0,
+        "gpu_capacity": 67.0,
+        "memory_gb": 8.0,
+    },
+    "orin_nx": {
+        "architecture": "jetson-orin-nx",
+        "cpu_capacity": 8.0,
+        "gpu_capacity": 157.0,
+        "memory_gb": 16.0,
+    },
+    "orin_agx": {
+        "architecture": "jetson-agx-orin",
+        "cpu_capacity": 12.0,
+        "gpu_capacity": 275.0,
+        "memory_gb": 32.0,
+    },
 }
 
 SCENE_TEXT = {
@@ -302,6 +324,30 @@ def placement_constraints_for(
     return template.placement.model_copy(deep=True)
 
 
+def apply_absolute_resource_contract(
+    scene: BenchmarkScene,
+    robot_hardware: str,
+) -> BenchmarkScene:
+    """Normalize generated facts to hardware TOPS and fixed task demand."""
+
+    hardware = ROBOT_HARDWARE[robot_hardware]
+    for node in scene.nodes:
+        if node.kind == "robot":
+            node.architecture = str(hardware["architecture"])
+            node.cpu_capacity = float(hardware["cpu_capacity"])
+            node.gpu_capacity = float(hardware["gpu_capacity"])
+            node.memory_gb = float(hardware["memory_gb"])
+        elif node.kind == "edge":
+            node.gpu_capacity = 500.0
+    for task in scene.tasks:
+        try:
+            workload = SYNTHETIC_CATALOG.get(task.task_type)
+        except KeyError:
+            continue
+        task.gpu_demand = workload.accelerator_demand_tops
+    return scene
+
+
 def _category_definition(
     category: TaskCategory,
 ) -> tuple[
@@ -328,8 +374,8 @@ def _category_definition(
     profile = workload.profile_for(ExecutionTarget.ORIN)
     definition = {
         "task_class": template.reporting_class,
-        "compute": profile.resources.cpu_cores + 1.5 * profile.resources.gpu_units,
-        "gpu": profile.resources.gpu_units,
+        "compute": profile.resources.cpu_cores,
+        "gpu": workload.accelerator_demand_tops,
         "latency": profile.latency.p95_ms * 1.25,
         "data": profile.input_size_mb.typical,
         "output": profile.output_size_mb.typical,
@@ -342,9 +388,14 @@ def _category_definition(
     return definition, inputs, outputs, placement
 
 
-def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
+def build_deterministic_scene(
+    req: GenerateSceneRequest,
+    *,
+    preflight: bool = True,
+) -> BenchmarkScene:
     rng = random.Random(req.seed)
     factor = DIFFICULTY_FACTOR[req.difficulty]
+    robot_hardware = ROBOT_HARDWARE[req.robot_hardware]
     scene_id = f"scene_{req.scenario_type.value}_{req.seed:04d}"
     scene_name = req.custom_scene or SCENE_TEXT[req.scenario_type.value]
 
@@ -367,12 +418,12 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             id=rid,
             kind="robot",
             display_name=f"Jetson Orin Robot {i+1}",
-            architecture="jetson-orin",
+            architecture=robot_hardware["architecture"],
             # Resource profiles express CPU demand in cores.  Keep node
             # capacity in the same unit so feasibility is target-specific.
-            cpu_capacity=8.0,
-            gpu_capacity=1.0,
-            memory_gb=32,
+            cpu_capacity=robot_hardware["cpu_capacity"],
+            gpu_capacity=robot_hardware["gpu_capacity"],
+            memory_gb=robot_hardware["memory_gb"],
             bandwidth_mbps=rng.uniform(40, 120) / factor,
             base_latency_ms=rng.uniform(6, 22) * factor,
             battery_wh=rng.uniform(50, 120),
@@ -398,7 +449,9 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             display_name=f"Edge GPU Agent {i+1}",
             architecture="x86_64-cuda",
             cpu_capacity=16.0,
-            gpu_capacity=4.0,
+            # Synthetic edge accelerator capacity, expressed in the same
+            # sparse INT8 TOPS unit as task demand.
+            gpu_capacity=500.0,
             memory_gb=64,
             bandwidth_mbps=rng.uniform(500, 1200) / (0.7 + factor * 0.3),
             base_latency_ms=rng.uniform(12, 35) * factor,
@@ -468,7 +521,9 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             task_class=d["task_class"],
             priority=priority,
             compute_demand=round(compute, 3),
-            gpu_demand=round(min(1.0, d["gpu"] * factor * jitter), 3),
+            # A workload has fixed absolute accelerator demand. Difficulty
+            # and RNG must not resize the work to match a selected board.
+            gpu_demand=round(d["gpu"], 3),
             latency_budget_ms=round(latency_budget, 1),
             safety_level=d["safety"],
             model_requirement=d["model"],
@@ -519,8 +574,9 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
     )
 
     links, link_snapshots = _directed_links(nodes, resources)
-    return BenchmarkScene(
+    scene = BenchmarkScene(
         id=scene_id,
+        resource_contract_version=RESOURCE_CONTRACT_VERSION,
         title=f"{req.scenario_type.value.title()} multi-robot scheduling scenario",
         natural_language_description=scene_name,
         scenario_type=req.scenario_type.value,
@@ -541,6 +597,13 @@ def build_deterministic_scene(req: GenerateSceneRequest) -> BenchmarkScene:
             "the run reports deadline, latency, energy, and placement metrics",
         ],
     )
+    apply_absolute_resource_contract(scene, req.robot_hardware)
+    if preflight:
+        # Import lazily to keep scene schemas independent from scheduler wiring.
+        from .schedulability import ensure_generated_scene_schedulable
+
+        ensure_generated_scene_schedulable(scene)
+    return scene
 
 
 def _directed_links(

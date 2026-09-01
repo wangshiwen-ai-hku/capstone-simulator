@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from evals.benchmarks.binary_offload.spec import build_benchmark_manifest
 from mars.domain.artifact import ArtifactRef, InputArtifactBinding
 from mars.domain.execution import ExecutionMode
 from mars.domain.task import (
@@ -759,7 +760,7 @@ def test_shared_umax_includes_memory_and_does_not_double_count_carry_in() -> Non
     assert maximum_resource_utilization(problem) == pytest.approx(0.9)
 
 
-def test_profile_target_facts_are_carried_into_candidate_and_assignment() -> None:
+def test_profile_facts_preserve_declared_cpu_gpu_demand() -> None:
     node = NodeSpec(
         "profile-node",
         NodeKind.ROBOT,
@@ -810,7 +811,7 @@ def test_profile_target_facts_are_carried_into_candidate_and_assignment() -> Non
 
     plan = validate_plan(problem, BinaryOffloadOptimizer().solve(problem))
 
-    assert candidate.resource_demand == ResourceDemand(1.5, 0.25, 2.0)
+    assert candidate.resource_demand == ResourceDemand(1.0, 0.1, 2.0)
     assert candidate.output_size_mb == pytest.approx(0.75)
     assert candidate.success_probability == pytest.approx(0.8)
     assert plan.assignments[0].output_size_mb == pytest.approx(0.75)
@@ -826,7 +827,40 @@ def test_public_workload_profile_conversion_preserves_target_resources() -> None
 
     assert converted is not None
     assert converted.cpu_units == robot.resources.cpu_cores
-    assert converted.gpu_units == robot.resources.gpu_units
+    assert converted.gpu_units == workload.accelerator_demand_tops
     assert converted.peak_memory_mb == robot.resources.memory_mb
     assert converted.output_size_mb == robot.output_size_mb.typical
     assert converted.failure_rate == robot.failure_rate
+
+
+def test_benchmark_manifest_uses_the_scene_resource_contract() -> None:
+    workloads = load_default_synthetic_workloads()
+    manifest = build_benchmark_manifest(workloads)
+
+    assert manifest["schema_version"] == "mars.binary-offload-benchmark.v3"
+    assert manifest["resource_contract"] == {
+        "version": "mars.resources.absolute.v1",
+        "cpu_capacity_and_demand": "physical_cores",
+        "accelerator_capacity_and_demand": "sparse_int8_tops",
+        "task_cpu_and_accelerator_demands_are_authoritative": True,
+        "target_profiles_supply": [
+            "latency",
+            "energy",
+            "peak_memory",
+            "output_size",
+            "failure_rate",
+            "accuracy",
+        ],
+    }
+    summaries = {
+        item["task_type"]: item for item in manifest["profiles"]
+    }
+    workload = workloads.get("object_detection")
+    assert summaries["object_detection"]["declared_resource_demand"] == {
+        "cpu_cores": workload.to_task_spec().compute_demand,
+        "accelerator_sparse_int8_tops": 24.0,
+    }
+    assert all(
+        "gpu_units" not in target
+        for target in summaries["object_detection"]["targets"].values()
+    )

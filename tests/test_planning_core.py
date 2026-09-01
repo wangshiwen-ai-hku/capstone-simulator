@@ -32,6 +32,7 @@ from mars.optimizers import (
 from mars.scheduler import (
     allowed_nodes,
     build_scheduling_problem,
+    estimate_candidate,
     plan_scheduling_epoch,
 )
 
@@ -151,6 +152,41 @@ def test_required_capability_is_a_hard_filter() -> None:
     )
 
     assert allowed_nodes(task, nodes.values(), snapshots) == []
+
+
+def test_unprofiled_timing_does_not_treat_accelerator_tops_as_cpu_cores() -> None:
+    node = NodeSpec(
+        "edge",
+        NodeKind.EDGE,
+        cpu_capacity=16,
+        gpu_capacity=500,
+        memory_gb=64,
+        bandwidth_mbps=1000,
+        base_latency_ms=0,
+    )
+    task = _task("custom", source=node.node_id)
+    task = replace(
+        task,
+        spec=replace(
+            task.spec,
+            compute_demand=4,
+            gpu_demand=0,
+        ),
+    )
+
+    estimate = estimate_candidate(
+        task,
+        node,
+        ready_time_ms=0,
+        node_available_ms=0,
+        node_specs={node.node_id: node},
+        node_snapshots={node.node_id: NodeSnapshot(node.node_id)},
+        parent_artifacts=(),
+        profiles=None,
+    )
+
+    assert estimate.feasible
+    assert estimate.compute_ms == pytest.approx(25.0)
 
 
 def test_directed_links_are_asymmetric() -> None:
