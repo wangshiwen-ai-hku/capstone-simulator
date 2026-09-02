@@ -75,11 +75,8 @@ def test_authoring_assistant_structures_natural_language_as_studio_scene():
     assert client.post("/api/validate-workflow", json=scene).status_code == 200
 
 
-def test_legacy_agent_route_remains_a_hidden_compatibility_alias():
+def test_authoring_assistant_routes_are_canonical():
     client = TestClient(api_main.app)
-    assert api_main.agent_service is api_main.authoring_assistant_service
-    assert api_main.agent_status is api_main.authoring_assistant_status
-    assert api_main.agent_chat is api_main.authoring_assistant_chat
     with (
         patch.object(
             api_main.settings,
@@ -89,19 +86,15 @@ def test_legacy_agent_route_remains_a_hidden_compatibility_alias():
         patch.object(api_main.settings, "apiyi_api_key", None),
     ):
         response = client.post(
-            "/api/agent/chat",
+            "/api/authoring-assistant/chat",
             json={"message": "one robot maps a room"},
         )
 
     assert response.status_code == 200
-    assert client.get("/api/agent/status").json() == client.get(
-        "/api/authoring-assistant/status"
-    ).json()
+    assert client.get("/api/authoring-assistant/status").status_code == 200
     paths = client.get("/openapi.json").json()["paths"]
     assert "/api/authoring-assistant/chat" in paths
     assert "/api/authoring-assistant/status" in paths
-    assert "/api/agent/chat" not in paths
-    assert "/api/agent/status" not in paths
 
 
 def test_template_save_list_get_and_delete_round_trip():

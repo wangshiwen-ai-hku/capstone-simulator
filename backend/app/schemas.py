@@ -544,17 +544,6 @@ class AuthoringAssistantChatResponse(BaseModel):
     diagnostic: str = ""
 
 
-# Backward-compatible schema aliases for the former application-layer name.
-# Runtime execution agents use separate contracts under ``mars.runtime``.
-AgentModel = AuthoringAssistantModel
-AgentChatRequest = AuthoringAssistantChatRequest
-AgentSource = AuthoringAssistantSource
-AgentStructuredInfo = AuthoringAssistantStructuredInfo
-AgentPhase = AuthoringAssistantPhase
-AgentAtomicTaskPlan = AuthoringAssistantAtomicTaskPlan
-AgentChatResponse = AuthoringAssistantChatResponse
-
-
 class BenchmarkTemplateCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=1000)

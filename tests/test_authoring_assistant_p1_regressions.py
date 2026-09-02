@@ -46,21 +46,6 @@ def test_authoring_assistant_settings_accept_canonical_python_names():
     assert settings.authoring_assistant_model_timeout_seconds == 23
 
 
-def test_legacy_agent_settings_remain_compatible():
-    settings = Settings(
-        _env_file=None,
-        MARS_AGENT_WEB_SEARCH=False,
-        MARS_AGENT_SEARCH_TIMEOUT_SECONDS=9,
-        MARS_AGENT_MODEL_TIMEOUT_SECONDS=24,
-    )
-
-    assert settings.authoring_assistant_web_search is False
-    assert settings.authoring_assistant_search_timeout_seconds == 9
-    assert settings.authoring_assistant_model_timeout_seconds == 24
-    settings.agent_web_search = True
-    assert settings.authoring_assistant_web_search is True
-
-
 def test_authoring_assistant_preflights_only_the_confirmed_plan() -> None:
     service = _service()
     requirements = {

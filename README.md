@@ -515,9 +515,6 @@ Web and inspection API:
 - `GET /api/authoring-assistant/status`
 - `POST /api/authoring-assistant/chat`
 
-The former `/api/agent/status` and `/api/agent/chat` routes remain hidden
-compatibility aliases for a staged frontend/backend rollout.
-
 Central runtime:
 
 - `POST /api/runtime/bootstrap`
@@ -973,9 +970,6 @@ Web 与检查 API：
 - `POST /api/simulate`
 - `GET /api/authoring-assistant/status`
 - `POST /api/authoring-assistant/chat`
-
-原 `/api/agent/status` 与 `/api/agent/chat` 路径保留为不出现在 OpenAPI 文档中的
-兼容别名，便于前后端分阶段发布。
 
 中央运行时：
 

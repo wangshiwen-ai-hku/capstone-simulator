@@ -53,10 +53,6 @@ TEMPLATE_API_PATH = "/api/templates"
 
 settings = get_settings()
 authoring_assistant_service = AuthoringAssistantService(settings)
-# Compatibility names for callers that imported the former application label.
-agent_service = authoring_assistant_service
-AgentChatRequest = AuthoringAssistantChatRequest
-AgentChatResponse = AuthoringAssistantChatResponse
 template_store = TemplateStore(settings.mars_template_dir)
 synthetic_workloads = load_default_synthetic_workloads()
 log_startup_banner(settings)
@@ -168,7 +164,6 @@ def providers():
 
 
 @app.get("/api/authoring-assistant/status")
-@app.get("/api/agent/status", include_in_schema=False)
 def authoring_assistant_status():
     return {
         "provider": "apiyi",
@@ -186,11 +181,6 @@ def authoring_assistant_status():
     "/api/authoring-assistant/chat",
     response_model=AuthoringAssistantChatResponse,
 )
-@app.post(
-    "/api/agent/chat",
-    response_model=AuthoringAssistantChatResponse,
-    include_in_schema=False,
-)
 def authoring_assistant_chat(request: AuthoringAssistantChatRequest):
     try:
         response = authoring_assistant_service.chat(request)
@@ -199,11 +189,6 @@ def authoring_assistant_chat(request: AuthoringAssistantChatRequest):
         return response
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-# Import-level compatibility for callers of the former handler names.
-agent_status = authoring_assistant_status
-agent_chat = authoring_assistant_chat
 
 
 @app.get("/api/templates", response_model=BenchmarkTemplateList)
