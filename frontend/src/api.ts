@@ -1,11 +1,11 @@
 import type {
   Algorithm,
-  AgentChatResponse,
+  AuthoringAssistantChatResponse,
+  AuthoringAssistantModel,
   ArchitectureResponse,
   BenchmarkScene,
   BenchmarkTemplate,
   GenerateSceneRequest,
-  MarsAgentModel,
   RuntimeWorkflowRun,
   SchedulerRunOptions,
   SimulationResponse,
@@ -77,21 +77,24 @@ export function generateScene(payload: GenerateSceneRequest) {
   });
 }
 
-export function chatWithAgent(payload: {
+export function chatWithAuthoringAssistant(payload: {
   thread_id?: string;
   message: string;
-  model: MarsAgentModel;
+  model: AuthoringAssistantModel;
   enable_web_search: boolean;
   current_scene?: BenchmarkScene;
   action?: 'message' | 'confirm' | 'restart';
 }) {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 50_000);
-  return request<AgentChatResponse>('/api/agent/chat', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-    signal: controller.signal,
-  }).finally(() => window.clearTimeout(timeout));
+  return request<AuthoringAssistantChatResponse>(
+    '/api/authoring-assistant/chat',
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    },
+  ).finally(() => window.clearTimeout(timeout));
 }
 
 export function listTemplates() {

@@ -39,7 +39,7 @@ from .optimizers import (
 )
 from .profiling import ProfileCatalog
 from .run_artifact import RunArtifact, build_run_artifact
-from .runtime import InProcessRuntime
+from .runtime import InProcessRuntimeAdapter
 
 
 @dataclass
@@ -210,7 +210,7 @@ def run_workflow_artifact(
         link_snapshots=link_snapshots,
         network_jitter=network_jitter,
     )
-    runtime = InProcessRuntime(
+    runtime = InProcessRuntimeAdapter(
         node_specs,
         node_snapshots,
         execution_noise=resource_noise,
@@ -481,6 +481,9 @@ def project_coordinator_report(
         transport={
             "active": "in_process_runtime",
             "execution_path": "central_coordinator_runtime_port",
+            "runtime_adapter_id": "in_process",
+            "runtime_adapter_implementation": "InProcessRuntimeAdapter",
+            # Kept for API compatibility with existing report consumers.
             "runtime_adapter": "InProcessRuntime",
             "network_jitter": network_jitter,
             "resource_noise": resource_noise,

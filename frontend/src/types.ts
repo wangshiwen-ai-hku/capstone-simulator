@@ -206,42 +206,45 @@ export interface BenchmarkScene {
   trace_id?: string | null;
 }
 
-export type MarsAgentModel = 'deepseek-v4-flash' | 'gemini-3.1-flash-lite' | 'gemini-3.1-flash';
+export type AuthoringAssistantModel =
+  | 'deepseek-v4-flash'
+  | 'gemini-3.1-flash-lite'
+  | 'gemini-3.1-flash';
 
-export interface AgentSource {
+export interface AuthoringAssistantSource {
   title: string;
   url: string;
   snippet: string;
   kind: 'mars' | 'web';
 }
 
-export interface AgentStructuredInfo {
+export interface AuthoringAssistantStructuredInfo {
   task_spec: Record<string, unknown>;
   workflow_spec: Record<string, unknown>;
   assumptions: string[];
 }
 
-export interface AgentChatResponse {
+export interface AuthoringAssistantChatResponse {
   thread_id: string;
   message: string;
-  model: MarsAgentModel;
+  model: AuthoringAssistantModel;
   fallback: boolean;
   questions: string[];
   insights: string[];
   suggested_nodes: string[];
-  sources: AgentSource[];
-  structured_info: AgentStructuredInfo;
+  sources: AuthoringAssistantSource[];
+  structured_info: AuthoringAssistantStructuredInfo;
   scene_draft?: BenchmarkScene | null;
   ready_to_import: boolean;
   phase: 'discovery' | 'planning' | 'review' | 'ready';
   progress: number;
-  atomic_tasks: AgentAtomicTaskPlan[];
+  atomic_tasks: AuthoringAssistantAtomicTaskPlan[];
   provenance: 'api' | 'api_recovered' | 'local_intake' | 'local_fallback';
   effective_model?: string | null;
   diagnostic: string;
 }
 
-export interface AgentAtomicTaskPlan {
+export interface AuthoringAssistantAtomicTaskPlan {
   id: string;
   name: string;
   task_type: string;

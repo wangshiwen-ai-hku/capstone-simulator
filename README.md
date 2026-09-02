@@ -2,8 +2,8 @@
 
 MARS is a runtime-neutral central scheduler for multi-robot edge workflows.
 It contains the DAG and scheduling contracts, one asynchronous runtime
-contract, one coordinator event loop, an in-process simulation adapter, a
-FastAPI adapter, and a React interface.
+contract, one coordinator event loop, an in-process runtime adapter with an
+isolated simulation environment, a FastAPI adapter, and a React interface.
 
 The runnable architecture is:
 
@@ -16,9 +16,10 @@ React UI --> FastAPI adapter
                                                     |           +-- Optimizer
                                                     |                 +-- validated SchedulingPlan
                                                     +-- RuntimePort
-                                                          +-- InProcessRuntime
-                                                                +-- Simulated Robot Agent(s)
-                                                                +-- Simulated Edge Agent(s)
+                                                          +-- InProcessRuntimeAdapter
+                                                                +-- SimulationEnvironment
+                                                                      +-- SimulatedExecutionAgent(s): robot
+                                                                      +-- SimulatedExecutionAgent(s): edge
 
 CoordinatorReport --> immutable RunArtifact (inputs + raw run evidence)
                          +--> evals post-run evaluation
@@ -33,8 +34,14 @@ release, and retry. The same seed produces a repeatable run.
 
 Dependency direction is one way: `backend` imports `mars`; MARS does not import
 the web application. `CentralCoordinator` depends only on the aggregate,
-asynchronous `RuntimePort`. The in-process simulator is one implementation of
-that port.
+asynchronous `RuntimePort`. `InProcessRuntimeAdapter` is the in-process
+implementation of that port; `InProcessRuntime` remains its compatibility name.
+The adapter delegates simulation behavior to `SimulationEnvironment` and its
+`SimulatedExecutionAgent` instances.
+
+See [Runtime Adapter and Execution-Agent Architecture](docs/runtime-adapter-architecture.md)
+for the ownership boundaries, migration policy, and the explicitly unimplemented
+gRPC and DDS extension shapes.
 
 ## Implemented capabilities
 
@@ -191,9 +198,10 @@ after completion or retry. `FAIL_FAST` workflows use a single rolling commit so
 that a failure cannot leave sibling work in flight.
 
 Both Web simulation and runtime workflow submission use this path with
-`InProcessRuntime`. `mars.engine` is a compatibility wrapper and report
-projector for callers that still consume `SimulationReport`; it does not own a
-second scheduler or event loop.
+`InProcessRuntimeAdapter`. `InProcessRuntime` remains a compatibility name for
+existing callers. `mars.engine` is a compatibility wrapper and report projector
+for callers that still consume `SimulationReport`; it does not own a second
+scheduler or event loop.
 
 `RunArtifact` is the immutable, pre-evaluation record of a completed run: it
 captures declared workflow/topology/profile inputs, run configuration, retained
@@ -248,25 +256,25 @@ LLM_MAX_RETRIES=1
 LLM_STREAM_RESPONSES=1
 ```
 
-The left control surface also includes MARS Agent and MARS Templates. Agent
-models are routed through APIYI and currently allow `deepseek-v4-flash` and
-`gemini-3.1-flash-lite`. Configure `APIYI_KEY`; optional settings are documented in
-`backend/.env.example`. Without a key, the Agent remains usable in a local,
-deterministic structured-draft mode. Saved templates contain a complete,
-validated `BenchmarkScene` and can be imported directly into Studio. The Web
-client creates a cryptographically random template-workspace capability, keeps
-it in browser local storage, and sends it only to template endpoints. Template
-list/read/delete operations are isolated to that capability instead of exposing
-one global library. This is lightweight isolation for the demo, not user-account
-authentication: anyone who obtains the capability can access that workspace,
-and clearing site data loses the browser's reference to it. Export important
-templates as JSON backups.
+The left control surface also includes Authoring Assistant and Templates. The
+Authoring Assistant models are routed through APIYI and currently allow
+`deepseek-v4-flash` and `gemini-3.1-flash-lite`. Configure `APIYI_KEY`; optional
+settings are documented in `backend/.env.example`. Without a key, the assistant
+remains usable in a local, deterministic structured-draft mode. Saved templates
+contain a complete, validated `BenchmarkScene` and can be imported directly
+into Studio. The Web client creates a cryptographically random template-workspace
+capability, keeps it in browser local storage, and sends it only to template
+endpoints. Template list/read/delete operations are isolated to that capability
+instead of exposing one global library. This is lightweight isolation for the
+demo, not user-account authentication: anyone who obtains the capability can
+access that workspace, and clearing site data loses the browser's reference to
+it. Export important templates as JSON backups.
 
-MARS Agent uses an incremental conversation: discovery, atomic-task planning,
-review, then schema compilation after confirmation. Model calls are bounded by
-`MARS_AGENT_MODEL_TIMEOUT_SECONDS` (35 seconds by default). Retrieval creates
-its TLS context from the packaged `certifi` CA bundle, so a normal backend
-startup does not require manually exporting `SSL_CERT_FILE`.
+Authoring Assistant uses an incremental conversation: discovery, atomic-task
+planning, review, then schema compilation after confirmation. Model calls are
+bounded by `AUTHORING_ASSISTANT_MODEL_TIMEOUT_SECONDS` (35 seconds by default).
+Retrieval creates its TLS context from the packaged `certifi` CA bundle, so a
+normal backend startup does not require manually exporting `SSL_CERT_FILE`.
 
 Generated accelerator resources use absolute sparse INT8 TOPS: Jetson Orin
 Nano/NX/AGX capacities are 67/157/275 TOPS, while each workload declares one
@@ -458,7 +466,9 @@ mars/
   optimizers/binary_offload.py exhaustive ready-batch placement optimizer
   coordinator.py               central runtime orchestration, attempts, retry, report
   runtime/base.py              sole asynchronous control-plane runtime contract
-  runtime/inprocess.py         process-local simulated runtime adapter
+  runtime/agent.py             transport-neutral single-node execution protocol
+  runtime/simulation.py        simulation environment and simulated execution agent
+  runtime/inprocess.py         in-process adapter and legacy compatibility name
   run_artifact.py              immutable inputs and raw evidence for one run
   engine.py                    compatibility wrapper and SimulationReport projector
   synthetic_workloads.py       replaceable synthetic workload registry and sampler
@@ -477,6 +487,8 @@ interfaces/proto/mars/v1/      versioned cross-module data contracts
 configs/mars/                  synthetic workload and profile configuration
 tests/                         core, runtime contract, adapter, and API tests
 scripts/                       thin command-line and demonstration entry points
+docs/runtime-adapter-architecture.md
+                                runtime ownership and future transport shape
 ```
 
 The Proto files define versioned data messages for workflows, topology,
@@ -500,6 +512,8 @@ Web and inspection API:
 - `POST /api/validate-workflow`
 - `POST /api/generate-scene`
 - `POST /api/simulate`
+- `GET /api/authoring-assistant/status`
+- `POST /api/authoring-assistant/chat`
 
 Central runtime:
 
@@ -520,9 +534,19 @@ matching resource and transfer reservations and exact consumer-port input
 bindings. Command validation rejects an inconsistent plan fragment before an
 adapter receives it, and preserves the Problem, Snapshot, and Policy
 correlation identifiers for replay and audit.
-`InProcessRuntime` implements the contract with virtual time. Networked or
-deployment-specific adapters implement the same contract; the coordinator does
-not depend on their communication mechanism.
+`InProcessRuntimeAdapter` implements this contract and delegates virtual-time
+execution to `SimulationEnvironment`, which owns `SimulatedExecutionAgent`
+instances implementing the transport-neutral `ExecutionAgent` protocol.
+`InProcessRuntime` is retained as a compatibility name for existing callers.
+
+Future `GrpcRuntimeAdapter` and `DDSRuntimeAdapter` implementations would still
+implement `RuntimePort`. Each would own transport-specific client proxies that
+implement `ExecutionAgent`; a node-side gRPC service or DDS bridge would map
+wire messages onto the same transport-neutral execution semantics. The
+coordinator would remain unchanged. Those proxies, network adapters, and
+services are extension designs, not implemented features in this branch. The
+required responsibilities and contract-test policy are documented in
+[Runtime Adapter and Execution-Agent Architecture](docs/runtime-adapter-architecture.md).
 
 ---
 
@@ -530,7 +554,7 @@ not depend on their communication mechanism.
 
 MARS 是一个面向多机器人边缘工作流、与运行时无关的中央调度器。
 它包含有向无环图（DAG）与调度契约、一个异步运行时契约、一个协调器事件循环、一个
-进程内仿真适配器、一个 FastAPI 适配器以及一个 React 界面。
+带隔离仿真环境的进程内运行时适配器、一个 FastAPI 适配器以及一个 React 界面。
 
 可运行的架构如下：
 
@@ -543,9 +567,10 @@ React 界面 --> FastAPI 适配器
                                              |           +-- Optimizer
                                              |                 +-- 已校验的 SchedulingPlan
                                              +-- RuntimePort
-                                                   +-- InProcessRuntime
-                                                         +-- 仿真机器人 Agent
-                                                         +-- 仿真边缘 Agent
+                                                   +-- InProcessRuntimeAdapter
+                                                         +-- SimulationEnvironment
+                                                               +-- SimulatedExecutionAgent：机器人
+                                                               +-- SimulatedExecutionAgent：边缘节点
 
 CoordinatorReport --> 不可变 RunArtifact（输入 + 原始运行证据）
                              +--> evals 运行后评估
@@ -558,8 +583,13 @@ mars.engine -------> 同一制品路径上的兼容性封装
 任务完成、资源释放和重试。使用相同的随机种子可得到可复现的运行结果。
 
 依赖方向是单向的：`backend` 导入 `mars`，MARS 不导入 Web 应用。
-`CentralCoordinator` 只依赖聚合式异步接口 `RuntimePort`。进程内仿真器是该
-接口的一种实现。
+`CentralCoordinator` 只依赖聚合式异步接口 `RuntimePort`。
+`InProcessRuntimeAdapter` 是该接口的进程内实现；`InProcessRuntime` 保留为兼容名称。
+适配器把仿真行为委托给 `SimulationEnvironment` 及其持有的
+`SimulatedExecutionAgent` 实例。
+
+职责边界、迁移策略，以及明确尚未实现的 gRPC/DDS 扩展形态，见
+[Runtime Adapter and Execution-Agent Architecture](docs/runtime-adapter-architecture.md)。
 
 ## 已实现的能力
 
@@ -688,9 +718,10 @@ DAG 管理器而非优化器负责依赖满足与任务生命周期。每个滚�
 完成结果，更新 DAG 状态，并在完成或重试后重新规划。`FAIL_FAST`
 工作流采用单次滚动提交，避免任务失败后仍有同批任务在运行。
 
-Web 仿真和运行时工作流提交都通过 `InProcessRuntime` 使用这一路径。
-`mars.engine` 是面向仍使用 `SimulationReport` 的调用方所提供的兼容性封装和报告
-投影器；它不拥有第二个调度器或事件循环。
+Web 仿真和运行时工作流提交都通过 `InProcessRuntimeAdapter` 使用这一路径。
+`InProcessRuntime` 保留为面向现有调用方的兼容名称。`mars.engine` 是面向仍使用
+`SimulationReport` 的调用方所提供的兼容性封装和报告投影器；它不拥有第二个
+调度器或事件循环。
 
 `RunArtifact` 是一次已完成运行在评估前的不可变记录：它捕获声明的工作流/拓扑/
 性能配置输入、运行配置、保留的调度方案以及原始 `CoordinatorReport`。运行后指标
@@ -737,6 +768,20 @@ LLM_TIMEOUT_SECONDS=300
 LLM_MAX_RETRIES=1
 LLM_STREAM_RESPONSES=1
 ```
+
+左侧控制区还包含 `Authoring Assistant`（编写助手）和 Templates（模板）。
+Authoring Assistant 模型通过 APIYI 调用，当前支持 `deepseek-v4-flash` 和
+`gemini-3.1-flash-lite`。请配置 `APIYI_KEY`；其他可选设置见
+`backend/.env.example`。未配置密钥时，编写助手仍可使用本地、确定性的结构化草稿模式。
+保存的模板包含完整且已校验的 `BenchmarkScene`，可直接导入 Studio。Web 客户端会生成
+加密随机的模板工作区 capability，将其保存在浏览器本地存储中，并仅发送给模板端点。
+这只是演示所需的轻量隔离，并非用户账号认证：得到该 capability 的人可以访问对应
+工作区，清除站点数据也会丢失浏览器对它的引用。重要模板应导出为 JSON 备份。
+
+Authoring Assistant 使用渐进式对话：需求发现、原子任务规划、审阅，以及确认后的
+模式编译。模型调用由 `AUTHORING_ASSISTANT_MODEL_TIMEOUT_SECONDS` 限时（默认 35 秒）。
+检索使用随 `certifi` 打包的 CA 证书建立 TLS 上下文，正常启动后端时无需手动导出
+`SSL_CERT_FILE`。
 
 重启后端，并确认 `GET /api/health` 报告的内容包含
 `"provider": "deepseek"` 和 `"llm_configured": true`。在 Web 界面生成场景时启用
@@ -881,7 +926,9 @@ mars/
   optimizers/binary_offload.py 穷举式就绪批次放置优化器
   coordinator.py               中央运行时编排、尝试、重试与报告
   runtime/base.py              唯一的异步控制平面运行时契约
-  runtime/inprocess.py         进程内仿真运行时适配器
+  runtime/agent.py             与传输无关的单节点执行协议
+  runtime/simulation.py        仿真环境与仿真执行 Agent
+  runtime/inprocess.py         进程内适配器与旧兼容名称
   run_artifact.py              一次运行的不可变输入与原始证据
   engine.py                    兼容性封装与 SimulationReport 投影器
   synthetic_workloads.py       可替换的合成工作负载注册表与采样器
@@ -900,6 +947,8 @@ interfaces/proto/mars/v1/      带版本的跨模块数据契约
 configs/mars/                  合成工作负载与性能配置
 tests/                         核心、运行时契约、适配器与 API 测试
 scripts/                       精简命令行与演示入口
+docs/runtime-adapter-architecture.md
+                                运行时职责与未来传输形态
 ```
 
 Proto 文件为工作流、拓扑、性能剖析、调度问题与调度方案，以及运行时命令/事件定义
@@ -919,6 +968,8 @@ Web 与检查 API：
 - `POST /api/validate-workflow`
 - `POST /api/generate-scene`
 - `POST /api/simulate`
+- `GET /api/authoring-assistant/status`
+- `POST /api/authoring-assistant/chat`
 
 中央运行时：
 
@@ -936,5 +987,12 @@ Web 与检查 API：
 未经修改且已校验的 `Assignment`、与之匹配的资源和传输预留，以及精确到消费者端口的
 输入绑定。命令校验会在适配器收到不一致的调度方案片段之前将其拒绝，并保留调度问题、
 快照和策略的关联 ID，用于重放和审计。
-`InProcessRuntime` 以虚拟时间实现该契约。网络化或部署专用适配器实现同一契约；协调器
-不依赖其通信机制。
+`InProcessRuntimeAdapter` 实现该契约，并把虚拟时间执行委托给
+`SimulationEnvironment`；后者持有实现了与传输无关的 `ExecutionAgent` 协议的
+`SimulatedExecutionAgent` 实例。`InProcessRuntime` 保留为面向现有调用方的兼容名称。
+
+未来的 `GrpcRuntimeAdapter` 和 `DDSRuntimeAdapter` 仍应实现 `RuntimePort`。
+每个适配器应持有实现 `ExecutionAgent` 的传输专用客户端代理；节点侧的 gRPC 服务或
+DDS 桥接层负责把线上消息映射到同一套与传输无关的执行语义，协调器无需改变。这些
+代理、网络适配器和服务只是扩展设计，并非本分支已实现的功能。具体职责与契约测试策略见
+[Runtime Adapter and Execution-Agent Architecture](docs/runtime-adapter-architecture.md)。

@@ -135,7 +135,7 @@ const optionalFormulationDeadlineCapability = {
 } satisfies SchedulingAlgorithmCapability;
 
 vi.mock('./api', () => ({
-  chatWithAgent: vi.fn(),
+  chatWithAuthoringAssistant: vi.fn(),
   createTemplate: vi.fn(),
   deleteTemplate: vi.fn(),
   listTemplates: vi.fn().mockResolvedValue({ templates: [] }),
@@ -180,14 +180,16 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('MARS Studio', () => {
-  it('switches among Studio, Agent, and Templates and expands the Agent', async () => {
+  it('switches among Studio, Assistant, and Templates and expands the Assistant', async () => {
     render(<App />);
     await screen.findByText('Warehouse test scene');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Agent' }));
-    expect(screen.getAllByText('Modelling copilot')).toHaveLength(2);
-    fireEvent.click(screen.getByRole('button', { name: 'Expand MARS Agent' }));
-    expect(document.querySelector('.studio-shell')?.className).toContain('agent-expanded');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Authoring Assistant' }),
+    );
+    expect(screen.getAllByText('Authoring Assistant')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Authoring Assistant' }));
+    expect(document.querySelector('.studio-shell')?.className).toContain('assistant-expanded');
 
     fireEvent.click(screen.getByRole('button', { name: 'Templates' }));
     expect(screen.getAllByText('Benchmark library')).toHaveLength(2);

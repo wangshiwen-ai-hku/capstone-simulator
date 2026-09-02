@@ -17,7 +17,7 @@ from mars.optimizers import (
 from mars.synthetic_workloads import load_default_synthetic_workloads
 
 from .config import get_settings
-from .agent_service import MarsAgentService
+from .authoring_assistant import AuthoringAssistantService
 from .llm_client import generate_scene_with_llm
 from .mars_adapter import SceneValidationError, validate_scene
 from .runtime import runtime_service
@@ -27,8 +27,8 @@ from .scene_generator import (
     placement_constraints_for,
 )
 from .schemas import (
-    AgentChatRequest,
-    AgentChatResponse,
+    AuthoringAssistantChatRequest,
+    AuthoringAssistantChatResponse,
     BenchmarkScene,
     BenchmarkTemplate,
     BenchmarkTemplateCreate,
@@ -52,7 +52,7 @@ TEMPLATE_WORKSPACE_HEADER = "X-MARS-Workspace-Token"
 TEMPLATE_API_PATH = "/api/templates"
 
 settings = get_settings()
-agent_service = MarsAgentService(settings)
+authoring_assistant_service = AuthoringAssistantService(settings)
 template_store = TemplateStore(settings.mars_template_dir)
 synthetic_workloads = load_default_synthetic_workloads()
 log_startup_banner(settings)
@@ -163,8 +163,8 @@ def providers():
     }
 
 
-@app.get("/api/agent/status")
-def agent_status():
+@app.get("/api/authoring-assistant/status")
+def authoring_assistant_status():
     return {
         "provider": "apiyi",
         "configured": bool(settings.apiyi_api_key),
@@ -172,15 +172,18 @@ def agent_status():
         "orchestrator": "langgraph_incremental_workflow",
         "planning_mode": "bounded_single_model_turn",
         "memory": "thread-scoped",
-        "retrieval": settings.agent_web_search,
+        "retrieval": settings.authoring_assistant_web_search,
         "scene_schema": "BenchmarkScene",
     }
 
 
-@app.post("/api/agent/chat", response_model=AgentChatResponse)
-def agent_chat(request: AgentChatRequest):
+@app.post(
+    "/api/authoring-assistant/chat",
+    response_model=AuthoringAssistantChatResponse,
+)
+def authoring_assistant_chat(request: AuthoringAssistantChatRequest):
     try:
-        response = agent_service.chat(request)
+        response = authoring_assistant_service.chat(request)
         if response.scene_draft is not None:
             _validate_scene_request(response.scene_draft)
         return response
@@ -225,6 +228,11 @@ def architecture():
         "core_version": mars_version,
         "workflow": "validated DAG with blocked/ready/running/terminal lifecycle",
         "runtime": "central_scheduler_with_async_runtime_port",
+        "authoring_modes": [
+            "studio",
+            "authoring_assistant",
+            "templates",
+        ],
         "runtime_adapters": ["in_process"],
         "network_adapters": [],
         "network_model": "directed_link_topology",
