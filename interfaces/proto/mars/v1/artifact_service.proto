@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package mars.v1;
+
+// Bounded data-plane transfer for the trusted-LAN hardware validation MVP.
+// Separate from dispatch: callers request content hashes, never filesystem paths.
+service ArtifactStore {
+  rpc ReadArtifact(ReadArtifactRequest) returns (ReadArtifactResponse);
+}
+
+message ReadArtifactRequest {
+  string sha256 = 1;
+}
+
+message ReadArtifactResponse {
+  bytes data = 1;
+  string sha256 = 2;
+}

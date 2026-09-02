@@ -10,7 +10,7 @@ import json
 import math
 from time import perf_counter
 
-from .dag import DagIndex
+from .dag import DagIndex, has_implicit_source_input
 from .domain.artifact import (
     ArtifactRef,
     InputArtifactBinding,
@@ -195,7 +195,7 @@ def estimate_candidate(
             node,
             "dependency_artifact_unavailable",
         )
-    else:
+    elif task.spec.input_ports or has_implicit_source_input(task):
         transfer_inputs = [
             (
                 f"input:{task.workflow_id}:{task.task_id}",
@@ -203,6 +203,10 @@ def estimate_candidate(
                 task.spec.input_size_mb,
             )
         ]
+    else:
+        # An explicitly input-free typed producer needs no upload. Do not
+        # recreate a phantom input after exact binding normalization removed it.
+        transfer_inputs = []
 
     if topology is None:
         legacy_specs, legacy_snapshots = synthesize_legacy_full_mesh(
@@ -1336,13 +1340,14 @@ def _normalize_input_artifact_bindings(
         )
         if input_artifact_bindings is not None:
             needs_external = bool(unbound_ports) or (
-                not task.spec.input_ports
+                has_implicit_source_input(task)
                 and not bindings
                 and not task.dependency_task_ids
             )
         else:
             needs_external = (
                 not bindings and not task.dependency_task_ids
+                and (bool(task.spec.input_ports) or has_implicit_source_input(task))
             )
         if needs_external:
             if (

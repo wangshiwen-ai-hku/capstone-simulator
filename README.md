@@ -26,10 +26,16 @@ CoordinatorReport --> immutable RunArtifact (inputs + raw run evidence)
 mars.engine -------> compatibility wrapper over the same artifact path
 ```
 
-The central runtime uses virtual time rather than wall-clock model execution.
+The in-process simulation uses virtual time rather than wall-clock model execution.
 It performs agent registration, heartbeats, capability checks, resource
 reservation, assignment, typed Artifact transfer costing, completion, resource
 release, and retry. The same seed produces a repeatable run.
+
+For actual CPU execution on a PC and Jetson Orin, use the
+[hardware validation CLI](docs/hardware_validation.md). It uses the same
+`CentralCoordinator`, networked Agents, real workload subprocesses, and
+checksum-verified artifact transfer. Synthetic sensor inputs do not imply
+simulated computation; task completion and timing come from actual work.
 
 Dependency direction is one way: `backend` imports `mars`; MARS does not import
 the web application. `CentralCoordinator` depends only on the aggregate,
@@ -74,6 +80,8 @@ that port.
 - Explicit registration, heartbeat, reservation/release, attempts, and
   contract-safe retry.
 - Replaceable synthetic workload profiles for local development and integration testing.
+- CPU hardware-in-the-loop navigation workload with a real dependency DAG,
+  measured execution, host telemetry, and cross-Agent artifact transfer.
 - Web views for DAGs, typed data flow, assignments, attempts, Artifacts, metrics, and events.
 
 ## Task placement and reporting cohorts
@@ -435,8 +443,13 @@ in-process implementation model.
 
 The repository includes generated Python Proto bindings, an Agent-hosted gRPC
 service, a `GrpcRuntimeAdapter`, and a three-Agent localhost mock deployment.
-Real Jetson executors, payload transfer, TLS, service discovery, deployment
-middleware, and production optimizers such as MILP or ADMM remain out of scope.
+An explicit `navigation` executor also runs original CPU business computations
+on physical hosts and transfers their actual JSON artifacts between configured
+Agents. See the [PC + Orin runbook](docs/hardware_validation.md) for the
+sensor-generation, occupancy-mapping, planning, and validation workflow.
+Real sensors, physical actuation, GPU model inference, TLS/authentication,
+service discovery, deployment middleware, and production optimizers such as
+MILP or ADMM remain out of scope. Use the HIL services only on a trusted LAN.
 
 ## API
 
@@ -472,9 +485,15 @@ Start the three localhost mock Agents before using this path:
 python scripts/run_mock_agents.py
 ```
 
-For a three-device LAN smoke test, run one Agent per device with
+For a three-device mock LAN smoke test, run one Agent per device with
 `configs/mars/agents.hardware.example.json` and set `REAL_AGENT_ENDPOINTS` to
-the devices' actual IP addresses as described in the hardware deployment guide.
+the devices' actual IP addresses. That configuration still uses synthetic
+node values and mock task completion.
+
+For real computation on a PC and Orin, use the separate
+[hardware validation CLI](docs/hardware_validation.md), not the synthetic web
+scene generator. It does not require FastAPI, Vite, an LLM, or a separate
+business server. The existing web API is not a complete HIL authoring interface.
 
 ## Runtime boundary
 
@@ -519,9 +538,14 @@ CoordinatorReport --> 不可变 RunArtifact（输入 + 原始运行证据）
 mars.engine -------> 同一制品路径上的兼容性封装
 ```
 
-中央运行时采用虚拟时间，而不是执行模型时的真实墙钟时间。它会执行 Agent
+进程内仿真采用虚拟时间，而不是执行模型时的真实墙钟时间。它会执行 Agent
 注册、心跳、能力检查、资源预留、任务分派、带类型的制品（Artifact）传输成本计算、
 任务完成、资源释放和重试。使用相同的随机种子可得到可复现的运行结果。
+
+PC 与 Jetson Orin 上的真实 CPU 计算使用独立的
+[硬件验证命令行流程](docs/hardware_validation_zh.md)：同一个 `CentralCoordinator`
+通过网络 Agent 分派任务，独立业务子进程真实计算，并传输带校验和的实际结果。
+传感器输入是合成的，但计算、完成回报和耗时并非模拟值。
 
 依赖方向是单向的：`backend` 导入 `mars`，MARS 不导入 Web 应用。
 `CentralCoordinator` 只依赖聚合式异步接口 `RuntimePort`。进程内仿真器是该
@@ -558,6 +582,7 @@ mars.engine -------> 同一制品路径上的兼容性封装
 - 中央调度器支持场景定义的仿真 Orin 和边缘 Agent。
 - 显式的注册、心跳、资源预留/释放、尝试以及契约安全重试。
 - 可替换的合成工作负载配置，用于本地开发和集成测试。
+- 带真实依赖 DAG 的 CPU 硬件闭环导航工作负载，支持实测执行、主机状态和跨 Agent 数据传输。
 - 提供 DAG、带类型数据流、`Assignment`、尝试、制品、指标和事件的 Web 视图。
 
 ## 任务放置与报告分组
@@ -873,8 +898,13 @@ Proto 文件为工作流、拓扑、性能剖析、调度问题与调度方案�
 带版本的数据消息。它们是与语言无关的接口源；Python 领域类仍作为进程内实现模型。
 
 仓库已经包含生成的 Python Proto 绑定、Agent 托管的 gRPC 服务、
-`GrpcRuntimeAdapter` 和三个 Agent 的 localhost Mock 部署。真实 Jetson 执行器、payload
-传输、TLS、服务发现、部署中间件以及 MILP、ADMM 等生产级优化器仍不在当前范围内。
+`GrpcRuntimeAdapter` 和三个 Agent 的 localhost Mock 部署。新增的显式 `navigation`
+执行器支持在真实机器上运行原创 CPU 业务计算，并在配置好的 Agent 之间传输实际 JSON
+制品。[PC + Orin 操作指南](docs/hardware_validation_zh.md)说明了合成传感、占用栅格建图、
+路径规划及结果验证的闭环；无需 FastAPI、Vite、LLM 或单独的业务服务进程。
+现有网页生成的仍是合成场景，并非完整的硬件闭环编写入口。
+真实传感器、物理运动控制、GPU 模型推理、TLS/认证、服务发现、部署中间件以及
+MILP、ADMM 等生产级优化器仍不在当前范围内。仅在可信局域网运行硬件验证服务。
 
 ## API
 
