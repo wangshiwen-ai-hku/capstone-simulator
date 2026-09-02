@@ -62,7 +62,14 @@ from .optimizers import (
     SolveTracePhase,
     StatefulOptimizer,
 )
-from .runtime import InProcessRuntime, RuntimePort
+from .runtime import (
+    ExecutionAgent,
+    InProcessRuntime,
+    InProcessRuntimeAdapter,
+    SimulatedExecutionAgent,
+    SimulationEnvironment,
+    RuntimePort,
+)
 
 __all__ = [
     "ArtifactRef",
@@ -76,6 +83,7 @@ __all__ = [
     "DataPort",
     "DagValidationError",
     "ExecutionMode",
+    "ExecutionAgent",
     "FailurePolicy",
     "FormulatedOptimizer",
     "FormulationCompatibilityError",
@@ -84,6 +92,7 @@ __all__ = [
     "FormulationRegistry",
     "FormulationSpec",
     "InProcessRuntime",
+    "InProcessRuntimeAdapter",
     "InputArtifactBinding",
     "LinkSnapshot",
     "LinkSpec",
@@ -106,6 +115,8 @@ __all__ = [
     "PlacementConstraints",
     "PlanValidationError",
     "RuntimePort",
+    "SimulatedExecutionAgent",
+    "SimulationEnvironment",
     "RunArtifact",
     "SchedulingEpoch",
     "SchedulingFormulation",

@@ -13,7 +13,7 @@ from mars.coordinator import CentralCoordinator, CoordinatorReport
 from mars.domain.topology import LinkSnapshot
 from mars.optimizers import OptimizerRegistry
 from mars.run_artifact import RunArtifact, build_run_artifact
-from mars.runtime import InProcessRuntime
+from mars.runtime import InProcessRuntimeAdapter
 
 from .mars_adapter import (
     build_link_snapshots,
@@ -306,6 +306,10 @@ class LocalRuntimeService:
         view.update(
             {
                 "runtime": "process_local_virtual_time",
+                "runtime_adapter_id": "in_process",
+                "runtime_adapter_implementation": (
+                    "InProcessRuntimeAdapter"
+                ),
                 "topology": {
                     "central_schedulers": 1,
                     "orin_agents": kind_counts.get("robot", 0),
@@ -324,12 +328,12 @@ def runtime_for_scene(
     *,
     execution_noise: float = 0.04,
     respect_expected_accuracy: bool = False,
-) -> InProcessRuntime:
+) -> InProcessRuntimeAdapter:
     """Build a process-local runtime adapter for one declared topology."""
 
     validate_process_local_scene(scene)
     specs = build_node_specs(scene)
-    return InProcessRuntime(
+    return InProcessRuntimeAdapter(
         specs,
         build_node_snapshots(scene),
         execution_noise=execution_noise,

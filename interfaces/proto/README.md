@@ -114,7 +114,7 @@ in-process domain contracts and validation source:
 | optimization policy and limits | `mars/optimizers/policy.py` |
 | metric semantics and contract IDs | `mars/optimizers/evaluation.py` |
 | formulation and solve-request identity | `mars/optimizers/formulation.py`, `mars/optimizers/formulations/` |
-| runtime | `mars/runtime/base.py` |
+| runtime | `mars/runtime/base.py`, `mars/runtime/agent.py` |
 | profiling | `mars/profiling.py` |
 
 `mars/models.py` is a compatibility re-export and contains no independent
@@ -275,7 +275,7 @@ PC-to-agent 分派除已验证的计划片段外，仅包含确定性的 `solve_
 | 优化策略和限制 | `mars/optimizers/policy.py` |
 | 指标语义和契约 ID | `mars/optimizers/evaluation.py` |
 | 模型表述和求解请求标识 | `mars/optimizers/formulation.py`, `mars/optimizers/formulations/` |
-| 运行时 | `mars/runtime/base.py` |
+| 运行时 | `mars/runtime/base.py`, `mars/runtime/agent.py` |
 | 性能剖析 | `mars/profiling.py` |
 
 `mars/models.py` 是一个兼容性重导出模块，不包含独立的领域定义。
