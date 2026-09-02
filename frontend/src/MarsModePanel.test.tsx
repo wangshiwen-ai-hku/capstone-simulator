@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import MarsModePanel from './MarsModePanel';
 
 vi.mock('./api', () => ({
-  chatWithAgent: vi.fn(),
+  chatWithAuthoringAssistant: vi.fn(),
   createTemplate: vi.fn(),
   deleteTemplate: vi.fn(),
   listTemplates: vi.fn().mockResolvedValue({ templates: [] }),
@@ -13,11 +13,11 @@ vi.mock('./api', () => ({
 
 afterEach(() => cleanup());
 
-describe('MARS Agent retrieval', () => {
+describe('Authoring Assistant retrieval', () => {
   it('requires an explicit opt-in before querying arXiv', () => {
     render(
       <MarsModePanel
-        mode="agent"
+        mode="assistant"
         studio={null}
         scene={null}
         expanded={false}

@@ -686,7 +686,7 @@ function initialGraph(
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarMode, setSidebarMode] = useState<MarsMode>('studio');
-  const [agentExpanded, setAgentExpanded] = useState(false);
+  const [assistantExpanded, setAssistantExpanded] = useState(false);
   const [scenarioType, setScenarioType] = useState<ScenarioType>('warehouse');
   const [customScene, setCustomScene] = useState('');
   const [robotCount, setRobotCount] = useState(2);
@@ -905,7 +905,7 @@ export default function App() {
     setPlayhead(0);
     setScene(imported);
     setSidebarMode('studio');
-    setAgentExpanded(false);
+    setAssistantExpanded(false);
     setLayoutRevision((value) => value + 1);
     setApiStatus((current) => current.startsWith('MARS') ? current : `Imported from ${source}`);
   }, []);
@@ -1096,14 +1096,14 @@ export default function App() {
   const runningCount = playback.filter((task) => task.state === 'running').length;
 
   return (
-    <div className={`studio-shell ${sidebarOpen ? '' : 'sidebar-collapsed'} ${agentExpanded && sidebarMode === 'agent' ? 'agent-expanded' : ''}`}>
+    <div className={`studio-shell ${sidebarOpen ? '' : 'sidebar-collapsed'} ${assistantExpanded && sidebarMode === 'assistant' ? 'assistant-expanded' : ''}`}>
       <aside className="settings-sidebar">
         <div className="sidebar-brand">
           <div className="brand-mark"><Workflow size={19} /></div>
           {sidebarOpen && (
             <div>
-              <strong>{sidebarMode === 'studio' ? 'MARS Studio' : sidebarMode === 'agent' ? 'MARS Agent' : 'MARS Templates'}</strong>
-              <small>{sidebarMode === 'studio' ? 'Scheduler graph' : sidebarMode === 'agent' ? 'Modelling copilot' : 'Benchmark library'}</small>
+              <strong>{sidebarMode === 'studio' ? 'MARS Studio' : sidebarMode === 'assistant' ? 'Authoring Assistant' : 'MARS Templates'}</strong>
+              <small>{sidebarMode === 'studio' ? 'Scheduler graph' : sidebarMode === 'assistant' ? 'Workflow authoring' : 'Benchmark library'}</small>
             </div>
           )}
           <button
@@ -1120,15 +1120,21 @@ export default function App() {
         {sidebarOpen && (
           <>
             <nav className="mars-mode-switcher" aria-label="MARS workspace mode">
-              <button type="button" className={sidebarMode === 'studio' ? 'active' : ''} onClick={() => { setSidebarMode('studio'); setAgentExpanded(false); }}><SlidersHorizontal size={13} />Studio</button>
-              <button type="button" className={sidebarMode === 'agent' ? 'active' : ''} onClick={() => setSidebarMode('agent')}><Bot size={13} />Agent</button>
-              <button type="button" className={sidebarMode === 'templates' ? 'active' : ''} onClick={() => { setSidebarMode('templates'); setAgentExpanded(false); }}><SquareStack size={13} />Templates</button>
+              <button type="button" className={sidebarMode === 'studio' ? 'active' : ''} onClick={() => { setSidebarMode('studio'); setAssistantExpanded(false); }}><SlidersHorizontal size={13} />Studio</button>
+              <button
+                type="button"
+                className={sidebarMode === 'assistant' ? 'active' : ''}
+                onClick={() => setSidebarMode('assistant')}
+                aria-label="Authoring Assistant"
+                title="Authoring Assistant"
+              ><Bot size={13} />Authoring</button>
+              <button type="button" className={sidebarMode === 'templates' ? 'active' : ''} onClick={() => { setSidebarMode('templates'); setAssistantExpanded(false); }}><SquareStack size={13} />Templates</button>
             </nav>
             <MarsModePanel
               mode={sidebarMode}
               scene={scene}
-              expanded={agentExpanded}
-              onExpandedChange={setAgentExpanded}
+              expanded={assistantExpanded}
+              onExpandedChange={setAssistantExpanded}
               onImportScene={importScene}
               studio={<div className="settings-scroll">
             <SettingsSection icon={<SlidersHorizontal size={15} />} title="Scene">

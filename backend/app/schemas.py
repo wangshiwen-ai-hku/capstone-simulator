@@ -463,41 +463,46 @@ class BenchmarkScene(BaseModel):
         return self
 
 
-AgentModel = Literal[
+AuthoringAssistantModel = Literal[
     "deepseek-v4-flash",
     "gemini-3.1-flash-lite",
     "gemini-3.1-flash",
 ]
 
 
-class AgentChatRequest(BaseModel):
+class AuthoringAssistantChatRequest(BaseModel):
     """One guided modelling turn using the same scene contract as Studio."""
 
     thread_id: Optional[str] = None
     message: str = Field(min_length=1, max_length=12_000)
-    model: AgentModel = "gemini-3.1-flash-lite"
+    model: AuthoringAssistantModel = "gemini-3.1-flash-lite"
     enable_web_search: bool = False
     current_scene: Optional[BenchmarkScene] = None
     action: Literal["message", "confirm", "restart"] = "message"
 
 
-class AgentSource(BaseModel):
+class AuthoringAssistantSource(BaseModel):
     title: str
     url: str = ""
     snippet: str = ""
     kind: Literal["mars", "web"] = "mars"
 
 
-class AgentStructuredInfo(BaseModel):
+class AuthoringAssistantStructuredInfo(BaseModel):
     task_spec: Dict[str, Any] = Field(default_factory=dict)
     workflow_spec: Dict[str, Any] = Field(default_factory=dict)
     assumptions: List[str] = Field(default_factory=list)
 
 
-AgentPhase = Literal["discovery", "planning", "review", "ready"]
+AuthoringAssistantPhase = Literal[
+    "discovery",
+    "planning",
+    "review",
+    "ready",
+]
 
 
-class AgentAtomicTaskPlan(BaseModel):
+class AuthoringAssistantAtomicTaskPlan(BaseModel):
     id: str
     name: str
     task_type: str
@@ -510,23 +515,25 @@ class AgentAtomicTaskPlan(BaseModel):
     placement_hint: str = ""
 
 
-class AgentChatResponse(BaseModel):
+class AuthoringAssistantChatResponse(BaseModel):
     thread_id: str
     message: str
-    model: AgentModel
+    model: AuthoringAssistantModel
     fallback: bool = False
     questions: List[str] = Field(default_factory=list)
     insights: List[str] = Field(default_factory=list)
     suggested_nodes: List[str] = Field(default_factory=list)
-    sources: List[AgentSource] = Field(default_factory=list)
-    structured_info: AgentStructuredInfo = Field(
-        default_factory=AgentStructuredInfo
+    sources: List[AuthoringAssistantSource] = Field(default_factory=list)
+    structured_info: AuthoringAssistantStructuredInfo = Field(
+        default_factory=AuthoringAssistantStructuredInfo
     )
     scene_draft: Optional[BenchmarkScene] = None
     ready_to_import: bool = False
-    phase: AgentPhase = "discovery"
+    phase: AuthoringAssistantPhase = "discovery"
     progress: int = Field(default=0, ge=0, le=100)
-    atomic_tasks: List[AgentAtomicTaskPlan] = Field(default_factory=list)
+    atomic_tasks: List[AuthoringAssistantAtomicTaskPlan] = Field(
+        default_factory=list
+    )
     provenance: Literal[
         "api",
         "api_recovered",
@@ -535,6 +542,17 @@ class AgentChatResponse(BaseModel):
     ] = "local_intake"
     effective_model: Optional[str] = None
     diagnostic: str = ""
+
+
+# Backward-compatible schema aliases for the former application-layer name.
+# Runtime execution agents use separate contracts under ``mars.runtime``.
+AgentModel = AuthoringAssistantModel
+AgentChatRequest = AuthoringAssistantChatRequest
+AgentSource = AuthoringAssistantSource
+AgentStructuredInfo = AuthoringAssistantStructuredInfo
+AgentPhase = AuthoringAssistantPhase
+AgentAtomicTaskPlan = AuthoringAssistantAtomicTaskPlan
+AgentChatResponse = AuthoringAssistantChatResponse
 
 
 class BenchmarkTemplateCreate(BaseModel):

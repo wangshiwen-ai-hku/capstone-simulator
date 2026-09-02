@@ -68,7 +68,7 @@ textarea:focus-visible {
   grid-template-columns: 54px minmax(0, 1fr);
 }
 
-.studio-shell.agent-expanded {
+.studio-shell.assistant-expanded {
   grid-template-columns: min(66.666vw, 980px) minmax(0, 1fr);
 }
 
@@ -253,7 +253,7 @@ textarea:focus-visible {
   font-size: 8px;
 }
 
-.agent-options {
+.assistant-options {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -262,7 +262,7 @@ textarea:focus-visible {
   background: #15171b;
 }
 
-.agent-options select {
+.assistant-options select {
   min-width: 0;
   height: 28px;
   padding: 0 7px;
@@ -274,7 +274,7 @@ textarea:focus-visible {
   font-size: 9px;
 }
 
-.agent-options label {
+.assistant-options label {
   display: flex;
   height: 28px;
   align-items: center;
@@ -287,14 +287,14 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-.agent-options input {
+.assistant-options input {
   width: 12px;
   height: 12px;
   margin: 0;
   accent-color: var(--green);
 }
 
-.agent-phase {
+.assistant-phase {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 2px;
@@ -303,7 +303,7 @@ textarea:focus-visible {
   background: #121418;
 }
 
-.agent-phase span {
+.assistant-phase span {
   padding: 4px 2px;
   overflow: hidden;
   border-radius: 3px;
@@ -315,12 +315,12 @@ textarea:focus-visible {
   text-transform: uppercase;
 }
 
-.agent-phase span.active {
+.assistant-phase span.active {
   color: #c9efda;
   background: #20372a;
 }
 
-.agent-thread {
+.assistant-thread {
   min-height: 0;
   padding: 12px 10px;
   flex: 1;
@@ -370,7 +370,7 @@ textarea:focus-visible {
   background: #1d2a23;
 }
 
-.agent-result {
+.assistant-result {
   margin-top: 7px;
   padding: 9px;
   border: 1px solid #2f363e;
@@ -378,7 +378,7 @@ textarea:focus-visible {
   background: #15181c;
 }
 
-.agent-progress {
+.assistant-progress {
   position: relative;
   height: 14px;
   margin-bottom: 8px;
@@ -387,13 +387,13 @@ textarea:focus-visible {
   background: #0f1114;
 }
 
-.agent-progress > span {
+.assistant-progress > span {
   position: absolute;
   inset: 0 auto 0 0;
   background: rgba(105, 196, 147, .25);
 }
 
-.agent-progress > small {
+.assistant-progress > small {
   position: relative;
   z-index: 1;
   display: block;
@@ -471,7 +471,7 @@ textarea:focus-visible {
   font-size: 7px;
 }
 
-.agent-provenance {
+.assistant-provenance {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -504,22 +504,22 @@ textarea:focus-visible {
   background: #292316;
 }
 
-.agent-provenance details {
+.assistant-provenance details {
   max-width: 55%;
   color: #818b96;
   font-size: 7px;
   text-align: right;
 }
 
-.agent-provenance details p {
+.assistant-provenance details p {
   margin: 4px 0 0;
   color: #aeb5bd;
   line-height: 1.4;
   text-align: left;
 }
 
-.agent-insights > strong,
-.agent-questions > strong {
+.assistant-insights > strong,
+.assistant-questions > strong {
   display: block;
   margin-bottom: 5px;
   color: #aeb7c1;
@@ -527,7 +527,7 @@ textarea:focus-visible {
   text-transform: uppercase;
 }
 
-.agent-insights ul {
+.assistant-insights ul {
   margin: 0;
   padding-left: 15px;
   color: #aeb6c0;
@@ -535,7 +535,7 @@ textarea:focus-visible {
   line-height: 1.45;
 }
 
-.agent-insights li + li {
+.assistant-insights li + li {
   margin-top: 3px;
 }
 
@@ -558,26 +558,26 @@ textarea:focus-visible {
   text-transform: capitalize;
 }
 
-.agent-questions {
+.assistant-questions {
   margin-top: 9px;
   padding-top: 8px;
   border-top: 1px solid #2a2f36;
 }
 
-.agent-questions p {
+.assistant-questions p {
   margin: 4px 0;
   color: #bdc4cc;
   font-size: 9px;
   line-height: 1.4;
 }
 
-.agent-result details {
+.assistant-result details {
   margin-top: 8px;
   color: var(--muted);
   font-size: 8px;
 }
 
-.agent-result details a {
+.assistant-result details a {
   display: block;
   margin-top: 5px;
   overflow: hidden;
@@ -586,7 +586,7 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-.agent-import,
+.assistant-import,
 .template-save-card button,
 .template-actions button {
   display: flex;
@@ -602,13 +602,13 @@ textarea:focus-visible {
   cursor: pointer;
 }
 
-.agent-import {
+.assistant-import {
   width: 100%;
   min-height: 30px;
   margin-top: 9px;
 }
 
-.agent-thinking {
+.assistant-thinking {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -616,18 +616,18 @@ textarea:focus-visible {
   font-size: 8px;
 }
 
-.agent-thinking i {
+.assistant-thinking i {
   width: 4px;
   height: 4px;
   border-radius: 50%;
   background: var(--green);
-  animation: agent-pulse 900ms ease-in-out infinite alternate;
+  animation: assistant-pulse 900ms ease-in-out infinite alternate;
 }
 
-.agent-thinking i:nth-child(2) { animation-delay: 180ms; }
-.agent-thinking i:nth-child(3) { animation-delay: 360ms; }
+.assistant-thinking i:nth-child(2) { animation-delay: 180ms; }
+.assistant-thinking i:nth-child(3) { animation-delay: 360ms; }
 
-@keyframes agent-pulse {
+@keyframes assistant-pulse {
   to { opacity: .25; transform: translateY(-2px); }
 }
 
@@ -642,7 +642,7 @@ textarea:focus-visible {
   line-height: 1.4;
 }
 
-.agent-composer {
+.assistant-composer {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 34px;
   gap: 6px;
@@ -651,7 +651,7 @@ textarea:focus-visible {
   background: #15171b;
 }
 
-.agent-composer textarea {
+.assistant-composer textarea {
   min-width: 0;
   min-height: 54px;
   max-height: 130px;
@@ -665,7 +665,7 @@ textarea:focus-visible {
   line-height: 1.4;
 }
 
-.agent-composer button {
+.assistant-composer button {
   border: 1px solid #3d7357;
   border-radius: 5px;
   color: #e3f7eb;
@@ -673,7 +673,7 @@ textarea:focus-visible {
   cursor: pointer;
 }
 
-.agent-composer button:disabled,
+.assistant-composer button:disabled,
 .template-save-card button:disabled {
   cursor: not-allowed;
   opacity: .45;

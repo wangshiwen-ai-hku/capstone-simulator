@@ -9,18 +9,22 @@ from fastapi.testclient import TestClient
 
 from backend.app import main as api_main
 from backend.app.template_store import TemplateStore
-from backend.app.agent_service import MarsAgentService
+from backend.app.authoring_assistant import AuthoringAssistantService
 from backend.app.config import Settings
 
 
-def test_agent_structures_natural_language_as_studio_scene():
+def test_authoring_assistant_structures_natural_language_as_studio_scene():
     client = TestClient(api_main.app)
     with (
-        patch.object(api_main.settings, "agent_web_search", False),
+        patch.object(
+            api_main.settings,
+            "authoring_assistant_web_search",
+            False,
+        ),
         patch.object(api_main.settings, "apiyi_api_key", None),
     ):
         discovery = client.post(
-            "/api/agent/chat",
+            "/api/authoring-assistant/chat",
             json={
                 "message": (
                     "一个广场的两个自动售货机器人，间隔一分钟分别收到"
@@ -36,7 +40,7 @@ def test_agent_structures_natural_language_as_studio_scene():
         assert first["ready_to_import"] is False
 
         planned = client.post(
-            "/api/agent/chat",
+            "/api/authoring-assistant/chat",
             json={
                 "thread_id": first["thread_id"],
                 "message": "优先最短完工时间，需要视觉识别和路径规划",
@@ -50,7 +54,7 @@ def test_agent_structures_natural_language_as_studio_scene():
         assert plan["atomic_tasks"]
 
         response = client.post(
-            "/api/agent/chat",
+            "/api/authoring-assistant/chat",
             json={
                 "thread_id": first["thread_id"],
                 "message": "确认编译",
@@ -69,6 +73,35 @@ def test_agent_structures_natural_language_as_studio_scene():
     assert {task["arrival_time_ms"] for task in scene["tasks"]} == {0.0, 60_000.0}
     assert all(task["placement_constraints"] for task in scene["tasks"])
     assert client.post("/api/validate-workflow", json=scene).status_code == 200
+
+
+def test_legacy_agent_route_remains_a_hidden_compatibility_alias():
+    client = TestClient(api_main.app)
+    assert api_main.agent_service is api_main.authoring_assistant_service
+    assert api_main.agent_status is api_main.authoring_assistant_status
+    assert api_main.agent_chat is api_main.authoring_assistant_chat
+    with (
+        patch.object(
+            api_main.settings,
+            "authoring_assistant_web_search",
+            False,
+        ),
+        patch.object(api_main.settings, "apiyi_api_key", None),
+    ):
+        response = client.post(
+            "/api/agent/chat",
+            json={"message": "one robot maps a room"},
+        )
+
+    assert response.status_code == 200
+    assert client.get("/api/agent/status").json() == client.get(
+        "/api/authoring-assistant/status"
+    ).json()
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/api/authoring-assistant/chat" in paths
+    assert "/api/authoring-assistant/status" in paths
+    assert "/api/agent/chat" not in paths
+    assert "/api/agent/status" not in paths
 
 
 def test_template_save_list_get_and_delete_round_trip():
@@ -165,10 +198,10 @@ def test_template_workspace_capability_is_required_and_rejects_traversal():
             TemplateStore(directory).list("../../other-workspace")
 
 
-def test_agent_uses_one_bounded_model_turn_then_compiles_confirmed_plan():
-    service = MarsAgentService(Settings(_env_file=None))
+def test_authoring_assistant_uses_one_bounded_model_turn_then_compiles_confirmed_plan():
+    service = AuthoringAssistantService(Settings(_env_file=None))
     service.settings.apiyi_api_key = "test-key"
-    service.settings.agent_web_search = False
+    service.settings.authoring_assistant_web_search = False
     discovery_completion = SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content='''{
           "summary": "I understand the pickup scenario.",
@@ -194,9 +227,9 @@ def test_agent_uses_one_bounded_model_turn_then_compiles_confirmed_plan():
         planning_completion,
     ]
 
-    with patch("backend.app.agent_service.OpenAI", return_value=client_instance) as openai:
-        first = service.chat(api_main.AgentChatRequest(message="两台机器人执行取货"))
-        review = service.chat(api_main.AgentChatRequest(
+    with patch("backend.app.authoring_assistant.OpenAI", return_value=client_instance) as openai:
+        first = service.chat(api_main.AuthoringAssistantChatRequest(message="两台机器人执行取货"))
+        review = service.chat(api_main.AuthoringAssistantChatRequest(
             thread_id=first.thread_id,
             message="优先最短完工时间",
         ))
@@ -208,10 +241,13 @@ def test_agent_uses_one_bounded_model_turn_then_compiles_confirmed_plan():
         "localization",
         "local_planning",
     ]
-    assert openai.call_args.kwargs["timeout"] == service.settings.agent_model_timeout_seconds
+    assert (
+        openai.call_args.kwargs["timeout"]
+        == service.settings.authoring_assistant_model_timeout_seconds
+    )
     assert openai.call_args.kwargs["max_retries"] == 0
 
-    ready = service.chat(api_main.AgentChatRequest(
+    ready = service.chat(api_main.AuthoringAssistantChatRequest(
         thread_id=first.thread_id,
         message="确认",
         action="confirm",
@@ -225,15 +261,15 @@ def test_agent_uses_one_bounded_model_turn_then_compiles_confirmed_plan():
 
 
 def test_retrieval_uses_certifi_without_ssl_cert_file_export():
-    service = MarsAgentService(Settings(_env_file=None))
+    service = AuthoringAssistantService(Settings(_env_file=None))
     response = MagicMock()
     response.read.return_value = b"<feed></feed>"
     response.__enter__.return_value = response
     response.__exit__.return_value = False
 
     with (
-        patch("backend.app.agent_service.ssl.create_default_context", wraps=__import__("ssl").create_default_context) as context,
-        patch("backend.app.agent_service.urlopen", return_value=response),
+        patch("backend.app.authoring_assistant.ssl.create_default_context", wraps=__import__("ssl").create_default_context) as context,
+        patch("backend.app.authoring_assistant.urlopen", return_value=response),
     ):
         sources = service._retrieve("robot scheduling")
 
@@ -241,10 +277,10 @@ def test_retrieval_uses_certifi_without_ssl_cert_file_export():
     assert sources[0].kind == "mars"
 
 
-def test_agent_recovers_semantic_tasks_from_non_json_api_output():
-    service = MarsAgentService(Settings(_env_file=None))
+def test_authoring_assistant_recovers_semantic_tasks_from_non_json_api_output():
+    service = AuthoringAssistantService(Settings(_env_file=None))
     service.settings.apiyi_api_key = "test-key"
-    service.settings.agent_web_search = False
+    service.settings.authoring_assistant_web_search = False
     discovery = SimpleNamespace(choices=[SimpleNamespace(
         message=SimpleNamespace(content='{"summary":"understood","questions":["goal?"],"assumptions":[]}')
     )])
@@ -257,12 +293,12 @@ def test_agent_recovers_semantic_tasks_from_non_json_api_output():
     client = MagicMock()
     client.chat.completions.create.side_effect = [discovery, malformed_plan]
 
-    with patch("backend.app.agent_service.OpenAI", return_value=client):
-        first = service.chat(api_main.AgentChatRequest(
+    with patch("backend.app.authoring_assistant.OpenAI", return_value=client):
+        first = service.chat(api_main.AuthoringAssistantChatRequest(
             message="two robots receive pickup jobs",
             model="gemini-3.1-flash-lite",
         ))
-        review = service.chat(api_main.AgentChatRequest(
+        review = service.chat(api_main.AuthoringAssistantChatRequest(
             thread_id=first.thread_id,
             message="minimize route delay",
             model="gemini-3.1-flash-lite",

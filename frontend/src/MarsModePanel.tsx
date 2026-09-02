@@ -13,19 +13,19 @@ import {
   Workflow,
 } from 'lucide-react';
 import {
-  chatWithAgent,
+  chatWithAuthoringAssistant,
   createTemplate,
   deleteTemplate,
   listTemplates,
 } from './api';
 import type {
-  AgentChatResponse,
+  AuthoringAssistantChatResponse,
   BenchmarkScene,
   BenchmarkTemplate,
-  MarsAgentModel,
+  AuthoringAssistantModel,
 } from './types';
 
-export type MarsMode = 'studio' | 'agent' | 'templates';
+export type MarsMode = 'studio' | 'assistant' | 'templates';
 
 interface Props {
   mode: MarsMode;
@@ -37,9 +37,9 @@ interface Props {
 }
 
 interface ChatTurn {
-  role: 'user' | 'agent';
+  role: 'user' | 'assistant';
   text: string;
-  response?: AgentChatResponse;
+  response?: AuthoringAssistantChatResponse;
 }
 
 export default function MarsModePanel({
@@ -51,15 +51,17 @@ export default function MarsModePanel({
   onImportScene,
 }: Props) {
   const [threadId, setThreadId] = useState<string>();
-  const [model, setModel] = useState<MarsAgentModel>('gemini-3.1-flash-lite');
+  const [model, setModel] = useState<AuthoringAssistantModel>('gemini-3.1-flash-lite');
   const [webSearch, setWebSearch] = useState(false);
   const [input, setInput] = useState('');
   const [turns, setTurns] = useState<ChatTurn[]>([{
-    role: 'agent',
+    role: 'assistant',
     text: 'Describe the robots, task arrivals, and optimization goal. I will clarify critical constraints and build a workflow draft aligned with Studio.',
   }]);
-  const [agentBusy, setAgentBusy] = useState(false);
-  const [agentPhase, setAgentPhase] = useState<AgentChatResponse['phase']>('discovery');
+  const [assistantBusy, setAssistantBusy] = useState(false);
+  const [assistantPhase, setAssistantPhase] = useState<
+    AuthoringAssistantChatResponse['phase']
+  >('discovery');
   const [panelError, setPanelError] = useState<string | null>(null);
   const [templates, setTemplates] = useState<BenchmarkTemplate[]>([]);
   const [templateName, setTemplateName] = useState('');
@@ -85,21 +87,21 @@ export default function MarsModePanel({
     if (typeof chatEnd.current?.scrollIntoView === 'function') {
       chatEnd.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [turns, agentBusy]);
+  }, [turns, assistantBusy]);
 
   async function sendMessage(
     action: 'message' | 'confirm' | 'restart' = 'message',
     explicitMessage?: string,
   ) {
     const message = explicitMessage ?? input.trim();
-    if (!message || agentBusy) return;
+    if (!message || assistantBusy) return;
     if (action === 'message') setInput('');
     setPanelError(null);
-    setAgentBusy(true);
-    if (action === 'message' && threadId) setAgentPhase('planning');
+    setAssistantBusy(true);
+    if (action === 'message' && threadId) setAssistantPhase('planning');
     setTurns((current) => [...current, { role: 'user', text: message }]);
     try {
-      const response = await chatWithAgent({
+      const response = await chatWithAuthoringAssistant({
         thread_id: threadId,
         message,
         model,
@@ -108,9 +110,9 @@ export default function MarsModePanel({
         action,
       });
       setThreadId(response.thread_id);
-      setAgentPhase(response.phase);
+      setAssistantPhase(response.phase);
       setTurns((current) => [...current, {
-        role: 'agent',
+        role: 'assistant',
         text: response.message,
         response,
       }]);
@@ -121,7 +123,7 @@ export default function MarsModePanel({
           : reason instanceof Error ? reason.message : String(reason),
       );
     } finally {
-      setAgentBusy(false);
+      setAssistantBusy(false);
     }
   }
 
@@ -184,57 +186,57 @@ export default function MarsModePanel({
   return (
     <div className="mode-panel-root">
       <div className="mode-panel-view" hidden={mode !== 'studio'}>{studio}</div>
-      <div className="mode-panel-view agent-panel" hidden={mode !== 'agent'}>
+      <div className="mode-panel-view assistant-panel" hidden={mode !== 'assistant'}>
         <div className="panel-toolbar">
           <div>
-            <strong><Bot size={15} /> Modelling copilot</strong>
-            <small>memory / structured workflow / retrieval</small>
+            <strong><Bot size={15} /> Authoring Assistant</strong>
+            <small>workflow drafting / memory / retrieval</small>
           </div>
           <button
             type="button"
             className="icon-button"
             onClick={() => onExpandedChange(!expanded)}
-            aria-label={expanded ? 'Shrink MARS Agent' : 'Expand MARS Agent'}
+            aria-label={expanded ? 'Shrink Authoring Assistant' : 'Expand Authoring Assistant'}
             title={expanded ? 'Shrink to sidebar' : 'Expand to two thirds'}
           >
             {expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
           </button>
         </div>
-        <div className="agent-options">
-          <select value={model} onChange={(event) => setModel(event.target.value as MarsAgentModel)} aria-label="Agent model">
+        <div className="assistant-options">
+          <select value={model} onChange={(event) => setModel(event.target.value as AuthoringAssistantModel)} aria-label="Authoring Assistant model">
             <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (recommended)</option>
             <option value="deepseek-v4-flash">deepseek-v4-flash</option>
           </select>
-          <label title="When enabled, MARS sends generic workflow keywords to arXiv and includes the results in planning.">
+          <label title="When enabled, the Authoring Assistant sends generic workflow keywords to arXiv and includes the results in planning.">
             <input type="checkbox" checked={webSearch} onChange={(event) => setWebSearch(event.target.checked)} />
             <Globe2 size={12} /> Retrieval via arXiv
           </label>
         </div>
-        <div className="agent-phase" aria-label="Agent modelling phase">
+        <div className="assistant-phase" aria-label="Authoring Assistant modelling phase">
           {(['discovery', 'planning', 'review', 'ready'] as const).map((phase) => (
-            <span key={phase} className={phase === agentPhase ? 'active' : ''}>{phase}</span>
+            <span key={phase} className={phase === assistantPhase ? 'active' : ''}>{phase}</span>
           ))}
         </div>
-        <div className="agent-thread" aria-live="polite">
+        <div className="assistant-thread" aria-live="polite">
           {turns.map((turn, index) => (
             <div className={`chat-turn ${turn.role}`} key={`${turn.role}-${index}`}>
-              <span>{turn.role === 'agent' ? 'MARS' : 'You'}</span>
+              <span>{turn.role === 'assistant' ? 'Assistant' : 'You'}</span>
               <p>{turn.text}</p>
               {turn.response && (
-                <AgentResult
+                <AuthoringAssistantResult
                   response={turn.response}
                   onImport={onImportScene}
                   onConfirm={() => void sendMessage('confirm', 'Confirm and compile this atomic-task plan')}
-                  canConfirm={index === turns.length - 1 && !agentBusy}
+                  canConfirm={index === turns.length - 1 && !assistantBusy}
                 />
               )}
             </div>
           ))}
-          {agentBusy && <div className="agent-thinking"><i /><i /><i /> {agentPhase === 'discovery' ? 'Planning atomic tasks with APIYI...' : 'Processing this modelling step...'}</div>}
+          {assistantBusy && <div className="assistant-thinking"><i /><i /><i /> {assistantPhase === 'discovery' ? 'Planning atomic tasks with APIYI...' : 'Processing this modelling step...'}</div>}
           <div ref={chatEnd} />
         </div>
         {panelError && <div className="panel-error" role="alert">{panelError}</div>}
-        <div className="agent-composer">
+        <div className="assistant-composer">
           <textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}
@@ -245,9 +247,9 @@ export default function MarsModePanel({
               }
             }}
             placeholder="Example: two vending robots receive pickup tasks one minute apart..."
-            aria-label="Message MARS Agent"
+            aria-label="Message Authoring Assistant"
           />
-          <button type="button" onClick={() => void sendMessage()} disabled={agentBusy || !input.trim()} aria-label="Send to MARS Agent">
+          <button type="button" onClick={() => void sendMessage()} disabled={assistantBusy || !input.trim()} aria-label="Send to Authoring Assistant">
             <Send size={15} />
           </button>
         </div>
@@ -296,20 +298,20 @@ export default function MarsModePanel({
   );
 }
 
-function AgentResult({
+function AuthoringAssistantResult({
   response,
   onImport,
   onConfirm,
   canConfirm,
 }: {
-  response: AgentChatResponse;
+  response: AuthoringAssistantChatResponse;
   onImport: (scene: BenchmarkScene, source: string) => void;
   onConfirm: () => void;
   canConfirm: boolean;
 }) {
   return (
-    <div className="agent-result">
-      <div className="agent-provenance">
+    <div className="assistant-result">
+      <div className="assistant-provenance">
         <small className={`provenance-badge ${response.provenance}`}>
           {response.provenance === 'api'
             ? `API / ${response.effective_model ?? response.model}`
@@ -321,7 +323,7 @@ function AgentResult({
         </small>
         {response.diagnostic && <details><summary>Diagnostic</summary><p>{response.diagnostic}</p></details>}
       </div>
-      <div className="agent-progress"><span style={{ width: `${response.progress}%` }} /><small>{response.phase} / {response.progress}%</small></div>
+      <div className="assistant-progress"><span style={{ width: `${response.progress}%` }} /><small>{response.phase} / {response.progress}%</small></div>
       {response.atomic_tasks.length > 0 && (
         <div className="atomic-plan">
           <strong>Atomic task plan</strong>
@@ -336,17 +338,17 @@ function AgentResult({
           ))}
         </div>
       )}
-      {response.insights.length > 0 && <div className="agent-insights"><strong>Engineering insights</strong><ul>{response.insights.map((item) => <li key={item}>{item}</li>)}</ul></div>}
+      {response.insights.length > 0 && <div className="assistant-insights"><strong>Engineering insights</strong><ul>{response.insights.map((item) => <li key={item}>{item}</li>)}</ul></div>}
       {response.suggested_nodes.length > 0 && <div className="node-chips">{response.suggested_nodes.map((item) => <span key={item}>{item.replace(/_/g, ' ')}</span>)}</div>}
-      {response.questions.length > 0 && <div className="agent-questions"><strong>Questions to refine</strong>{response.questions.map((item) => <p key={item}>{item}</p>)}</div>}
+      {response.questions.length > 0 && <div className="assistant-questions"><strong>Questions to refine</strong>{response.questions.map((item) => <p key={item}>{item}</p>)}</div>}
       {response.sources.some((source) => source.kind === 'web') && <details><summary>Retrieved methods</summary>{response.sources.filter((source) => source.kind === 'web').map((source) => <a href={source.url} target="_blank" rel="noreferrer" key={source.url}>{source.title}</a>)}</details>}
       {response.phase === 'review' && !response.ready_to_import && canConfirm && (
-        <button type="button" className="agent-import" onClick={onConfirm}>
+        <button type="button" className="assistant-import" onClick={onConfirm}>
           <Workflow size={13} /> Confirm and compile workflow
         </button>
       )}
       {response.scene_draft && response.ready_to_import && (
-        <button type="button" className="agent-import" onClick={() => onImport(response.scene_draft!, 'MARS Agent')}>
+        <button type="button" className="assistant-import" onClick={() => onImport(response.scene_draft!, 'Authoring Assistant')}>
           <Import size={13} /> Import workflow to Studio
         </button>
       )}

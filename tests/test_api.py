@@ -183,6 +183,10 @@ class ApiTests(unittest.TestCase):
             "central_scheduler_with_async_runtime_port",
         )
         self.assertEqual(payload["runtime_adapters"], ["in_process"])
+        self.assertEqual(
+            payload["authoring_modes"],
+            ["studio", "authoring_assistant", "templates"],
+        )
         self.assertEqual(payload["network_adapters"], [])
         self.assertNotIn("transport_interfaces", payload)
 
@@ -190,6 +194,11 @@ class ApiTests(unittest.TestCase):
         bootstrapped = self.client.post("/api/runtime/bootstrap")
         self.assertEqual(bootstrapped.status_code, 200)
         runtime = bootstrapped.json()
+        self.assertEqual(runtime["runtime_adapter_id"], "in_process")
+        self.assertEqual(
+            runtime["runtime_adapter_implementation"],
+            "InProcessRuntimeAdapter",
+        )
         self.assertEqual(runtime["topology"]["central_schedulers"], 1)
         self.assertEqual(
             runtime["topology"]["total_agents"],

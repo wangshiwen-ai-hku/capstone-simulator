@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -81,19 +81,64 @@ class Settings(BaseSettings):
         default="tmp/mars-templates",
         alias="MARS_TEMPLATE_DIR",
     )
-    agent_web_search: bool = Field(default=True, alias="MARS_AGENT_WEB_SEARCH")
-    agent_search_timeout_seconds: int = Field(
+    authoring_assistant_web_search: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "authoring_assistant_web_search",
+            "AUTHORING_ASSISTANT_WEB_SEARCH",
+            "MARS_AGENT_WEB_SEARCH",
+        ),
+    )
+    authoring_assistant_search_timeout_seconds: int = Field(
         default=4,
         ge=1,
         le=20,
-        alias="MARS_AGENT_SEARCH_TIMEOUT_SECONDS",
+        validation_alias=AliasChoices(
+            "authoring_assistant_search_timeout_seconds",
+            "AUTHORING_ASSISTANT_SEARCH_TIMEOUT_SECONDS",
+            "MARS_AGENT_SEARCH_TIMEOUT_SECONDS",
+        ),
     )
-    agent_model_timeout_seconds: int = Field(
+    authoring_assistant_model_timeout_seconds: int = Field(
         default=35,
         ge=5,
         le=120,
-        alias="MARS_AGENT_MODEL_TIMEOUT_SECONDS",
+        validation_alias=AliasChoices(
+            "authoring_assistant_model_timeout_seconds",
+            "AUTHORING_ASSISTANT_MODEL_TIMEOUT_SECONDS",
+            "MARS_AGENT_MODEL_TIMEOUT_SECONDS",
+        ),
     )
+
+    @property
+    def agent_web_search(self) -> bool:
+        """Backward-compatible alias for the former application-layer name."""
+
+        return self.authoring_assistant_web_search
+
+    @agent_web_search.setter
+    def agent_web_search(self, value: bool) -> None:
+        self.authoring_assistant_web_search = value
+
+    @property
+    def agent_search_timeout_seconds(self) -> int:
+        """Backward-compatible alias for the former application-layer name."""
+
+        return self.authoring_assistant_search_timeout_seconds
+
+    @agent_search_timeout_seconds.setter
+    def agent_search_timeout_seconds(self, value: int) -> None:
+        self.authoring_assistant_search_timeout_seconds = value
+
+    @property
+    def agent_model_timeout_seconds(self) -> int:
+        """Backward-compatible alias for the former application-layer name."""
+
+        return self.authoring_assistant_model_timeout_seconds
+
+    @agent_model_timeout_seconds.setter
+    def agent_model_timeout_seconds(self, value: int) -> None:
+        self.authoring_assistant_model_timeout_seconds = value
 
     def cors_origin_list(self) -> List[str]:
         return [x.strip() for x in self.cors_origins.split(",") if x.strip()]
@@ -133,14 +178,19 @@ class Settings(BaseSettings):
             "configured": bool(config.get("api_key")),
         }
 
-    def apiyi_agent_config(self, model: str) -> dict[str, str | None]:
-        """Resolve the allow-listed Agent model through APIYI only."""
+    def apiyi_authoring_assistant_config(
+        self,
+        model: str,
+    ) -> dict[str, str | None]:
+        """Resolve an allow-listed Authoring Assistant model via APIYI."""
         if model not in {
             "deepseek-v4-flash",
             "gemini-3.1-flash-lite",
             "gemini-3.1-flash",
         }:
-            raise ValueError(f"unsupported MARS Agent model: {model}")
+            raise ValueError(
+                f"unsupported Authoring Assistant model: {model}"
+            )
         resolved = self.apiyi_model
         if model != "deepseek-v4-flash":
             resolved = self.apiyi_gemini_model
@@ -154,6 +204,11 @@ class Settings(BaseSettings):
             "base_url": self.apiyi_base_url,
             "model": resolved,
         }
+
+    def apiyi_agent_config(self, model: str) -> dict[str, str | None]:
+        """Backward-compatible alias for the former application-layer name."""
+
+        return self.apiyi_authoring_assistant_config(model)
 
 
 @lru_cache
