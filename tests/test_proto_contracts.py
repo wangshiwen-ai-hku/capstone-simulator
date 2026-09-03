@@ -18,7 +18,7 @@ PROTO_FILES = (
     "runtime.proto",
     "profiling.proto",
 )
-SERVICE_PROTO_FILES = ("runtime_service.proto",)
+SERVICE_PROTO_FILES = ("runtime_service.proto", "artifact_service.proto")
 
 OBJECTIVE_METRIC_PROTO_LEGACY_NAMES = {
     "TOTAL_COMMUNICATION_MS": "TOTAL_COMMUNICATION_TIME_MS",

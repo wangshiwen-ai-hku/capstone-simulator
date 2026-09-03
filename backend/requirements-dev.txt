@@ -1,5 +1,6 @@
 # Development dependencies extend the complete runtime environment.
 -r requirements.txt
+-r ../agent/requirements-hardware.txt
 
 # Quality and test tooling for local development and CI.
 pytest==8.3.4

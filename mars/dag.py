@@ -499,6 +499,19 @@ def resolve_task_inputs(
     )
 
 
+def has_implicit_source_input(task: TaskInstance) -> bool:
+    """Whether an undeclared input must retain the legacy source-data binding.
+
+    Typed producers with no input ports and no input bytes generate their own
+    output. Untyped tasks retain the historical implicit input, even at size
+    zero. Declared input ports are resolved separately and are never implicit.
+    """
+
+    return not task.spec.input_ports and (
+        task.spec.input_size_mb > 0 or not task.spec.output_ports
+    )
+
+
 def resolve_task_input_bindings(
     manager: TaskManager,
     task_id: str,
@@ -553,7 +566,7 @@ def resolve_task_input_bindings(
         )
 
     needs_external_binding = bool(unbound_ports) or (
-        not task.spec.input_ports
+        has_implicit_source_input(task)
         and not bindings
         and not task.dependency_task_ids
     )
