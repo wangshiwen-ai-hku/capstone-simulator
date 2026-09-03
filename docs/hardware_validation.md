@@ -1,5 +1,10 @@
 # PC + Jetson Orin hardware validation
 
+This page retains the CPU navigation procedure. For real CUDA and pretrained
+SmolVLA inference with a recorded robot observation, continue with the
+[GPU/VLA runbook](vla_hardware_validation.md). The ML worker uses a separate
+environment so its dependencies do not replace the MARS communication stack.
+
 This runbook runs actual CPU computations through MARS on a PC and an Orin.
 The PC runs the central coordinator; both machines run an execution Agent.
 Each accepted task launches a bounded workload subprocess, so there is no

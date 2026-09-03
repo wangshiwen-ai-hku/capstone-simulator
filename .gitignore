@@ -3,6 +3,7 @@
 # ==============================================================================
 .DS_Store
 .mars-hil/
+.mars-vla/
 .DS_Store?
 ._*
 .Spotlight-V100
@@ -136,6 +137,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv-*/
 env/
 venv/
 ENV/

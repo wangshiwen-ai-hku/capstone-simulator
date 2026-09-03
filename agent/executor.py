@@ -38,20 +38,28 @@ class NavigationExecutor:
         from examples.hardware_workloads import PORT_TYPES
 
         self.ports = PORT_TYPES
+        self.worker_python = sys.executable
+        self.worker_module = "examples.hardware_workloads.worker"
+        self.options: dict = {}
 
     async def execute(self, task_type: str, inputs: dict, seed: int) -> ExecutionResult:
         if task_type not in self.ports:
             raise ValueError(f"unsupported business task: {task_type}")
         request = canonical_json(
-            {"task_type": task_type, "inputs": inputs, "seed": seed}
+            {
+                "task_type": task_type,
+                "inputs": inputs,
+                "seed": seed,
+                **({"options": self.options} if self.options else {}),
+            }
         )
         if len(request) > 4 * MAX_ARTIFACT_BYTES:
             raise ValueError("business inputs exceed the invocation limit")
         started = perf_counter()
         process = await asyncio.create_subprocess_exec(
-            sys.executable,
+            self.worker_python,
             "-m",
-            "examples.hardware_workloads.worker",
+            self.worker_module,
             cwd=Path(__file__).resolve().parents[1],
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -81,3 +89,95 @@ class NavigationExecutor:
         # Reject NaN/Infinity from a malformed worker before producing artifacts.
         canonical_json(outputs)
         return ExecutionResult(outputs, elapsed_ms)
+
+
+class VlaExecutor(NavigationExecutor):
+    """Fixed VLA worker; its optional ML environment is separate from gRPC.
+
+    Paths and interpreter are selected by the local operator at Agent startup,
+    never by a remote dispatch. CPU input/validation roles need no ML packages.
+    """
+
+    def __init__(
+        self,
+        role: str,
+        *,
+        worker_python: str | None = None,
+        observation_file: str | Path | None = None,
+        model_dir: str | Path | None = None,
+        device: str = "cuda:0",
+        repeats: int = 3,
+    ) -> None:
+        from examples.vla_workloads import PORT_TYPES
+
+        if role not in {"io", "cuda"}:
+            raise ValueError("VLA executor role must be io or cuda")
+        if not 1 <= repeats <= 20:
+            raise ValueError("VLA repeats must be between 1 and 20")
+        tasks = (
+            {"hil_vla_observe", "hil_vla_validate", "hil_cuda_validate"}
+            if role == "io"
+            else {"hil_cuda_smoke"}
+            | ({"hil_vla_infer"} if model_dir is not None else set())
+        )
+        self.ports = {name: PORT_TYPES[name] for name in tasks}
+        self.gpu_demands = {name: 1.0 for name in tasks} if role == "cuda" else {}
+        # Keep a virtualenv's python symlink intact. Resolving it to the base
+        # interpreter silently discards that environment's ML dependencies.
+        self.worker_python = (
+            str(Path(worker_python).expanduser().absolute())
+            if worker_python
+            else sys.executable
+        )
+        self.worker_module = "examples.vla_workloads.worker"
+        self.options = {"device": device, "repeats": repeats}
+        for key, value in (
+            ("observation_file", observation_file),
+            ("model_dir", model_dir),
+        ):
+            if value is not None:
+                path = Path(value).resolve()
+                if not path.exists():
+                    raise ValueError(f"{key} does not exist: {path}")
+                self.options[key] = str(path)
+
+    async def probe_cuda(self) -> dict:
+        """Check the exact worker interpreter/device before advertising CUDA."""
+        process = await asyncio.create_subprocess_exec(
+            self.worker_python,
+            "-m",
+            self.worker_module,
+            cwd=Path(__file__).resolve().parents[1],
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(
+                    canonical_json(
+                        {
+                            "task_type": "probe",
+                            "inputs": {},
+                            "seed": 0,
+                            "options": {"device": self.options["device"]},
+                        }
+                    )
+                ),
+                timeout=60,
+            )
+        except BaseException:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            raise
+        if process.returncode:
+            raise ValueError(
+                "CUDA preflight failed: " + stderr.decode(errors="replace")[-1800:]
+            )
+        if len(stdout) > 65536:
+            raise ValueError("CUDA preflight returned oversized metadata")
+        info = json.loads(stdout)["gpu_info"]
+        if not isinstance(info, dict) or info.get("available") is not True:
+            raise ValueError("worker did not verify a CUDA device")
+        return info

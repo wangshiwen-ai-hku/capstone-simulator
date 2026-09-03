@@ -36,6 +36,8 @@ For actual CPU execution on a PC and Jetson Orin, use the
 `CentralCoordinator`, networked Agents, real workload subprocesses, and
 checksum-verified artifact transfer. Synthetic sensor inputs do not imply
 simulated computation; task completion and timing come from actual work.
+For real NVIDIA GPU execution, the [CUDA/SmolVLA runbook](docs/vla_hardware_validation.md)
+adds measured matrix operations and pretrained VLA action inference from recorded robot observations.
 
 Dependency direction is one way: `backend` imports `mars`; MARS does not import
 the web application. `CentralCoordinator` depends only on the aggregate,
@@ -447,7 +449,12 @@ An explicit `navigation` executor also runs original CPU business computations
 on physical hosts and transfers their actual JSON artifacts between configured
 Agents. See the [PC + Orin runbook](docs/hardware_validation.md) for the
 sensor-generation, occupancy-mapping, planning, and validation workflow.
-Real sensors, physical actuation, GPU model inference, TLS/authentication,
+The optional `vla-cuda` and `vla-io` executors also run real CUDA matrix checks
+and offline pretrained SmolVLA inference. A recorded SO100 observation travels
+from the PC to the GPU host, and actual action results return for validation.
+See the [GPU/VLA runbook](docs/vla_hardware_validation.md) for pinned model/data
+downloads, separate ML dependencies and measured CUDA timing/memory evidence.
+Real sensors, physical actuation, TLS/authentication,
 service discovery, deployment middleware, and production optimizers such as
 MILP or ADMM remain out of scope. Use the HIL services only on a trusted LAN.
 
@@ -546,6 +553,8 @@ PC 与 Jetson Orin 上的真实 CPU 计算使用独立的
 [硬件验证命令行流程](docs/hardware_validation_zh.md)：同一个 `CentralCoordinator`
 通过网络 Agent 分派任务，独立业务子进程真实计算，并传输带校验和的实际结果。
 传感器输入是合成的，但计算、完成回报和耗时并非模拟值。
+真实 NVIDIA GPU 测试使用 [CUDA/SmolVLA 指南](docs/vla_hardware_validation_zh.md)，
+包括实测矩阵计算和以真实机器人记录观测为输入的预训练 VLA 动作推理。
 
 依赖方向是单向的：`backend` 导入 `mars`，MARS 不导入 Web 应用。
 `CentralCoordinator` 只依赖聚合式异步接口 `RuntimePort`。进程内仿真器是该
@@ -903,7 +912,11 @@ Proto 文件为工作流、拓扑、性能剖析、调度问题与调度方案�
 制品。[PC + Orin 操作指南](docs/hardware_validation_zh.md)说明了合成传感、占用栅格建图、
 路径规划及结果验证的闭环；无需 FastAPI、Vite、LLM 或单独的业务服务进程。
 现有网页生成的仍是合成场景，并非完整的硬件闭环编写入口。
-真实传感器、物理运动控制、GPU 模型推理、TLS/认证、服务发现、部署中间件以及
+新增 `vla-cuda`、`vla-io` 执行器支持真实 CUDA 运算及离线 SmolVLA 预训练模型推理：
+PC 发送真实 SO100 采集样例，GPU 主机返回动作结果，由 PC 校验来源和计算证据。
+详见 [GPU/VLA 操作指南](docs/vla_hardware_validation_zh.md)，包括固定版本权重/数据下载、
+独立模型环境、CUDA 实测耗时与显存分配。该测试不评价机器人任务成功率。
+真实传感器、物理运动控制、TLS/认证、服务发现、部署中间件以及
 MILP、ADMM 等生产级优化器仍不在当前范围内。仅在可信局域网运行硬件验证服务。
 
 ## API

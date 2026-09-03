@@ -1,4 +1,4 @@
-"""Host measurements for CPU hardware tests; unavailable sensors stay explicit."""
+"""Host measurements for hardware tests; unavailable sensors stay explicit."""
 
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ class HostTelemetry:
     MIN_SAMPLE_SECONDS = 0.1
     WARMUP_TIMEOUT_SECONDS = 5.0
 
-    def __init__(self) -> None:
+    def __init__(self, *, gpu_info: dict | None = None) -> None:
+        self.gpu_info = _checked_gpu_info(gpu_info) if gpu_info is not None else None
         self.started = monotonic()
         self._baseline_at = self.started
         self._baseline_cpu = self._cpu_counters()
@@ -117,7 +118,7 @@ class HostTelemetry:
         )
 
     def identity(self) -> dict:
-        return {
+        identity = {
             "hostname": socket.gethostname(),
             "architecture": platform.machine(),
             "platform": platform.platform(),
@@ -127,20 +128,96 @@ class HostTelemetry:
             "measured": ["cpu_utilization", "memory_utilization", "task_elapsed_ms"],
             "unavailable": ["gpu_utilization", "temperature", "power", "energy"],
         }
+        if self.gpu_info is not None:
+            # Preflight identity is not a live utilization or energy reading.
+            identity["cuda_device"] = dict(self.gpu_info)
+        return identity
 
 
-def detected_node(kind: str) -> dict:
+def _checked_gpu_info(gpu_info: dict) -> dict:
+    """Validate metadata supplied by the caller's successful CUDA preflight.
+
+    This module never imports torch. Device execution must be checked before
+    calling detected_node; a machine name or a configured GPU count is not
+    sufficient evidence to advertise a CUDA execution node.
+    """
+
+    device = gpu_info.get("device")
+    count = gpu_info.get("device_count")
+    capability = gpu_info.get("compute_capability")
+    if (
+        gpu_info.get("available") is not True
+        or not isinstance(device, str)
+        or not device.startswith("cuda:")
+        or not device[5:].isdigit()
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 1
+        or int(device[5:]) >= count
+        or not isinstance(gpu_info.get("device_name"), str)
+        or not gpu_info["device_name"].strip()
+        or not isinstance(gpu_info.get("torch_version"), str)
+        or not gpu_info["torch_version"].strip()
+        or not isinstance(capability, (tuple, list))
+        or len(capability) != 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in capability
+        )
+        or capability[0] < 1
+        or capability[1] < 0
+    ):
+        raise ValueError("GPU metadata must come from a successful CUDA preflight")
     return {
+        "available": True,
+        "device": device,
+        "device_count": count,
+        "device_name": gpu_info["device_name"],
+        "compute_capability": list(capability),
+        "torch_version": gpu_info["torch_version"],
+    }
+
+
+def detected_node(
+    kind: str,
+    *,
+    gpu_info: dict | None = None,
+    capabilities: list[str] | None = None,
+    supported_models: list[str] | None = None,
+) -> dict:
+    """Describe this host, optionally using a verified CUDA device.
+
+    GPU capacity is one exclusive worker slot on the selected device, including
+    on hosts with multiple GPUs. Custom workload capabilities replace the
+    navigation default; cpu/cuda capabilities reflect actual host support.
+    """
+
+    checked_gpu = _checked_gpu_info(gpu_info) if gpu_info is not None else None
+    workload_capabilities = (
+        ["hil_navigation_v1"] if capabilities is None else list(capabilities)
+    )
+    if "cuda" in workload_capabilities and checked_gpu is None:
+        raise ValueError("cuda capability requires a successful CUDA preflight")
+    node = {
         "kind": kind,
         "architecture": platform.machine(),
         "cpu_capacity": float(psutil.cpu_count() or 1),
-        "gpu_capacity": 0.0,
+        "gpu_capacity": 1.0 if checked_gpu is not None else 0.0,
         "memory_gb": psutil.virtual_memory().total / 1_000_000_000,
         # Link capacity is an initial planning assumption, not a measurement.
         "bandwidth_mbps": 100.0,
         "base_latency_ms": 0.0,
         "safety_capable": False,
-        "capabilities": ["cpu", "hil_navigation_v1"],
-        "supported_models": [],
+        "capabilities": list(
+            dict.fromkeys(
+                ["cpu"]
+                + (["cuda"] if checked_gpu is not None else [])
+                + workload_capabilities
+            )
+        ),
+        "supported_models": list(supported_models or []),
         "max_concurrency": 1,
     }
+    if checked_gpu is not None:
+        node["gpu_info"] = checked_gpu
+    return node

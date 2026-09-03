@@ -52,7 +52,16 @@ class ExecutionAgentService(runtime_service_pb2_grpc.AgentRuntimeServicer):
         self.files = files
         self.peers = dict(peers)
         self.timeout = task_timeout_seconds
-        self.telemetry = HostTelemetry()
+        self.telemetry = HostTelemetry(gpu_info=config.node.get("gpu_info"))
+        # The executor owns the actual resource requirement for each bundled
+        # task. Dispatch cannot relabel a CUDA task as CPU work to bypass GPU
+        # admission or its reservation; CPU-only executors default to zero.
+        self._gpu_demands = dict(getattr(executor, "gpu_demands", {}))
+        if any(
+            task_type not in executor.ports or not math.isfinite(demand) or demand < 0
+            for task_type, demand in self._gpu_demands.items()
+        ):
+            raise ValueError("executor GPU demands must be finite and nonnegative")
         self.instance_id = uuid4().hex
         self._sequence = 0
         self._active: dict[str, asyncio.Task] = {}
@@ -147,8 +156,20 @@ class ExecutionAgentService(runtime_service_pb2_grpc.AgentRuntimeServicer):
             and not placement.allow_source_node
         ):
             return "source_node_not_allowed"
-        if placement.safety_required or spec.gpu_demand > 0:
+        if placement.safety_required:
             return "unsupported_hardware_requirement"
+        if not math.isfinite(spec.gpu_demand) or spec.gpu_demand < 0:
+            return "invalid_gpu_demand"
+        expected_gpu_demand = self._gpu_demands.get(spec.task_type, 0.0)
+        if spec.gpu_demand > 0 and (
+            not math.isfinite(self.node.gpu_capacity_units)
+            or self.node.gpu_capacity_units <= 0
+            or "cuda" not in self.node.capabilities
+            or expected_gpu_demand <= 0
+        ):
+            return "unsupported_hardware_requirement"
+        if abs(spec.gpu_demand - expected_gpu_demand) > 1e-6:
+            return "gpu_demand_mismatch"
         if not set(placement.required_capabilities).issubset(self.node.capabilities):
             return "missing_capability"
         resource = request.resource_reservation
@@ -171,6 +192,8 @@ class ExecutionAgentService(runtime_service_pb2_grpc.AgentRuntimeServicer):
         )
         if any(not math.isfinite(value) or value < 0 for value in times):
             return "invalid_plan_time"
+        if abs(resource.demand.gpu_units - spec.gpu_demand) > 1e-6:
+            return "gpu_reservation_mismatch"
         if (
             assignment.estimated_finish_time_ms < assignment.estimated_start_time_ms
             or abs(resource.finish_time_ms - assignment.estimated_finish_time_ms) > 1e-6
@@ -310,7 +333,9 @@ class ExecutionAgentService(runtime_service_pb2_grpc.AgentRuntimeServicer):
             "task_type": request.task.spec.task_type,
             "attempt_id": request.attempt_id,
             "dispatch_id": ack.dispatch_id,
-            "execution_mode": "real_cpu",
+            "execution_mode": (
+                "real_cuda" if request.task.spec.gpu_demand > 0 else "real_cpu"
+            ),
             "host": self.telemetry.identity(),
             "host_observations": {"before": self.telemetry.observe(), "after": None},
             "input_artifacts": [],
