@@ -245,7 +245,11 @@ def test_cancellation_stops_nested_native_helper(tmp_path, monkeypatch):
                 await task
             assert processes[0].returncode is not None
             for _ in range(100):
-                if not child.is_running() or child.status() == psutil.STATUS_ZOMBIE:
+                try:
+                    if not child.is_running() or child.status() == psutil.STATUS_ZOMBIE:
+                        break
+                except psutil.NoSuchProcess:
+                    # Linux may reap the process between the two status checks.
                     break
                 await asyncio.sleep(0.01)
             else:
