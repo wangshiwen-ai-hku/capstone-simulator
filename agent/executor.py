@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
+import signal
 import sys
 from time import perf_counter
 from typing import Protocol
@@ -64,12 +66,18 @@ class NavigationExecutor:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         try:
             stdout, stderr = await process.communicate(request)
         except BaseException:
             if process.returncode is None:
-                process.kill()
+                # A native CUDA helper can be a child of the Python worker.
+                # Stop the whole isolated group so cancellation stops its work.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             await process.wait()
             raise
         elapsed_ms = (perf_counter() - started) * 1000
@@ -151,6 +159,7 @@ class VlaExecutor(NavigationExecutor):
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -160,7 +169,14 @@ class VlaExecutor(NavigationExecutor):
                             "task_type": "probe",
                             "inputs": {},
                             "seed": 0,
-                            "options": {"device": self.options["device"]},
+                            "options": {
+                                "device": self.options["device"],
+                                **(
+                                    {"cuda_binary": self.options["cuda_binary"]}
+                                    if "cuda_binary" in self.options
+                                    else {}
+                                ),
+                            },
                         }
                     )
                 ),
@@ -168,7 +184,10 @@ class VlaExecutor(NavigationExecutor):
             )
         except BaseException:
             if process.returncode is None:
-                process.kill()
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             await process.wait()
             raise
         if process.returncode:
@@ -181,3 +200,44 @@ class VlaExecutor(NavigationExecutor):
         if not isinstance(info, dict) or info.get("available") is not True:
             raise ValueError("worker did not verify a CUDA device")
         return info
+
+
+class MixedExecutor(VlaExecutor):
+    """PC mapping/planning and Orin CPU acquisition/validation + native CUDA."""
+
+    def __init__(
+        self,
+        role: str,
+        *,
+        cuda_binary: str | Path | None = None,
+        device: str = "cuda:0",
+        repeats: int = 3,
+    ) -> None:
+        from examples.mixed_workloads import GPU_TASK_TYPE, PORT_TYPES
+
+        if role not in {"pc", "orin"}:
+            raise ValueError("mixed executor role must be pc or orin")
+        if type(repeats) is not int or not 1 <= repeats <= 20:
+            raise ValueError("CUDA repeats must be between 1 and 20")
+        if (
+            not isinstance(device, str)
+            or not device.startswith("cuda:")
+            or not device[5:].isdigit()
+        ):
+            raise ValueError("mixed executor requires a CUDA device such as cuda:0")
+        pc_tasks = {"hil_mixed_mapping", "hil_mixed_planning"}
+        tasks = pc_tasks if role == "pc" else set(PORT_TYPES) - pc_tasks
+        self.ports = {name: PORT_TYPES[name] for name in tasks}
+        self.gpu_demands = {GPU_TASK_TYPE: 1.0} if role == "orin" else {}
+        self.worker_python = sys.executable
+        self.worker_module = "examples.mixed_workloads.worker"
+        self.options = {"device": device, "repeats": repeats}
+        if role == "orin":
+            if cuda_binary is None:
+                raise ValueError(
+                    "mixed-orin requires --cuda-binary; run scripts.build_cuda_smoke first"
+                )
+            binary = Path(cuda_binary).expanduser().resolve()
+            if not binary.is_file():
+                raise ValueError(f"CUDA binary does not exist: {binary}")
+            self.options["cuda_binary"] = str(binary)

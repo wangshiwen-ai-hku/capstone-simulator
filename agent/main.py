@@ -33,10 +33,10 @@ async def run(args: argparse.Namespace) -> None:
     else:
         if args.config:
             raise ValueError(
-                "navigation mode auto-detects hardware; do not use synthetic --config"
+                "real execution modes auto-detect hardware; do not use synthetic --config"
             )
         from .artifacts import ArtifactFiles
-        from .executor import NavigationExecutor, VlaExecutor
+        from .executor import MixedExecutor, NavigationExecutor, VlaExecutor
         from .real_service import ExecutionAgentService, start_execution_server
         from .service import AgentConfig
         from .telemetry import detected_node
@@ -46,6 +46,26 @@ async def run(args: argparse.Namespace) -> None:
             executor = NavigationExecutor()
             node = detected_node(args.kind)
             description = "REAL CPU navigation"
+        elif args.executor in {"mixed-pc", "mixed-orin"}:
+            role = "orin" if args.executor == "mixed-orin" else "pc"
+            executor = MixedExecutor(
+                role,
+                cuda_binary=args.cuda_binary,
+                device=args.device,
+                repeats=args.cuda_repeats,
+            )
+            if role == "orin":
+                gpu_info = await executor.probe_cuda()
+            node = detected_node(
+                args.kind,
+                gpu_info=gpu_info,
+                capabilities=[f"hil_mixed_{role}_v1"],
+            )
+            description = (
+                "REAL CPU + native CUDA mixed navigation"
+                if role == "orin"
+                else "REAL CPU mixed mapping/planning"
+            )
         else:
             role = "cuda" if args.executor == "vla-cuda" else "io"
             executor = VlaExecutor(
@@ -106,7 +126,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--executor",
-        choices=("mock", "navigation", "vla-io", "vla-cuda"),
+        choices=("mock", "navigation", "vla-io", "vla-cuda", "mixed-pc", "mixed-orin"),
         default="mock",
     )
     parser.add_argument("--config", help="Mock-only node/snapshot JSON")
@@ -129,6 +149,12 @@ def main() -> None:
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--inference-repeats", type=int, default=3)
+    parser.add_argument(
+        "--cuda-binary",
+        type=Path,
+        help="Locally built native CUDA helper for mixed-orin",
+    )
+    parser.add_argument("--cuda-repeats", type=int, default=3)
     args = parser.parse_args()
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", args.agent_id):
         parser.error(

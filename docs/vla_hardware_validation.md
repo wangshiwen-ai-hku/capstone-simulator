@@ -1,6 +1,12 @@
 # Real CUDA and SmolVLA validation: PC + Jetson AGX Orin 64GB
 
-This workflow adds real CUDA matrix multiplication and pretrained SmolVLA inference to MARS. A PC supplies a recorded robot observation; MARS schedules inference on the Orin GPU; the PC receives and validates the returned actions. The [existing CPU navigation workflow](hardware_validation.md) remains available.
+> For the current **JetPack 7.2.1** hardware smoke test, start with the
+> [mixed CPU/GPU runbook](hardware_validation.md). It builds a native CUDA stage
+> using the installed Toolkit. This page retains a **JetPack 6.2 / CUDA 12.6**
+> PyTorch installation recipe; do not apply that package source to JetPack 7.2.1.
+> Validating a compatible SmolVLA model environment is a separate subsequent step.
+
+This workflow adds real CUDA matrix multiplication and pretrained SmolVLA inference to MARS. A PC supplies a recorded robot observation; MARS schedules inference on the Orin GPU; the PC receives and validates the returned actions. The [existing CPU navigation workflow](hardware_cpu_validation.md) remains available.
 
 The test verifies computation and cross-host transport. It does not actuate a robot or establish pick-and-place success. `lerobot/smolvla_base` is a foundation checkpoint intended for task-specific fine-tuning. Hardware execution on your devices remains to be verified by following this guide. [Model card](https://huggingface.co/lerobot/smolvla_base)
 
@@ -39,7 +45,7 @@ An existing checkout must be updated to the GPU/VLA implementation, preserving l
 
 ## 3. Orin CUDA environment
 
-The user's JetPack version is not yet known. Inspect it before selecting packages:
+The current target has JetPack 7.2.1; the retained JetPack 6.2 recipe below does not apply to it. Inspect the installed versions before selecting a matching framework build:
 
 ```bash
 cat /etc/nv_tegra_release

@@ -1,10 +1,15 @@
 # MARS：PC + AGX Orin 64GB 的真实 CUDA / SmolVLA 测试指南
 
+> 当前已刷好 **JetPack 7.2.1** 的 PC + Orin 硬件 smoke 测试，请先使用
+> [CPU/GPU 混合任务指南](hardware_validation_zh.md)。它用本机 CUDA Toolkit 编译原生 GPU 阶段，
+> 无需安装本页的模型依赖。本页保留的 PyTorch 原生安装示例针对 **JetPack 6.2 / CUDA 12.6**，
+> 不能把该安装源直接用于 JetPack 7.2.1；SmolVLA 模型环境是后续单独的兼容性验收步骤。
+
 这份指南新增两项真实 GPU 测试：先运行 CUDA 矩阵计算，确认 GPU 与跨机传输正常；再把公开数据集中的真实相机画面、机器人状态和文字指令送入 **SmolVLA 预训练模型**，在 Orin GPU 上生成动作序列，传回 PC 验证。
 
 SmolVLA 测试的闭环是 **PC 读取观测 → MARS 调度 → Orin CUDA 推理 → PC 检查输出**。它使用真实模型权重和真实记录数据，但不连接机械臂、不执行动作，也不证明模型完成了抓取任务。`smolvla_base` 是用于后续微调的基础模型；这里验收计算和通信，而非机械臂控制效果。[模型说明](https://huggingface.co/lerobot/smolvla_base)
 
-**本文提供待执行的硬件验收流程；代码测试通过不代表已经在你的 AGX Orin 上运行通过。** 原来的 [CPU 导航测试](hardware_validation_zh.md) 仍可单独使用。
+**本文提供待执行的硬件验收流程；代码测试通过不代表已经在你的 AGX Orin 上运行通过。** 原来的 [CPU 导航测试](hardware_cpu_validation_zh.md) 仍可单独使用。
 
 ## 1. 运行位置与终端
 
@@ -55,7 +60,7 @@ PC 可以使用 Python 3.10 以上版本，替换命令中的解释器即可。�
 
 ## 3. Orin：先确定 JetPack，再安装 GPU 环境
 
-AGX Orin 的 64GB 内存足以作为本流程的目标配置，但 **JetPack、CUDA、Python、PyTorch 必须匹配**。目前尚未确认你的 JetPack 版本，不能只凭机器型号选择安装包。
+AGX Orin 的 64GB 内存足以作为本流程的目标配置，但 **JetPack、CUDA、Python、PyTorch 必须匹配**。当前设备已安装 JetPack 7.2.1；下方保留的 6.2 安装示例不适用于该设备，先核对实机版本和配套构建。
 
 在 Orin 准备终端检查：
 

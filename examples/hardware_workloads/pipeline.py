@@ -371,9 +371,13 @@ def _blocked(payload: dict) -> set[tuple[int, int]]:
     return blocked
 
 
-def _planning(payload: dict) -> dict[str, dict]:
+def _planning(
+    payload: dict, *, blocked_cells: set[tuple[int, int]] | None = None
+) -> dict[str, dict]:
     width, height, resolution, _ = _validated_map(payload)
-    blocked = _blocked(payload)
+    # The mixed smoke path supplies the transported GPU inflation result.
+    # Independent validation still computes the CPU reference in _validation.
+    blocked = _blocked(payload) if blocked_cells is None else blocked_cells
     start = tuple(int(value / resolution) for value in payload["start_m"])
     goal = tuple(int(value / resolution) for value in payload["goal_m"])
     if start in blocked or goal in blocked:

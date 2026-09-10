@@ -31,11 +31,15 @@ It performs agent registration, heartbeats, capability checks, resource
 reservation, assignment, typed Artifact transfer costing, completion, resource
 release, and retry. The same seed produces a repeatable run.
 
-For actual CPU execution on a PC and Jetson Orin, use the
+For the **PC + AGX Orin / JetPack 7.2.1 mixed CPU/GPU smoke test**, use the
 [hardware validation CLI](docs/hardware_validation.md). It uses the same
 `CentralCoordinator`, networked Agents, real workload subprocesses, and
 checksum-verified artifact transfer. Synthetic sensor inputs do not imply
 simulated computation; task completion and timing come from actual work.
+The five-task DAG runs sensing and validation on Orin CPU, mapping and planning
+on PC CPU, and obstacle inflation on Orin CUDA. Planning consumes the transferred
+GPU mask; validation checks every cell against a CPU reference. Native CUDA
+builds with the installed Toolkit and needs no PyTorch or model download.
 For real NVIDIA GPU execution, the [CUDA/SmolVLA runbook](docs/vla_hardware_validation.md)
 adds measured matrix operations and pretrained VLA action inference from recorded robot observations.
 
@@ -447,8 +451,12 @@ The repository includes generated Python Proto bindings, an Agent-hosted gRPC
 service, a `GrpcRuntimeAdapter`, and a three-Agent localhost mock deployment.
 An explicit `navigation` executor also runs original CPU business computations
 on physical hosts and transfers their actual JSON artifacts between configured
-Agents. See the [PC + Orin runbook](docs/hardware_validation.md) for the
+Agents. See the [CPU-only PC + Orin runbook](docs/hardware_cpu_validation.md) for the
 sensor-generation, occupancy-mapping, planning, and validation workflow.
+The `mixed-pc` and `mixed-orin` executors add a native CUDA stage to that navigation
+DAG. `scripts.mixed_smoke` performs repeated runs and checks both host identities,
+source revisions, every data dependency, and actual CUDA results. Follow the
+[JetPack 7.2.1 smoke runbook](docs/hardware_validation.md) for setup and acceptance.
 The optional `vla-cuda` and `vla-io` executors also run real CUDA matrix checks
 and offline pretrained SmolVLA inference. A recorded SO100 observation travels
 from the PC to the GPU host, and actual action results return for validation.
@@ -549,10 +557,13 @@ mars.engine -------> 同一制品路径上的兼容性封装
 注册、心跳、能力检查、资源预留、任务分派、带类型的制品（Artifact）传输成本计算、
 任务完成、资源释放和重试。使用相同的随机种子可得到可复现的运行结果。
 
-PC 与 Jetson Orin 上的真实 CPU 计算使用独立的
+**PC + AGX Orin / JetPack 7.2.1 的 CPU/GPU 混合 smoke 测试**使用独立的
 [硬件验证命令行流程](docs/hardware_validation_zh.md)：同一个 `CentralCoordinator`
 通过网络 Agent 分派任务，独立业务子进程真实计算，并传输带校验和的实际结果。
 传感器输入是合成的，但计算、完成回报和耗时并非模拟值。
+五任务链包含 Orin CPU 传感与校验、PC CPU 建图与规划，以及 Orin CUDA 障碍物膨胀。
+规划消费跨机传回的 GPU 栅格，校验逐格对照 CPU 参考；使用现有 CUDA Toolkit 编译，
+无需先安装 PyTorch 或下载模型。
 真实 NVIDIA GPU 测试使用 [CUDA/SmolVLA 指南](docs/vla_hardware_validation_zh.md)，
 包括实测矩阵计算和以真实机器人记录观测为输入的预训练 VLA 动作推理。
 
@@ -909,9 +920,12 @@ Proto 文件为工作流、拓扑、性能剖析、调度问题与调度方案�
 仓库已经包含生成的 Python Proto 绑定、Agent 托管的 gRPC 服务、
 `GrpcRuntimeAdapter` 和三个 Agent 的 localhost Mock 部署。新增的显式 `navigation`
 执行器支持在真实机器上运行原创 CPU 业务计算，并在配置好的 Agent 之间传输实际 JSON
-制品。[PC + Orin 操作指南](docs/hardware_validation_zh.md)说明了合成传感、占用栅格建图、
+制品。[纯 CPU 操作指南](docs/hardware_cpu_validation_zh.md)说明了合成传感、占用栅格建图、
 路径规划及结果验证的闭环；无需 FastAPI、Vite、LLM 或单独的业务服务进程。
 现有网页生成的仍是合成场景，并非完整的硬件闭环编写入口。
+`mixed-pc`、`mixed-orin` 执行器在导航链中加入原生 CUDA 阶段；`scripts.mixed_smoke`
+连续运行多个种子，检查双机身份、代码版本、每条数据依赖和真实 CUDA 结果。
+当前 JetPack 7.2.1 的完整步骤与验收条件见 [CPU/GPU 混合指南](docs/hardware_validation_zh.md)。
 新增 `vla-cuda`、`vla-io` 执行器支持真实 CUDA 运算及离线 SmolVLA 预训练模型推理：
 PC 发送真实 SO100 采集样例，GPU 主机返回动作结果，由 PC 校验来源和计算证据。
 详见 [GPU/VLA 操作指南](docs/vla_hardware_validation_zh.md)，包括固定版本权重/数据下载、

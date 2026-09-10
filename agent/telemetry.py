@@ -3,14 +3,62 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
+from pathlib import Path
 import platform
 import socket
+import subprocess
 from time import monotonic
 
 import psutil
 
 from interfaces.proto.mars.v1 import topology_pb2
+
+
+def _read_identity_file(path: str) -> str | None:
+    try:
+        return Path(path).read_text().replace("\x00", "").strip() or None
+    except (OSError, UnicodeError):
+        return None
+
+
+def _runtime_identity() -> dict:
+    """Record deployment identity once, outside timed task execution.
+
+    Only a hash of the OS machine identifier is exposed. These local reports
+    support trusted-LAN deployment checks, not cryptographic attestation.
+    """
+    root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for directory in ("agent", "examples", "interfaces", "mars", "scripts"):
+        for path in sorted((root / directory).rglob("*")):
+            if path.is_file() and path.suffix in {".py", ".cu", ".proto"}:
+                digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+                content = path.read_bytes()
+                digest.update(len(content).to_bytes(8, "big"))
+                digest.update(content)
+    try:
+        revision = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        revision = None
+    machine_id = _read_identity_file("/etc/machine-id")
+    return {
+        "machine_id_sha256": hashlib.sha256(machine_id.encode()).hexdigest()
+        if machine_id
+        else None,
+        "runtime_source_sha256": digest.hexdigest(),
+        "git_revision": revision,
+        "jetson_model": _read_identity_file("/proc/device-tree/model"),
+        "jetson_linux": _read_identity_file("/etc/nv_tegra_release"),
+        "python_version": platform.python_version(),
+    }
 
 
 class _CpuSampleNotReady(RuntimeError):
@@ -23,6 +71,7 @@ class HostTelemetry:
 
     def __init__(self, *, gpu_info: dict | None = None) -> None:
         self.gpu_info = _checked_gpu_info(gpu_info) if gpu_info is not None else None
+        self.runtime_identity = _runtime_identity()
         self.started = monotonic()
         self._baseline_at = self.started
         self._baseline_cpu = self._cpu_counters()
@@ -119,6 +168,7 @@ class HostTelemetry:
 
     def identity(self) -> dict:
         identity = {
+            **self.runtime_identity,
             "hostname": socket.gethostname(),
             "architecture": platform.machine(),
             "platform": platform.platform(),
@@ -145,6 +195,21 @@ def _checked_gpu_info(gpu_info: dict) -> dict:
     device = gpu_info.get("device")
     count = gpu_info.get("device_count")
     capability = gpu_info.get("compute_capability")
+    backend = gpu_info.get("backend", "torch")
+    if backend == "cuda_runtime":
+        backend_valid = (
+            gpu_info.get("kernel_execution_verified") is True
+            and type(gpu_info.get("cuda_runtime_version")) is int
+            and gpu_info["cuda_runtime_version"] > 0
+            and type(gpu_info.get("cuda_driver_version")) is int
+            and gpu_info["cuda_driver_version"] > 0
+        )
+    elif backend == "torch":
+        backend_valid = isinstance(gpu_info.get("torch_version"), str) and bool(
+            gpu_info["torch_version"].strip()
+        )
+    else:
+        backend_valid = False
     if (
         gpu_info.get("available") is not True
         or not isinstance(device, str)
@@ -156,8 +221,7 @@ def _checked_gpu_info(gpu_info: dict) -> dict:
         or int(device[5:]) >= count
         or not isinstance(gpu_info.get("device_name"), str)
         or not gpu_info["device_name"].strip()
-        or not isinstance(gpu_info.get("torch_version"), str)
-        or not gpu_info["torch_version"].strip()
+        or not backend_valid
         or not isinstance(capability, (tuple, list))
         or len(capability) != 2
         or any(
@@ -168,14 +232,31 @@ def _checked_gpu_info(gpu_info: dict) -> dict:
         or capability[1] < 0
     ):
         raise ValueError("GPU metadata must come from a successful CUDA preflight")
-    return {
+    checked = {
         "available": True,
         "device": device,
         "device_count": count,
         "device_name": gpu_info["device_name"],
         "compute_capability": list(capability),
-        "torch_version": gpu_info["torch_version"],
     }
+    if backend == "torch":
+        checked["torch_version"] = gpu_info["torch_version"]
+    else:
+        checked.update(
+            {
+                name: gpu_info[name]
+                for name in (
+                    "backend",
+                    "kernel_execution_verified",
+                    "cuda_runtime_version",
+                    "cuda_driver_version",
+                )
+            }
+        )
+        for name in ("source_sha256", "binary_sha256"):
+            if name in gpu_info:
+                checked[name] = gpu_info[name]
+    return checked
 
 
 def detected_node(
