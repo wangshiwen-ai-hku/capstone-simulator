@@ -74,6 +74,7 @@ def _measurement() -> dict:
         "device_name": "synthetic_contract_fixture",
         "torch_version": "test-fixture",
         "cuda_version": "test-fixture",
+        "worker_python_version": "3.12.0",
         "cuda_event_ms": [12.0],
         "synchronized_wall_ms": [13.0],
         "peak_memory_allocated_bytes": 16384,

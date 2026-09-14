@@ -6,9 +6,11 @@ This starts from an original **Jetson AGX Orin 64GB Developer Kit already succes
 
 The official baseline is **JetPack 7.2.1 / Jetson Linux (L4T) 39.2.1 / Ubuntu 24.04 / CUDA 13.2.1**. Verify the actual installation below. [NVIDIA JetPack downloads and release information](https://developer.nvidia.com/embedded/jetpack/downloads)
 
+**NVIDIA has no release named JetPack 7.1.2.** JetPack 7.1 is L4T 38.4 and does not list Orin; Orin support in JetPack 7 starts at 7.2 / L4T 39.2. This guide reads `/etc/nv_tegra_release` and accepts 7.2.1 only for `R39, REVISION: 2.1`. [NVIDIA JetPack archive](https://developer.nvidia.com/embedded/jetpack-archive)
+
 **This is an execution and acceptance procedure, not a claim that your physical PC/Orin test has passed.** Software tests, CUDA fixtures, and an ARM64 compile-only result cannot establish real GPU execution. Hardware acceptance requires the actual reports and execution evidence described here.
 
-No motors, ROS, web backend, model weights, PyTorch, or LeRobot are needed. The [VLA guide](vla_hardware_validation.md) is a separate later model step; its JetPack 6.2 / CUDA 12.6 / Python 3.10 / PyTorch installation recipe does **not** apply to this JetPack 7.2.1 environment and is not a dependency. The CPU archives retain their historical setup instructions; use this page for the current environment.
+No motors, ROS, web backend, model weights, PyTorch, or LeRobot are needed. The updated [VLA guide](vla_hardware_validation.md) is a separate later model step for JetPack 7.2.1 and is not a dependency. The CPU archives retain their historical setup instructions; use this page for the current environment.
 
 ## 1. Five tasks, six artifacts, eight data edges
 
@@ -39,7 +41,7 @@ The complete dependency edges are:
 
 Each artifact is content-addressed JSON fetched and checksum-verified from its producing Agent. Identically named directories on the hosts are not shared storage. One artifact may serve multiple edges.
 
-The current fixture uses a 12 × 8 m scene, a 96 × 64 grid, and 20 known survey poses with 256 rays each. Sensor data and localization are synthetic; CPU/GPU computation, socket transfers, and timing are real. Validation compares all **6,144 cells**, verifies that planning consumed this GPU output, and checks continuous collision along trajectory segments, observed-space clearance, start/goal, pose/time continuity, speed, acceleration, and yaw rate. It is not SLAM or physical robot control. The coordinator additionally rechecks validation on PC during evidence collection; this is not a sixth DAG task.
+The fixed synthetic workload uses a 12 × 8 m scene, a 96 × 64 grid, and 20 known survey poses with 256 rays each. Sensor data and localization are synthetic; CPU/GPU computation, socket transfers, and timing are real. Validation compares all **6,144 cells**, verifies that planning consumed this GPU output, and checks continuous collision along trajectory segments, observed-space clearance, start/goal, pose/time continuity, speed, acceleration, and yaw rate. It is not SLAM or physical robot control. The coordinator additionally rechecks validation on PC during evidence collection; this is not a sixth DAG task.
 
 ## 2. Physical setup, login, terminals, and Wi-Fi
 
@@ -398,7 +400,7 @@ printf 'Save this report path: %s\n' "$HIL_REPORT"
   --agent edge_pc=127.0.0.1:50051 \
   --seed 19 \
   --runs 3 \
-  --require-jetpack721 \
+  --require-jetpack 7.2.1 \
   --output "$HIL_REPORT"
 HIL_EXIT_CODE=$?
 printf 'mixed_smoke exit code: %s\n' "$HIL_EXIT_CODE"
@@ -406,7 +408,7 @@ printf 'mixed_smoke exit code: %s\n' "$HIL_EXIT_CODE"
 
 This uses `CentralCoordinator` through `GrpcRuntimeAdapter`. Seeds are **19, 20, 21**, each a complete five-task workflow; the first failure stops later runs. Output creation is exclusive: an existing filename is refused, never overwritten. Do not redirect stdout to the report path with `>`.
 
-Normal hardware mode already requires two distinct hosts, the PC/Orin architectures, AGX Orin model, compute capability `[8, 7]`, and matching commit/runtime provenance. **Every primary hardware command here additionally supplies `--require-jetpack721`, requiring L4T `R39 / REVISION: 2.1` and CUDA Runtime 13.2 (`13020`).** The CLI's version flag is opt-in; omitting it does not establish this guide's strict version acceptance. Manual Ubuntu/Python/CUDA inspection remains necessary.
+Normal hardware mode already requires two distinct hosts, the PC/Orin architectures, AGX Orin model, compute capability `[8, 7]`, and matching commit/runtime provenance. **Every primary hardware command here additionally supplies `--require-jetpack 7.2.1`, requiring L4T `R39 / REVISION: 2.1` and CUDA Runtime 13.2 (`13020`).** The CLI's version flag is opt-in; omitting it does not establish this guide's strict version acceptance. Manual Ubuntu/Python/CUDA inspection remains necessary.
 
 **Do not add `--allow-same-host`**: it is development transport mode and can never produce hardware acceptance, even if its overall status succeeds. Fixtures and compile-only evidence also do not prove GPU execution.
 
@@ -434,10 +436,10 @@ Use Space to page, `/hardware_smoke_passed` to search, `n` for the next match, a
 
 Require all of the following:
 
-1. Exit code 0; aggregate `status: "succeeded"`, `error: null`, `hardware_smoke_passed: true`, `gpu_tested: true`, and `scope: "cross_host_cpu_native_cuda_execution"`. `allow_same_host` is false and `require_jetpack721` true.
+1. Exit code 0; aggregate `status: "succeeded"`, `error: null`, `hardware_smoke_passed: true`, `gpu_tested: true`, and `scope: "cross_host_cpu_native_cuda_execution"`. `allow_same_host` is false and `required_jetpack: "7.2.1"`.
 2. `requested_runs` and `completed_runs` are 3; all three `runs` have seeds 19/20/21, succeeded status, no error, and hardware acceptance. A partial report is not a three-run pass.
 3. Each run contains five `executions`, six `artifacts`, and eight `edges`, with exactly the placements in section 1. All source/attempt/input identities and checksums must pass the runner's checks.
-4. Each run's `hosts` and `executions[].host` identify the actual x86_64 PC and aarch64/arm64 AGX Orin; `executing_host_count` is 2 with `host_count_basis: "machine_id_sha256"`. Both hosts have matching `git_revision` and `runtime_source_sha256`; machine hashes differ. `checks.jetpack721`, `jetson_agx_orin`, `target_architectures`, `distinct_machine_ids`, `matching_git_revision`, and `matching_runtime_source` are true.
+4. Each run's `hosts` and `executions[].host` identify the actual x86_64 PC and aarch64/arm64 AGX Orin; `executing_host_count` is 2 with `host_count_basis: "machine_id_sha256"`. Both hosts have matching `git_revision` and `runtime_source_sha256`; machine hashes differ. `checks.jetpack_profile`, `jetson_agx_orin`, `target_architectures`, `distinct_machine_ids`, `matching_git_revision`, and `matching_runtime_source` are true.
 5. `gpu_execution` identifies `inflate` on `robot_1`. Its `measurement.backend` is `cuda_runtime`, source/binary hashes agree with the Orin preflight, and both `cuda_event_ms` and `synchronized_wall_ms` have three finite values **greater than zero**.
 6. Each `validation` is valid, `gpu_full_reference_match` is true, and `gpu_cells_checked` is 6144. Its checks include `gpu_full_grid_cpu_reference` and `gpu_output_used_by_planner`; the trajectory's `inflation_sha256` matches this GPU payload. `checks.independent_validation` is true.
 7. Both directions carry real bytes: `map`/`plan` execution records have positive `remote_input_bytes` from Orin, and `inflate`/`validate` have positive bytes from PC. All eight `edges[].remote_bytes` follow the local/remote distinction above.
@@ -468,7 +470,7 @@ This tiny 6,144-cell kernel is a correctness and execution-path smoke test, **no
 | Compiled but probe failed | GPU execution remains unverified. Inspect the real CUDA diagnostic/device access and resolve it; compile-only is not a workaround for acceptance. |
 | Source/binary provenance mismatch | Preserve diagnostics, stop O1, align source, rebuild/probe locally, and restart. Never edit manifest hashes to bypass the error. |
 | Commit/runtime-source/host identity gate failed | Inspect the actual report hosts, local changes, wrong SSH destinations, and stale running Agents. Preserve work, align deployments, restart both, and rerun with a new filename. |
-| AGX model / `jetpack721` gate failed | Verify device-tree model and L4T R39 revision 2.1 on Orin; do not falsify identity files or remove the flag. |
+| AGX model / `jetpack_profile` gate failed | Verify device-tree model and L4T R39 revision 2.1 on Orin; do not falsify identity files or remove the flag. |
 | Nonpositive/nonfinite GPU timing | Treat evidence as invalid; preserve original values and diagnose kernel/synchronization errors. Do not substitute estimates. |
 | CPU full-reference / planner-consumption / source-lineage failure | Preserve all six artifacts, seed, source/binary hashes, and exact error. Do not replace the GPU output with a CPU result or bypass validation. |
 | Workflow timeout | Inspect Agent logs, Wi-Fi and load; distinguish Agent 90 seconds from workflow 180/completion 120. |

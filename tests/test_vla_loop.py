@@ -31,6 +31,7 @@ from scripts.vla_loop import (
     GPU_TASK_TYPES,
     MODEL_ID,
     TASKS,
+    _hardware_checks,
     build_parser,
     initial_profiles,
     run_vla_loop,
@@ -41,11 +42,22 @@ from scripts.vla_loop import (
 
 GPU_INFO = {
     "available": True,
+    "backend": "torch",
+    "kernel_execution_verified": True,
     "device": "cuda:0",
     "device_count": 1,
     "device_name": "FAKE GPU FIXTURE — not measured hardware",
     "compute_capability": [8, 7],
     "torch_version": "test-fixture",
+    "cuda_version": "test-fixture",
+    "worker_python_version": "3.12.0",
+    "probe_operation": "sum_of_squares_0_to_15",
+    "probe_result": 1240,
+    "vla_stack_verified": True,
+    "torchvision_version": "0.25.0",
+    "lerobot_version": "0.4.4",
+    "transformers_version": "4.57.1",
+    "vla_probe_operation": "torchvision_cuda_nms_and_smolvla_imports",
 }
 
 
@@ -57,8 +69,19 @@ def _measurement(*, vla=False):
     return {
         "device": "cuda:0",
         "device_name": GPU_INFO["device_name"],
+        "compute_capability": [8, 7],
         "torch_version": "test-fixture",
         "cuda_version": "test-fixture",
+        "worker_python_version": "3.12.0",
+        **(
+            {
+                "torchvision_version": "0.25.0",
+                "lerobot_version": "0.4.4",
+                "transformers_version": "4.57.1",
+            }
+            if vla
+            else {}
+        ),
         "cuda_event_ms": [1.0],
         "synchronized_wall_ms": [2.0],
         "peak_memory_allocated_bytes": 4096,
@@ -318,8 +341,12 @@ def test_fixture_gpu_contract_transfers_real_bytes_without_testing_hardware(
                 task_completion_timeout_seconds=5,
             )
             assert report["status"] == "succeeded", report["error"]
-            assert report["scope"] == "same_host_cuda_execution"
+            assert report["scope"] == "test_fixture"
             assert report["executing_host_count"] == 1
+            assert report["execution_evidence_kind"] == "test_fixture"
+            assert report["gpu_tested"] is False
+            assert report["hardware_smoke_passed"] is False
+            assert "no_test_fixtures" in report["hardware_gate_failures"]
             assert report["physical_actuation"] is False
             assert report["control_success_tested"] is False
             assert report["energy_j"] is None
@@ -375,9 +402,99 @@ def test_physical_host_guard_keeps_fixture_execution_from_two_host_claim(tmp_pat
             )
             assert report["status"] == "failed"
             assert report["executing_host_count"] == 1
-            assert "same reported host" in report["error"]
+            assert "machine identity" in report["error"]
 
     asyncio.run(run())
+
+
+def test_hardware_acceptance_rejects_successful_fixture_workflow(tmp_path):
+    async def run():
+        async with _agents(tmp_path) as (_, endpoints):
+            report = await run_vla_loop(
+                endpoints,
+                workload="smolvla",
+                artifact_directory=tmp_path / "received",
+                workflow_timeout_seconds=15,
+                task_completion_timeout_seconds=5,
+                require_hardware=True,
+                require_jetpack="7.2.1",
+            )
+            assert report["status"] == "failed"
+            assert report["gpu_tested"] is False
+            assert report["hardware_smoke_passed"] is False
+            assert "no_test_fixtures" in report["error"]
+
+    asyncio.run(run())
+
+
+def test_orin_hardware_gate_binds_platform_preflight_and_execution() -> None:
+    measurement = _measurement(vla=True)
+    measurement["device_name"] = "NVIDIA Jetson AGX Orin"
+    measurement["torch_version"] = "2.10.0"
+    preflight = {
+        **GPU_INFO,
+        "device_name": measurement["device_name"],
+        "torch_version": measurement["torch_version"],
+    }
+    hosts = {
+        "robot_1": {
+            "machine_id_sha256": "a" * 64,
+            "runtime_source_sha256": "c" * 64,
+            "git_revision": "d" * 40,
+            "architecture": "aarch64",
+            "jetson_model": "NVIDIA Jetson AGX Orin Developer Kit",
+            "jetson_linux": "# R39 (release), REVISION: 2.1,",
+            "cuda_device": preflight,
+        },
+        "edge_pc": {
+            "machine_id_sha256": "b" * 64,
+            "runtime_source_sha256": "c" * 64,
+            "git_revision": "d" * 40,
+            "architecture": "x86_64",
+        },
+    }
+    checks, profile = _hardware_checks(
+        hosts,
+        measurement,
+        gpu_agent="robot_1",
+        io_agent="edge_pc",
+        workload="smolvla",
+        fixture=False,
+        required_jetpack="7.2.1",
+    )
+    assert profile is not None and profile["passed"] is True
+    assert all(value is True for value in checks.values())
+    for field, value, failed_check in (
+        ("worker_python_version", "3.10.0", "worker_python_for_jetpack"),
+        ("torch_version", "2.11.0", "smolvla_framework_versions"),
+        ("torchvision_version", "0.26.0", "smolvla_framework_versions"),
+    ):
+        changed_measurement = {**measurement, field: value}
+        changed_preflight = {**preflight, field: value}
+        changed_hosts = {
+            **hosts,
+            "robot_1": {**hosts["robot_1"], "cuda_device": changed_preflight},
+        }
+        changed_checks, _ = _hardware_checks(
+            changed_hosts,
+            changed_measurement,
+            gpu_agent="robot_1",
+            io_agent="edge_pc",
+            workload="smolvla",
+            fixture=False,
+            required_jetpack="7.2.1",
+        )
+        assert changed_checks[failed_check] is False
+    checks, _ = _hardware_checks(
+        hosts,
+        measurement,
+        gpu_agent="robot_1",
+        io_agent="edge_pc",
+        workload="smolvla",
+        fixture=True,
+        required_jetpack="7.2.1",
+    )
+    assert checks["no_test_fixtures"] is False
 
 
 def test_failed_transfer_retains_successful_artifact_and_final_observations(tmp_path):

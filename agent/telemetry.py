@@ -23,6 +23,26 @@ def _read_identity_file(path: str) -> str | None:
         return None
 
 
+def _installed_package_version(package: str) -> str | None:
+    """Read an installed Debian package version without consulting a repository."""
+
+    try:
+        result = subprocess.run(
+            ["dpkg-query", "-W", "-f=${db:Status-Status}\t${Version}", package],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        status, version = result.stdout.strip().split("\t", 1)
+    except ValueError:
+        return None
+    return version if status == "installed" and version else None
+
+
 def _runtime_identity() -> dict:
     """Record deployment identity once, outside timed task execution.
 
@@ -57,6 +77,10 @@ def _runtime_identity() -> dict:
         "git_revision": revision,
         "jetson_model": _read_identity_file("/proc/device-tree/model"),
         "jetson_linux": _read_identity_file("/etc/nv_tegra_release"),
+        # These are supporting diagnostics. L4T above remains the platform
+        # profile source because the meta package is optional.
+        "nvidia_jetpack_package": _installed_package_version("nvidia-jetpack"),
+        "nvidia_l4t_core_package": _installed_package_version("nvidia-l4t-core"),
         "python_version": platform.python_version(),
     }
 
@@ -205,8 +229,32 @@ def _checked_gpu_info(gpu_info: dict) -> dict:
             and gpu_info["cuda_driver_version"] > 0
         )
     elif backend == "torch":
-        backend_valid = isinstance(gpu_info.get("torch_version"), str) and bool(
-            gpu_info["torch_version"].strip()
+        vla_stack = gpu_info.get("vla_stack_verified")
+        vla_stack_valid = vla_stack is None or (
+            vla_stack is True
+            and gpu_info.get("vla_probe_operation")
+            == "torchvision_cuda_nms_and_smolvla_imports"
+            and all(
+                isinstance(gpu_info.get(name), str)
+                and bool(gpu_info[name].strip())
+                for name in (
+                    "torchvision_version",
+                    "lerobot_version",
+                    "transformers_version",
+                )
+            )
+        )
+        backend_valid = (
+            gpu_info.get("kernel_execution_verified") is True
+            and isinstance(gpu_info.get("torch_version"), str)
+            and bool(gpu_info["torch_version"].strip())
+            and isinstance(gpu_info.get("cuda_version"), str)
+            and bool(gpu_info["cuda_version"].strip())
+            and isinstance(gpu_info.get("worker_python_version"), str)
+            and bool(gpu_info["worker_python_version"].strip())
+            and gpu_info.get("probe_operation") == "sum_of_squares_0_to_15"
+            and gpu_info.get("probe_result") == 1240
+            and vla_stack_valid
         )
     else:
         backend_valid = False
@@ -240,7 +288,33 @@ def _checked_gpu_info(gpu_info: dict) -> dict:
         "compute_capability": list(capability),
     }
     if backend == "torch":
-        checked["torch_version"] = gpu_info["torch_version"]
+        checked.update(
+            {
+                name: gpu_info[name]
+                for name in (
+                    "backend",
+                    "kernel_execution_verified",
+                    "torch_version",
+                    "cuda_version",
+                    "worker_python_version",
+                    "probe_operation",
+                    "probe_result",
+                )
+            }
+        )
+        if gpu_info.get("vla_stack_verified") is True:
+            checked.update(
+                {
+                    name: gpu_info[name]
+                    for name in (
+                        "vla_stack_verified",
+                        "torchvision_version",
+                        "lerobot_version",
+                        "transformers_version",
+                        "vla_probe_operation",
+                    )
+                }
+            )
     else:
         checked.update(
             {

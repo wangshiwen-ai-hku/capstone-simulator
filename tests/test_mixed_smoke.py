@@ -285,7 +285,7 @@ def test_default_gate_rejects_localhost_fixture_and_stops_after_first_failure(
             assert "distinct_machine_ids" in report["runs"][0]["hardware_gate_failures"]
             assert "no_test_fixtures" in report["runs"][0]["hardware_gate_failures"]
             assert (
-                "jetpack721" in report["runs"][0]["hardware_gate_failures"]
+                "jetpack_profile" in report["runs"][0]["hardware_gate_failures"]
             ) == require_jetpack721
             assert services["robot_1"].executor.calls.count((TASKS["sense"], 19)) == 1
 

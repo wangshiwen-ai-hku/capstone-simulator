@@ -15,6 +15,50 @@ from typing import Protocol
 from .artifacts import MAX_ARTIFACT_BYTES, canonical_json
 
 
+def _vla_worker_environment(worker_python: str) -> dict[str, str]:
+    """Build an isolated Python identity while preserving device runtime settings."""
+
+    environment = os.environ.copy()
+    worker_bin = Path(worker_python).parent
+    former_environment_bins = {
+        str(Path(value).expanduser() / "bin")
+        for name in ("VIRTUAL_ENV", "CONDA_PREFIX")
+        if (value := environment.get(name))
+    }
+    path_entries = [
+        item
+        for item in environment.get("PATH", "").split(os.pathsep)
+        if item and item != str(worker_bin) and item not in former_environment_bins
+    ]
+    for name in (
+        "PYTHONHOME",
+        "VIRTUAL_ENV",
+        "CONDA_DEFAULT_ENV",
+        "CONDA_PREFIX",
+        "CONDA_PROMPT_MODIFIER",
+        "CONDA_PYTHON_EXE",
+        "CONDA_SHLVL",
+        "_CE_CONDA",
+        "_CE_M",
+    ):
+        environment.pop(name, None)
+    worker_prefix = worker_bin.parent
+    if (worker_prefix / "pyvenv.cfg").is_file():
+        environment["VIRTUAL_ENV"] = str(worker_prefix)
+    environment.update(
+        {
+            "PATH": os.pathsep.join([str(worker_bin), *path_entries]),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "HF_DATASETS_OFFLINE": "1",
+            "TOKENIZERS_PARALLELISM": "false",
+        }
+    )
+    return environment
+
+
 @dataclass(frozen=True)
 class ExecutionResult:
     outputs: dict[str, dict]
@@ -67,6 +111,7 @@ class NavigationExecutor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            env=getattr(self, "worker_environment", None),
         )
         try:
             stdout, stderr = await process.communicate(request)
@@ -132,13 +177,17 @@ class VlaExecutor(NavigationExecutor):
         self.gpu_demands = {name: 1.0 for name in tasks} if role == "cuda" else {}
         # Keep a virtualenv's python symlink intact. Resolving it to the base
         # interpreter silently discards that environment's ML dependencies.
-        self.worker_python = (
-            str(Path(worker_python).expanduser().absolute())
+        selected_python = (
+            Path(worker_python).expanduser().absolute()
             if worker_python
-            else sys.executable
+            else Path(sys.executable)
         )
+        if not selected_python.is_file() or not os.access(selected_python, os.X_OK):
+            raise ValueError(f"worker_python is not an executable file: {selected_python}")
+        self.worker_python = str(selected_python)
         self.worker_module = "examples.vla_workloads.worker"
         self.options = {"device": device, "repeats": repeats}
+        self.worker_environment = _vla_worker_environment(self.worker_python)
         for key, value in (
             ("observation_file", observation_file),
             ("model_dir", model_dir),
@@ -160,6 +209,7 @@ class VlaExecutor(NavigationExecutor):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            env=getattr(self, "worker_environment", None),
         )
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -171,6 +221,7 @@ class VlaExecutor(NavigationExecutor):
                             "seed": 0,
                             "options": {
                                 "device": self.options["device"],
+                                "require_vla_stack": "model_dir" in self.options,
                                 **(
                                     {"cuda_binary": self.options["cuda_binary"]}
                                     if "cuda_binary" in self.options

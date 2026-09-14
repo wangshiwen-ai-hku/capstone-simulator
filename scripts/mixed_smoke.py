@@ -19,6 +19,7 @@ from uuid import uuid4
 from agent.artifacts import ArtifactFiles, canonical_json, digest_bytes, fetch_artifact
 from agent.endpoints import parse_endpoints
 from agent.executor import NavigationExecutor
+from agent.jetson import jetpack_profile_evidence, resolve_required_jetpack
 from examples.mixed_workloads.pipeline import PORT_TYPES, verify_measurement
 from mars.coordinator import CentralCoordinator
 from mars.domain.artifact import ArtifactRef
@@ -250,12 +251,32 @@ def _validation_matches(expected: dict, returned: dict) -> bool:
     return True
 
 
-def _hardware_checks(hosts: dict, measurement: dict, *, fixture: bool) -> dict:
+def _hardware_checks(
+    hosts: dict,
+    measurement: dict,
+    *,
+    fixture: bool,
+    required_jetpack: str | None = None,
+) -> dict:
     pc, orin = hosts["edge_pc"], hosts["robot_1"]
     machines = [host.get("machine_id_sha256") for host in (pc, orin)]
     sources = [host.get("runtime_source_sha256") for host in (pc, orin)]
     revisions = [host.get("git_revision") for host in (pc, orin)]
     release = orin.get("jetson_linux")
+    selected_profile = (
+        jetpack_profile_evidence(
+            required_jetpack,
+            jetson_linux=release,
+            cuda_runtime_version=measurement.get("cuda_runtime_version"),
+        )
+        if required_jetpack
+        else None
+    )
+    legacy_721 = jetpack_profile_evidence(
+        "7.2.1",
+        jetson_linux=release,
+        cuda_runtime_version=measurement.get("cuda_runtime_version"),
+    )
     return {
         "distinct_machine_ids": (
             all(
@@ -283,11 +304,9 @@ def _hardware_checks(hosts: dict, measurement: dict, *, fixture: bool) -> dict:
         ),
         "jetson_agx_orin": "Jetson AGX Orin" in str(orin.get("jetson_model") or ""),
         "orin_compute_capability": measurement.get("compute_capability") == [8, 7],
-        "jetpack721": (
-            isinstance(release, str)
-            and re.search(r"\bR39\b.*\bREVISION:\s*2\.1(?:\s|,|$)", release) is not None
-            and measurement.get("cuda_runtime_version") == 13020
-        ),
+        "jetpack_profile": selected_profile["passed"] if selected_profile else None,
+        # Retained in v1 reports for readers of the former CLI flag.
+        "jetpack721": legacy_721["passed"],
         "no_test_fixtures": not fixture,
         "native_binary_identity": all(
             isinstance(measurement.get(k), str)
@@ -558,7 +577,18 @@ async def _collect_and_verify(evidence: dict, report: dict, files, endpoints) ->
             *evidence["executions"],
         ]
     )
-    hardware_checks = _hardware_checks(hosts, measurement, fixture=fixture)
+    if evidence["required_jetpack"]:
+        evidence["jetpack_profile_evidence"] = jetpack_profile_evidence(
+            evidence["required_jetpack"],
+            jetson_linux=hosts["robot_1"].get("jetson_linux"),
+            cuda_runtime_version=measurement.get("cuda_runtime_version"),
+        )
+    hardware_checks = _hardware_checks(
+        hosts,
+        measurement,
+        fixture=fixture,
+        required_jetpack=evidence["required_jetpack"],
+    )
     evidence["checks"].update(hardware_checks)
     machines = [host.get("machine_id_sha256") for host in hosts.values()]
     if all(isinstance(value, str) and _SHA256.fullmatch(value) for value in machines):
@@ -573,9 +603,9 @@ async def _collect_and_verify(evidence: dict, report: dict, files, endpoints) ->
         "test_fixture" if fixture else "trusted_agent_report"
     )
     evidence["gpu_tested"] = not fixture
-    required = set(hardware_checks) - {"jetpack721"}
-    if evidence["require_jetpack721"]:
-        required.add("jetpack721")
+    required = set(hardware_checks) - {"jetpack721", "jetpack_profile"}
+    if evidence["required_jetpack"]:
+        required.add("jetpack_profile")
     evidence["hardware_gate_failures"] = sorted(
         k for k in required if not hardware_checks[k]
     )
@@ -602,7 +632,7 @@ async def _run_once(
     task_completion_timeout_seconds: float,
     evidence_timeout_seconds: float,
     allow_same_host: bool,
-    require_jetpack721: bool,
+    required_jetpack: str | None,
 ) -> dict:
     workflow = mixed_workflow(deadline_ms=workflow_timeout_seconds * 1000)
     runtime = GrpcRuntimeAdapter(
@@ -618,7 +648,8 @@ async def _run_once(
         "gpu_tested": False,
         "validation_float_tolerance": VALIDATION_FLOAT_TOLERANCE,
         "allow_same_host": allow_same_host,
-        "require_jetpack721": require_jetpack721,
+        "required_jetpack": required_jetpack,
+        "require_jetpack721": required_jetpack == "7.2.1",
         "artifacts": [],
         "checks": {},
         "error": None,
@@ -722,6 +753,7 @@ async def run_mixed_smoke(
     task_completion_timeout_seconds: float = 120.0,
     evidence_timeout_seconds: float = 60.0,
     allow_same_host: bool = False,
+    require_jetpack: str | None = None,
     require_jetpack721: bool = False,
 ) -> dict:
     """Return one aggregate report; sequential seeds stop at the first failed run.
@@ -729,6 +761,9 @@ async def run_mixed_smoke(
     Invalid configuration raises ValueError. Execution/evidence failures are
     retained in the report. External cancellation propagates after cleanup.
     """
+    required_jetpack = resolve_required_jetpack(
+        require_jetpack, legacy_require_jetpack721=require_jetpack721
+    )
     if set(endpoints) != {"robot_1", "edge_pc"}:
         raise ValueError("mixed smoke requires exactly robot_1 and edge_pc endpoints")
     if type(runs) is not int or not 1 <= runs <= MAX_RUNS:
@@ -755,7 +790,8 @@ async def run_mixed_smoke(
         "endpoints": dict(endpoints),
         "runs": [],
         "allow_same_host": allow_same_host,
-        "require_jetpack721": require_jetpack721,
+        "required_jetpack": required_jetpack,
+        "require_jetpack721": required_jetpack == "7.2.1",
         "sensor_source": "synthetic_known_pose_range_survey",
         "physical_actuation": False,
         "business_execution": "real_cpu_and_native_cuda",
@@ -789,7 +825,7 @@ async def run_mixed_smoke(
             task_completion_timeout_seconds=task_completion_timeout_seconds,
             evidence_timeout_seconds=evidence_timeout_seconds,
             allow_same_host=allow_same_host,
-            require_jetpack721=require_jetpack721,
+            required_jetpack=required_jetpack,
         )
         report["runs"].append(result)
         if result["status"] == "succeeded":
@@ -840,9 +876,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="development only; never hardware acceptance",
     )
     parser.add_argument(
+        "--require-jetpack",
+        metavar="VERSION",
+        help="require a supported JetPack/L4T/CUDA profile (7.2 or 7.2.1)",
+    )
+    parser.add_argument(
         "--require-jetpack721",
         action="store_true",
-        help="also require Jetson Linux R39 revision 2.1 and CUDA runtime 13.2",
+        help="deprecated alias for --require-jetpack 7.2.1",
     )
     return parser
 
@@ -863,6 +904,7 @@ def main() -> None:
                 task_completion_timeout_seconds=args.task_completion_timeout,
                 evidence_timeout_seconds=args.evidence_timeout,
                 allow_same_host=args.allow_same_host,
+                require_jetpack=args.require_jetpack,
                 require_jetpack721=args.require_jetpack721,
             )
         )

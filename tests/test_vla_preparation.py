@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 import venv
@@ -87,11 +88,24 @@ def test_dependency_constraints_preserve_nvidia_local_builds():
     assert "2.7.0a0+7c8ec84dab" in torch_constraints(
         "2.7.0a0+7c8ec84dab", "0.22.0a0+abc"
     )
+    assert torch_constraints("2.10.0", "0.25.0") == (
+        "torch===2.10.0\ntorchvision===0.25.0\n"
+    )
+    assert torch_constraints("2.2.1", "0.21.0") == (
+        "torch===2.2.1\ntorchvision===0.21.0\n"
+    )
 
 
 @pytest.mark.parametrize(
     "torch_version,vision_version",
-    (("2.11.0", "0.23.0"), ("2.8.0", "0.26.0"), ("2.8.0\nother-package", "0.23.0")),
+    (
+        ("2.2.0", "0.21.0"),
+        ("2.2.1rc1", "0.21.0"),
+        ("2.11.0", "0.23.0"),
+        ("2.8.0", "0.21.0a0"),
+        ("2.8.0", "0.26.0"),
+        ("2.8.0\nother-package", "0.23.0"),
+    ),
 )
 def test_incompatible_dependency_constraints_fail(torch_version, vision_version):
     with pytest.raises(ValueError):
@@ -113,3 +127,46 @@ def test_worker_interpreter_preserves_virtual_environment(tmp_path):
         text=True,
     ).strip()
     assert Path(prefix) == environment
+
+
+def test_worker_environment_replaces_parent_python_identity(tmp_path, monkeypatch):
+    from agent.executor import VlaExecutor
+
+    environment = tmp_path / "ml-environment"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+    monkeypatch.setenv("PYTHONHOME", "/hostile/python-home")
+    monkeypatch.setenv("PYTHONPATH", "/hostile/python-path")
+    monkeypatch.setenv("VIRTUAL_ENV", "/agent-environment")
+    monkeypatch.setenv("CONDA_PREFIX", "/conda-environment")
+    monkeypatch.setenv(
+        "PATH",
+        os.pathsep.join(
+            [
+                "/agent-environment/bin",
+                "/conda-environment/bin",
+                "/usr/local/cuda/bin",
+                "/usr/bin",
+            ]
+        ),
+    )
+
+    executor = VlaExecutor("io", worker_python=str(environment / "bin/python"))
+    worker = executor.worker_environment
+    path_entries = worker["PATH"].split(os.pathsep)
+    assert "PYTHONHOME" not in worker
+    assert worker["PYTHONPATH"] == str(Path(__file__).resolve().parents[1])
+    assert worker["PYTHONNOUSERSITE"] == "1"
+    assert worker["VIRTUAL_ENV"] == str(environment)
+    assert "CONDA_PREFIX" not in worker
+    assert path_entries[0] == str(environment / "bin")
+    assert "/agent-environment/bin" not in path_entries
+    assert "/conda-environment/bin" not in path_entries
+    assert "/usr/local/cuda/bin" in path_entries
+    assert os.environ["PYTHONHOME"] == "/hostile/python-home"
+
+
+def test_worker_interpreter_must_exist_and_be_executable(tmp_path):
+    from agent.executor import VlaExecutor
+
+    with pytest.raises(ValueError, match="not an executable file"):
+        VlaExecutor("io", worker_python=str(tmp_path / "missing-python"))

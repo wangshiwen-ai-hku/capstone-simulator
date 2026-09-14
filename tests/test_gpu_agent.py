@@ -17,11 +17,17 @@ from interfaces.proto.mars.v1 import common_pb2, runtime_pb2
 
 GPU_INFO = {
     "available": True,
+    "backend": "torch",
+    "kernel_execution_verified": True,
     "device": "cuda:0",
     "device_count": 2,
     "device_name": "preflight-test-device",
     "compute_capability": [8, 7],
     "torch_version": "test-version",
+    "cuda_version": "test-cuda-version",
+    "worker_python_version": "3.12.0",
+    "probe_operation": "sum_of_squares_0_to_15",
+    "probe_result": 1240,
 }
 
 

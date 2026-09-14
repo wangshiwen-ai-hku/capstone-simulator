@@ -6,9 +6,11 @@
 
 NVIDIA 官方下载页列出的本次基线是 **JetPack 7.2.1 / Jetson Linux（L4T）39.2.1 / Ubuntu 24.04 / CUDA 13.2.1**，支持 Orin 系列。实际安装版本仍须在 Orin 上检查。[NVIDIA JetPack 下载与版本说明](https://developer.nvidia.com/embedded/jetpack/downloads)
 
+**版本名澄清：NVIDIA 官方没有 JetPack 7.1.2。** 官方归档中的 JetPack 7.1 是 L4T 38.4，且没有列出 Orin；Orin 的 JetPack 7 支持从 7.2 / L4T 39.2 开始。若你口头记录的是“7.1.2”，最可能是把 7.2.1 写反，或读到了其他组件版本。本页不猜测：第 4 节读取 `/etc/nv_tegra_release`，只有 `R39`、`REVISION: 2.1` 才按 7.2.1 验收。[NVIDIA JetPack 版本归档](https://developer.nvidia.com/embedded/jetpack-archive)
+
 **本文是待在你的两台机器上执行的操作与验收指南，不是已经在你的 Orin 上通过测试的记录。** 只有实际生成的报告、任务产物及执行日志满足后文验收要求，才能记录“本次硬件测试通过”。
 
-本次不安装 ROS、模型、PyTorch、LeRobot，不连接电机，也不运行车辆控制。只需要轻量 Python 通信环境和 Orin 已安装的原生 CUDA 工具链。旧 [CUDA / SmolVLA 指南](vla_hardware_validation_zh.md) 可以留作**之后单独进行模型推理**的参考；其中 JetPack 6.2 / CUDA 12.6 / Python 3.10 / PyTorch 安装组合不适用于本页的 JetPack 7.2.1，不能直接照搬，也不是本次测试的前置步骤。归档 CPU 指南保留了旧版本说明，当前环境以本页为准。
+本次不安装 ROS、模型、PyTorch、LeRobot，不连接电机，也不运行车辆控制。只需要轻量 Python 通信环境和 Orin 已安装的原生 CUDA 工具链。已更新的 [CUDA / SmolVLA 指南](vla_hardware_validation_zh.md) 是 JetPack 7.2.1 上**之后单独进行模型推理**的步骤，不是本次原生 CUDA 测试的前置条件。归档 CPU 指南保留了旧版本说明，当前环境以本页为准。
 
 ## 1. 先理解这次实际运行什么
 
@@ -204,7 +206,8 @@ cat /etc/os-release
 cat /etc/nv_tegra_release
 tr -d '\000' < /proc/device-tree/model
 printf '\n'
-dpkg-query -W nvidia-l4t-core nvidia-jetpack
+dpkg-query -W -f='${db:Status-Status} ${Package} ${Version}\n' \
+  nvidia-l4t-core nvidia-jetpack 2>&1 || true
 python3 --version
 /usr/local/cuda/bin/nvcc --version
 ```
@@ -212,9 +215,9 @@ python3 --version
 对应检查：
 
 1. `/etc/os-release` 的版本应是 Ubuntu 24.04。
-2. `/etc/nv_tegra_release` 应显示 `R39`、`REVISION: 2.1`，对应 L4T 39.2.1。
+2. `/etc/nv_tegra_release` 应显示 `R39`、`REVISION: 2.1`，对应 L4T 39.2.1 / JetPack 7.2.1；若不是，停止使用本页的严格版本命令并保留原始输出。
 3. 设备树型号应包含 `Jetson AGX Orin`；内存容量不能单独证明套件型号，系统可用内存也不必精确显示 64 GiB。
-4. 软件包查询用于辅助核对。若只缺 `nvidia-jetpack` 元包，不要仅因此判定系统损坏；继续检查 L4T、已安装包和实际 CUDA 探针。元包存在也不能代替内核执行证据。
+4. 软件包查询用于辅助核对。若只缺 `nvidia-jetpack` 元包，不要仅因此判定系统损坏；继续检查 L4T、已安装包和实际 CUDA 探针。元包存在、版本文本像 `7.1.2`，也不能覆盖 `/etc/nv_tegra_release` 的平台事实，更不能代替内核执行证据。
 5. 系统 `python3` 应是 3.12.x；本页不替换系统 Python。
 6. `nvcc` 应报告 CUDA 13.2 系列，完整包版本与官方 13.2.1 基线对应。`nvcc` 版本文本和 CUDA Runtime 整数不一定表达补丁号；例如 `13020` 表示 13.2，不等于字符串 `13.2.1`。
 
@@ -403,7 +406,7 @@ cd "$HOME/mars-hardware"
 .venv-hil/bin/python -m scripts.mixed_smoke --help
 ```
 
-Agent 帮助应包含 `mixed-orin`、`mixed-pc`、`--cuda-binary`、`--cuda-repeats`。Runner 帮助应包含 `--runs`、`--workflow-timeout`、`--task-completion-timeout`、`--evidence-timeout`、`--allow-same-host`、`--require-jetpack721`。如果仍只有旧 CPU 流程，回到代码检查。
+Agent 帮助应包含 `mixed-orin`、`mixed-pc`、`--cuda-binary`、`--cuda-repeats`。Runner 帮助应包含 `--runs`、`--workflow-timeout`、`--task-completion-timeout`、`--evidence-timeout`、`--allow-same-host`、`--require-jetpack`。如果仍只有旧 CPU 流程，回到代码检查。旧 `--require-jetpack721` 仅作为兼容别名保留，新操作统一写显式版本。
 
 ### 7.2 比较实际运行源码指纹，而不只比较 Git 标签
 
@@ -617,7 +620,7 @@ printf 'Save this report path: %s\n' "$HIL_REPORT"
   --agent edge_pc=127.0.0.1:50051 \
   --seed 19 \
   --runs 3 \
-  --require-jetpack721 \
+  --require-jetpack 7.2.1 \
   --output "$HIL_REPORT"
 HIL_EXIT_CODE=$?
 printf 'mixed_smoke exit code: %s\n' "$HIL_EXIT_CODE"
@@ -625,7 +628,7 @@ printf 'mixed_smoke exit code: %s\n' "$HIL_EXIT_CODE"
 
 此命令通过 `CentralCoordinator` 和 `GrpcRuntimeAdapter` 进行派单、依赖推进、产物传输与证据收集；不是在 P2 直接调用五个业务函数。`--seed 19 --runs 3` 依次运行 **19、20、21**，每轮都是完整五任务；首次失败会停止后续轮次并保留已完成部分，不会跳过失败凑出三次成功。
 
-默认硬件模式要求真实两台主机、PC `x86_64`、Orin `aarch64`/`arm64`、AGX Orin 设备树型号、GPU compute capability `[8, 7]`、不同机器标识、相同提交及实际源码指纹。CLI 的 JetPack 版本开关默认不启用；**本页硬件命令全部显式带 `--require-jetpack721`**，要求 L4T `R39 / REVISION: 2.1` 和 CUDA Runtime 13.2（整数 `13020`）。省略该开关不能代表通过本页的严格版本验收；它也不代替第 4 节对 Ubuntu、Python 和 CUDA 工具链的检查。
+默认硬件模式要求真实两台主机、PC `x86_64`、Orin `aarch64`/`arm64`、AGX Orin 设备树型号、GPU compute capability `[8, 7]`、不同机器标识、相同提交及实际源码指纹。CLI 的 JetPack 版本开关默认不启用；**本页硬件命令全部显式带 `--require-jetpack 7.2.1`**，要求 L4T `R39 / REVISION: 2.1` 和 CUDA Runtime 13.2（整数 `13020`）。程序会把期望值、原始 L4T 字符串、解析结果和 CUDA Runtime 写入 `jetpack_profile_evidence`，不会把 `7.1.2` 静默当成 7.2.1。省略该开关不能代表通过本页的严格版本验收；它也不代替第 4 节对 Ubuntu、Python 和 CUDA 工具链的检查。
 
 **不要添加 `--allow-same-host`。** 它只用于开发阶段的单机/传输调试，即使 `status` 显示 `succeeded`，也永远不能取得 `hardware_smoke_passed: true`。两个 Agent 名字不同、两个端口不同或编译 CI 成功，都不等于两台实物主机通过。
 
@@ -664,7 +667,7 @@ printf 'Report: %s\n' "$HIL_REPORT"
 | 层级 / 字段 | 必须看到什么 |
 | --- | --- |
 | 进程及汇总 | 退出码 0，顶层 `status: "succeeded"`、`error: null`、`hardware_smoke_passed: true`、`gpu_tested: true` |
-| 汇总范围 | `scope: "cross_host_cpu_native_cuda_execution"`；`allow_same_host: false`；本命令的 `require_jetpack721: true` |
+| 汇总范围 | `scope: "cross_host_cpu_native_cuda_execution"`；`allow_same_host: false`；`required_jetpack: "7.2.1"` |
 | 轮次完整 | `requested_runs: 3`、`completed_runs: 3`；`runs` 三项的种子依次是 19、20、21；每项都 succeeded、硬件通过，不能只看第一项 |
 | 每轮结构 | `executions` 正好五项、`artifacts` 正好六项、`edges` 正好八项；分配与第 1 节相同 |
 | 实际硬件 | `hosts.edge_pc.architecture` 是 x86_64；`hosts.robot_1.architecture` 是 aarch64/arm64；Orin 型号/版本正确；`executing_host_count: 2`、`host_count_basis: "machine_id_sha256"` |
@@ -704,7 +707,7 @@ print('error:', report.get('error'))
 require(report.get('status') == 'succeeded' and report.get('error') is None, 'aggregate failed')
 require(report.get('hardware_smoke_passed') is True and report.get('gpu_tested') is True, 'no hardware/GPU acceptance')
 require(report.get('scope') == 'cross_host_cpu_native_cuda_execution', 'wrong scope')
-require(report.get('allow_same_host') is False and report.get('require_jetpack721') is True, 'strict run required')
+require(report.get('allow_same_host') is False and report.get('required_jetpack') == '7.2.1', 'strict run required')
 require(report.get('requested_runs') == 3 and report.get('completed_runs') == 3, 'three runs required')
 runs = report.get('runs', [])
 require([run.get('seed') for run in runs] == [19, 20, 21], 'expected seeds 19/20/21')
@@ -712,10 +715,11 @@ placements = {'sense': 'robot_1', 'map': 'edge_pc', 'inflate': 'robot_1', 'plan'
 required_checks = ('artifact_ports', 'execution_placement', 'host_identity_consistent', 'edge_transfers',
                    'source_lineage', 'cuda_measurement', 'independent_validation', 'distinct_machine_ids',
                    'matching_runtime_source', 'matching_git_revision', 'target_architectures',
-                   'jetson_agx_orin', 'orin_compute_capability', 'jetpack721', 'no_test_fixtures', 'native_binary_identity')
+                   'jetson_agx_orin', 'orin_compute_capability', 'jetpack_profile', 'no_test_fixtures', 'native_binary_identity')
 for run in runs:
     require(run.get('status') == 'succeeded' and run.get('hardware_smoke_passed') is True, 'failed run')
     require(run.get('error') is None and run.get('hardware_gate_failures') == [], 'run errors/gates')
+    require(run.get('jetpack_profile_evidence', {}).get('passed') is True, 'JetPack/L4T/CUDA profile')
     require(run.get('executing_host_count') == 2 and run.get('host_count_basis') == 'machine_id_sha256', 'two actual hosts required')
     require(all(run.get('checks', {}).get(key) is True for key in required_checks), 'missing/failed evidence check')
     records = run.get('executions', [])
@@ -777,7 +781,7 @@ PY
 | `CUDA binary provenance check failed` / `source_sha256 mismatch` / `binary_sha256 mismatch` | 保留错误；停止 O1，核对源码版本，再在 Orin 重新构建及运行探针，随后重启。不编辑 manifest 或将错误哈希手工换成期望值。 |
 | `matching_git_revision` / `matching_runtime_source` 失败 | 查看报告内实际两个 host 的值，核对两台源码差异及是否有旧 Agent 正在运行；保留修改，统一同一提交与源码后重启两边。只改分支名不够。 |
 | `distinct_machine_ids` / `target_architectures` 失败 | O1 是否真的 SSH 在 Orin？P1/P2 是否真的在 x86_64 PC？检查机器身份，不加 `--allow-same-host` 来放行硬件测试。 |
-| `jetson_agx_orin` / `jetpack721` 失败 | 看报告中的设备树型号和 L4T release，回到 Orin 第 4.1 节核对。缺文件、错误型号或错误版本都应定位实际环境，不伪造文件或跳过严格检查。 |
+| `jetson_agx_orin` / `jetpack_profile` 失败 | 看报告的设备树型号、`jetpack_profile_evidence.observed` 和 L4T 原文，回到 Orin 第 4.1 节核对。“7.1.2”不会被当成 7.2.1；缺文件、错误型号或错误版本都应定位实际环境。 |
 | `native_binary_identity` / CUDA preflight identity 不一致 | 检查本轮 `gpu_execution.measurement` 与 Orin host 的 `cuda_device`；测试中是否重建过二进制或换了源码？停止、在一致版本上重建并重启，用新文件名再试。 |
 | `missing positive measured` / 计时为 0、非有限值 | 该 GPU 测量无效，保留原始值及设备信息。排查实际内核及同步错误，不用估算或最小常数替代。 |
 | `GPU inflation differs from the independent full CPU reference` | 真实正确性失败。保留地图、掩码、种子及源码/二进制哈希；不能在 PC 重算掩码替换 GPU 输出后称原测试通过。 |
@@ -801,4 +805,4 @@ PY
 6. 若中途按 `Ctrl+C` 停止 P2，也要检查并停止 O1/P1，不能假设协调器窗口关闭就已取消全部远程工作。中断可能尚未写出完整汇总报告，已有诊断和产物仍应保留。
 7. 不要在 Agent 运行时删除 `.mars-hil`。下次运行先检查 Wi-Fi 地址、时间、代码与二进制是否一致；再按 O1 → P1 → 双向 TCP → P2 的顺序启动，生成新报告路径。
 
-完成本页后可以据真实日志记录“在这两台设备、此提交和环境上，种子 19/20/21 的 CPU + 原生 CUDA 混合闭环通过”。未拿到这样的证据之前，只能记录已完成的准备、编译或软件测试。后续若要评估模型推理，再单独准备匹配 JetPack 7.2.1 的模型环境，不把旧 VLA 安装步骤混入本次验收。
+完成本页后可以据真实日志记录“在这两台设备、此提交和环境上，种子 19/20/21 的 CPU + 原生 CUDA 混合闭环通过”。未拿到这样的证据之前，只能记录已完成的准备、编译或软件测试。随后可按更新后的 [GPU 与 SmolVLA 指南](vla_hardware_validation_zh.md) 建立独立 Python 3.12 模型环境，先过 Torch/Orin 门禁，再运行真实公开观测的跨机推理闭环；模型结果与本页原生 CUDA 结果分别保留。

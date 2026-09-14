@@ -1,10 +1,11 @@
 # Real CUDA and SmolVLA validation: PC + Jetson AGX Orin 64GB
 
-> For the current **JetPack 7.2.1** hardware smoke test, start with the
-> [mixed CPU/GPU runbook](hardware_validation.md). It builds a native CUDA stage
-> using the installed Toolkit. This page retains a **JetPack 6.2 / CUDA 12.6**
-> PyTorch installation recipe; do not apply that package source to JetPack 7.2.1.
-> Validating a compatible SmolVLA model environment is a separate subsequent step.
+> Check the version first: NVIDIA has no release named **JetPack 7.1.2**. AGX Orin
+> support in JetPack 7 starts at **7.2 / L4T 39.2**; this guide targets
+> **JetPack 7.2.1 / L4T 39.2.1**. Do not accept a remembered version string if
+> `/etc/nv_tegra_release` is not `R39, REVISION: 2.1`. Complete the native CUDA
+> loop in the [mixed CPU/GPU runbook](hardware_validation.md) before this PyTorch
+> and model test. [NVIDIA JetPack archive](https://developer.nvidia.com/embedded/jetpack-archive)
 
 This workflow adds real CUDA matrix multiplication and pretrained SmolVLA inference to MARS. A PC supplies a recorded robot observation; MARS schedules inference on the Orin GPU; the PC receives and validates the returned actions. The [existing CPU navigation workflow](hardware_cpu_validation.md) remains available.
 
@@ -35,47 +36,71 @@ git clone --branch codex/grpc-hardware-loop \
   "$HOME/mars-hardware"
 cd "$HOME/mars-hardware"
 git rev-parse HEAD
-python3.10 -m venv .venv
+python3 -m venv .venv
 .venv/bin/python -m pip install -r agent/requirements-hardware.txt
 .venv/bin/python -m agent.main --help
 .venv/bin/python -m scripts.vla_loop --help
 ```
 
-An existing checkout must be updated to the GPU/VLA implementation, preserving local changes. Compare commit IDs on both hosts. Reuse the CPU workflow's `.venv` if already prepared. PC Python may be 3.10 or newer; the following native Jetson wheel example specifically uses Python 3.10.
+An existing checkout must be updated to the GPU/VLA implementation, preserving local changes. Compare commit IDs on both hosts. Reuse the CPU workflow's `.venv` if already prepared. JetPack 7.2.1 supplies Python 3.12; Python 3.12 is also recommended on the PC. Keep the lightweight Agent and VLA worker in separate environments.
 
-## 3. Orin CUDA environment
+## 3. Verify the Orin platform and create the VLA environment
 
-The current target has JetPack 7.2.1; the retained JetPack 6.2 recipe below does not apply to it. Inspect the installed versions before selecting a matching framework build:
+Run these checks on Orin before installing any ML packages:
 
 ```bash
+tr -d '\000' < /proc/device-tree/model
+printf '\n'
 cat /etc/nv_tegra_release
-dpkg-query -W nvidia-jetpack
-python3.10 --version
+cat /etc/os-release
+dpkg-query -W -f='${db:Status-Status} ${Version}\n' nvidia-l4t-core nvidia-jetpack 2>&1 || true
+python3 --version
+/usr/local/cuda/bin/nvcc --version
 uname -m
 ```
 
-The JetPack meta-package may be absent; use the L4T version and installed CUDA stack as additional evidence. Do not rely solely on the availability of `nvidia-smi` on Jetson.
+Continue only when the model contains `Jetson AGX Orin`, L4T reports `R39` and `REVISION: 2.1`, the OS is Ubuntu 24.04, Python is 3.12, CUDA compiler is from the 13.2 series, and the architecture is `aarch64`. The `nvidia-jetpack` meta-package may be absent, so L4T is the platform source of truth. `nvidia-smi`, a package candidate, or a handwritten `7.1.2` string is insufficient. NVIDIA lists JetPack 7.2.1 as L4T 39.2.1, Ubuntu 24.04, CUDA 13.2.1, with Orin Family support. [JetPack 7.2.1 release information](https://developer.nvidia.com/embedded/jetpack/downloads)
 
-The commands below target **JetPack 6.2 / CUDA 12.6, Ubuntu 22.04, aarch64, Python 3.10**, using Torch 2.8.0, TorchVision 0.23.0, LeRobot 0.4.4, and Transformers 4.57.1. The Torch-TensorRT project documents this JetPack package source, and LeRobot 0.4.4 supports these versions. [JetPack package instructions](https://docs.pytorch.org/TensorRT/getting_started/jetpack.html), [LeRobot requirements](https://github.com/huggingface/lerobot/blob/v0.4.4/pyproject.toml)
+The documented install path uses this reproducible candidate combination:
 
-For another JetPack release, first obtain a matching CUDA-enabled Torch/TorchVision build using the [NVIDIA installation guide](https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/index.html) and [compatibility matrix](https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform-release-notes/pytorch-jetson-rel.html). Do not replace the system Python.
+| Component | Value installed by this guide |
+| --- | --- |
+| Python | `3.12.x` |
+| PyTorch / TorchVision | `2.10.0` / `0.25.0`, CUDA 13.0 aarch64 builds |
+| LeRobot | `0.4.4` |
+| Transformers | `4.57.1` |
+| Target GPU | AGX Orin, compute capability `8.7`, Torch build includes `sm_87` |
 
-On Orin, for the stated combination:
+LeRobot 0.4.4 requires Torch below 2.11 and TorchVision below 0.26, so the installer must not upgrade Torch to 2.11 or later. [LeRobot 0.4.4 requirements](https://github.com/huggingface/lerobot/blob/v0.4.4/pyproject.toml)
+
+At this guide's update date, NVIDIA's PyTorch for Jetson matrix does not list a JetPack 7.2/7.2.1 wheel combination, and its NVIDIA wheel column contains no JetPack 7 wheel. The commands below therefore use the **Jetson AI Lab community index** `sbsa/cu130`. This is a candidate that must pass the on-device gates below; installation alone is not NVIDIA certification. [NVIDIA PyTorch for Jetson matrix](https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform-release-notes/pytorch-jetson-rel.html)
 
 ```bash
 cd "$HOME/mars-hardware"
-python3.10 -m venv .venv-vla
+python3 -m venv .venv-vla
 .venv-vla/bin/python -m pip install --upgrade pip
 .venv-vla/bin/python -m pip install \
-  torch==2.8.0 torchvision==0.23.0 \
-  --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
-.venv-vla/bin/python -m scripts.install_vla --install
-.venv-vla/bin/python -m scripts.install_vla
+  torch==2.10.0 torchvision==0.25.0 \
+  --index-url https://pypi.jetson-ai-lab.io/sbsa/cu130
+.venv-vla/bin/python -m scripts.install_vla \
+  --install \
+  --require-python 3.12 \
+  --require-compute-capability 8.7
 ```
 
-The installer executes CUDA and TorchVision CUDA checks, pins the installed Torch/TorchVision versions while installing LeRobot, and checks the resulting imports. The final read-only check should report `status: ready`, the GPU/CUDA identity, LeRobot `0.4.4`, and Transformers `4.57.1`. It rejects an environment containing the MARS protobuf 7 stack.
+The last command runs real CUDA matrix and TorchVision CUDA NMS checks before and after installing LeRobot. It requires device capability `[8, 7]`, requires the Torch architecture list to contain `sm_87`, and constrains Torch/TorchVision so dependency resolution cannot replace them. Stop on any failure; do not substitute a CPU wheel or remove a gate.
 
-An existing separate CUDA environment may be used instead; run the installer through its interpreter and give that absolute interpreter path to O1's `--worker-python`.
+Do not install `agent/requirements-hardware.txt` and `agent/requirements-vla.txt` in the same environment. MARS uses protobuf 7, while the LeRobot 0.4.4 dependency tree needs an older protobuf. O1 runs the GPU worker through a restricted local standard-input/output protocol, so each environment can keep its own dependencies.
+
+An existing separate CUDA environment may be used instead; run the same check through its interpreter and give that absolute interpreter path to O1's `--worker-python`. Such an environment may use another version within LeRobot 0.4.4's declared Torch/TorchVision ranges, so preserve the reported versions with the test evidence rather than describing it as the exact baseline above:
+
+```bash
+.venv-vla/bin/python -m scripts.install_vla \
+  --require-python 3.12 \
+  --require-compute-capability 8.7
+```
+
+The JSON must include `status: ready`, Python `3.12`, capability `[8, 7]`, `sm_87`, the actual GPU and Torch/CUDA versions, LeRobot `0.4.4`, and Transformers `4.57.1`. If this community build fails a gate on the actual system, the native CUDA mixed loop remains independently usable, but SmolVLA is not ready.
 
 ## 4. Prepare fixed assets on Orin
 
@@ -131,7 +156,7 @@ cd "$HOME/mars-hardware"
   --artifact-dir .mars-vla/robot_1
 ```
 
-Expect `REAL CUDA VLA` after the CUDA probe and asset validation. Keep O1 running. The peer is the PC's LAN address; the worker interpreter must exist on Orin. CUDA unavailability is an error; there is no CPU fallback.
+Startup runs a CUDA sum, TorchVision CUDA NMS, and imports the fixed LeRobot/Transformers versions through `--worker-python`; it also validates the model manifest. Expect `REAL CUDA VLA` only after every check passes. Full weights still load strictly when the inference task arrives. Keep O1 running. The peer is the PC's LAN address; the worker interpreter must exist on Orin. CUDA unavailability is an error; there is no CPU fallback.
 
 For a CUDA-only check, omit `--model-dir` and skip asset preparation. That Agent will not advertise SmolVLA support.
 
@@ -162,7 +187,9 @@ cd "$HOME/mars-hardware"
   --agent robot_1=192.168.1.20:50051 \
   --agent edge_pc=127.0.0.1:50051 \
   --output .mars-vla/cuda-01.json \
-  --require-distinct-hosts
+  --require-distinct-hosts \
+  --require-hardware \
+  --require-jetpack 7.2.1
 ```
 
 Then execute pretrained SmolVLA:
@@ -173,7 +200,9 @@ Then execute pretrained SmolVLA:
   --agent robot_1=192.168.1.20:50051 \
   --agent edge_pc=127.0.0.1:50051 \
   --output .mars-vla/smolvla-01.json \
-  --require-distinct-hosts
+  --require-distinct-hosts \
+  --require-hardware \
+  --require-jetpack 7.2.1
 ```
 
 The coordinator is on the PC, so its PC endpoint uses localhost. O1 must still use the PC's LAN address.
@@ -192,7 +221,10 @@ Use new output names for subsequent runs. Existing reports, including failed run
 
 Confirm all of the following:
 
-- Overall `status: succeeded`, final `valid: true`, and execution on two distinct hosts.
+- Overall `status: succeeded`, `hardware_smoke_passed: true`, `gpu_tested: true`, final `valid: true`, and execution on two distinct physical hosts.
+- `execution_evidence_kind` is `trusted_agent_report` and `hardware_gate_failures` is empty. A software fixture can validate business logic and transport, but is labeled `test_fixture` and cannot count as real GPU evidence.
+- The two hosts have distinct machine IDs, the same commit and runtime source fingerprint; the GPU host is an aarch64 AGX Orin with compute capability 8.7 and L4T 39.2.1.
+- The worker uses Python 3.12; Torch/TorchVision are within LeRobot 0.4.4's supported ranges, and startup preflight versions exactly match task execution.
 - CUDA `smoke` executes on `robot_1` and validation on `edge_pc`, with matrix reference checks passing.
 - SmolVLA `observe` and `validate` execute on `edge_pc`, `infer` on `robot_1`, with nonzero remote inputs for both inference and validation.
 - Measurements identify the GPU, Torch/CUDA versions, actual CUDA input/output tensors, positive CUDA-event and synchronized-wall times, and positive allocated GPU memory.
@@ -202,7 +234,10 @@ Confirm all of the following:
 | Report location | Expected value or content |
 | --- | --- |
 | `status` / `scope` | `succeeded` / `cross_host_cuda_execution` |
-| `gpu_tested` / `executing_host_count` | `true` / `2` |
+| `hardware_smoke_passed` / `gpu_tested` | `true` / `true` |
+| `execution_evidence_kind` / `executing_host_count` | `trusted_agent_report` / `2` |
+| `hardware_gate_failures` | `[]` |
+| `jetpack_profile_evidence.passed` | `true`, `profile_scope` is `l4t_only`, observed L4T R39 revision 2.1; the prerequisite native CUDA loop separately accepts the system CUDA Runtime |
 | `validation.valid` | `true` |
 | `gpu_execution.agent_id` | `robot_1` by default |
 | `gpu_execution.measurement` | Device identity, CUDA events, synchronized times, allocations |
@@ -215,7 +250,7 @@ Confirm all of the following:
 
 CUDA-event timing measures the GPU stream. Synchronized wall timing measures the completed inference call. Model loading/preprocessing is recorded separately; neither measure is the entire network workflow duration. PyTorch allocator memory is not total Jetson system memory. Scheduling profiles are bootstrap estimates; reported CUDA timings and allocations come from execution. Energy and scheduling superiority are not established by this test.
 
-For failures, inspect O1 first. Common causes are a CPU-only Torch install, incompatible TorchVision, a worker path pointing at `.venv`, missing or corrupt model files, failed AV1 decoding during sample preparation, and a missing observation on the PC. Correct these errors before rerunning; do not remove verification to conceal them.
+For failures, inspect O1 first. Common causes are a CPU-only Torch install, incompatible TorchVision, a worker path pointing at `.venv`, missing or corrupt model files, failed AV1 decoding during sample preparation, and a missing observation on the PC. `worker package lookup is not isolated` means `PYTHONHOME`, `PYTHONPATH`, or user site-packages can contaminate the installer; unset the overrides and rerun through `.venv-vla/bin/python`. `JetPack 7.1.2 is not an NVIDIA release` means the runner rejected that profile name; read `/etc/nv_tegra_release` and use `--require-jetpack 7.2.1` only when it says R39 revision 2.1. A `no_test_fixtures` failure means the result is developer test data rather than hardware evidence. A `cuda_preflight_matches_execution` failure means startup and task execution used different devices or software stacks. `worker_python_for_jetpack` or `smolvla_framework_versions` means the worker is not Python 3.12 or its Torch stack is outside the supported range. Correct the underlying environment before rerunning; do not remove verification to conceal it.
 
 `tegrastats` can provide an additional view of Orin load, but sampling can miss short tasks. Keep the task's CUDA measurements and result checks as the primary records.
 

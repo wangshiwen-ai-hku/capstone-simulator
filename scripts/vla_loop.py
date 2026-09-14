@@ -17,12 +17,17 @@ from uuid import uuid4
 
 from agent.artifacts import ArtifactFiles, canonical_json, digest_bytes, fetch_artifact
 from agent.endpoints import parse_endpoints
+from agent.jetson import jetpack_profile_evidence, normalize_jetpack_profile
 from examples.vla_workloads import PORT_TYPES
 from examples.vla_workloads.bundle import (
     POLICY_ID,
     POLICY_REVISION,
     VLM_ID,
     VLM_REVISION,
+)
+from examples.vla_workloads.versions import (
+    release_tuple,
+    validate_vla_framework_versions,
 )
 from mars.coordinator import CentralCoordinator
 from mars.domain.artifact import ArtifactRef
@@ -59,6 +64,8 @@ EDGES = {
 }
 GPU_TASK_TYPES = frozenset({"hil_vla_infer", "hil_cuda_smoke"})
 PROFILE_SOURCE = "unmeasured_cuda_vla_bootstrap_prior"
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_GIT_REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
 
 def _positive_timeout(value: float, name: str) -> None:
@@ -207,6 +214,138 @@ def _positive_measurements(values) -> bool:
     )
 
 
+def _contains_test_fixture(value) -> bool:
+    if isinstance(value, dict):
+        return value.get("test_fixture") is True or any(
+            _contains_test_fixture(item) for item in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_test_fixture(item) for item in value)
+    return False
+
+
+def _execution_hosts(records: dict) -> dict:
+    """Return one stable host identity for each executing Agent."""
+
+    hosts = {}
+    for record in records.values():
+        agent_id, host = record.get("agent_id"), record.get("host")
+        if not isinstance(agent_id, str) or not isinstance(host, dict):
+            raise ValueError("execution record is missing its host identity")
+        previous = hosts.setdefault(agent_id, host)
+        if canonical_json(previous) != canonical_json(host):
+            raise ValueError(f"{agent_id} host identity changed within the workflow")
+    return hosts
+
+
+def _hardware_checks(
+    hosts: dict,
+    measurement: dict,
+    *,
+    gpu_agent: str,
+    io_agent: str,
+    workload: str,
+    fixture: bool,
+    required_jetpack: str | None,
+) -> tuple[dict, dict | None]:
+    gpu, io = hosts.get(gpu_agent, {}), hosts.get(io_agent, {})
+    machines = [host.get("machine_id_sha256") for host in (gpu, io)]
+    sources = [host.get("runtime_source_sha256") for host in (gpu, io)]
+    revisions = [host.get("git_revision") for host in (gpu, io)]
+    preflight = gpu.get("cuda_device")
+    identity_keys = [
+        "device",
+        "device_name",
+        "compute_capability",
+        "torch_version",
+        "cuda_version",
+        "worker_python_version",
+    ]
+    if workload == "smolvla":
+        identity_keys.extend(
+            ["torchvision_version", "lerobot_version", "transformers_version"]
+        )
+    preflight_matches = isinstance(preflight, dict) and all(
+        type(preflight.get(key)) is type(measurement.get(key))
+        and preflight.get(key) == measurement.get(key)
+        for key in identity_keys
+    )
+    preflight_verified = (
+        isinstance(preflight, dict)
+        and preflight.get("backend") == "torch"
+        and preflight.get("kernel_execution_verified") is True
+        and preflight.get("probe_operation") == "sum_of_squares_0_to_15"
+        and preflight.get("probe_result") == 1240
+    )
+    try:
+        validate_vla_framework_versions(
+            measurement.get("torch_version"), measurement.get("torchvision_version")
+        )
+    except ValueError:
+        framework_versions_supported = False
+    else:
+        framework_versions_supported = True
+    worker_python = release_tuple(measurement.get("worker_python_version"))
+    profile = (
+        jetpack_profile_evidence(
+            required_jetpack,
+            jetson_linux=gpu.get("jetson_linux"),
+        )
+        if required_jetpack
+        else None
+    )
+    checks = {
+        "distinct_machine_ids": (
+            all(
+                isinstance(value, str) and _SHA256.fullmatch(value) is not None
+                for value in machines
+            )
+            and machines[0] != machines[1]
+        ),
+        "matching_runtime_source": (
+            all(
+                isinstance(value, str) and _SHA256.fullmatch(value) is not None
+                for value in sources
+            )
+            and sources[0] == sources[1]
+        ),
+        "matching_git_revision": (
+            all(
+                isinstance(value, str) and _GIT_REVISION.fullmatch(value) is not None
+                for value in revisions
+            )
+            and revisions[0] == revisions[1]
+        ),
+        "gpu_on_robot_1": gpu_agent == "robot_1",
+        "target_architectures": (
+            gpu.get("architecture") in {"aarch64", "arm64"}
+            and io.get("architecture") == "x86_64"
+        ),
+        "jetson_agx_orin": "Jetson AGX Orin"
+        in str(gpu.get("jetson_model") or ""),
+        "orin_compute_capability": measurement.get("compute_capability") == [8, 7],
+        "cuda_preflight_verified": preflight_verified,
+        "cuda_preflight_matches_execution": preflight_matches,
+        "worker_python_for_jetpack": (
+            required_jetpack is None
+            or (worker_python is not None and worker_python[:2] == (3, 12))
+        ),
+        "smolvla_framework_versions": (
+            framework_versions_supported if workload == "smolvla" else True
+        ),
+        "smolvla_stack_preflight": (
+            preflight.get("vla_stack_verified") is True
+            and preflight.get("lerobot_version") == "0.4.4"
+            and preflight.get("transformers_version") == "4.57.1"
+            if workload == "smolvla" and isinstance(preflight, dict)
+            else workload != "smolvla"
+        ),
+        "no_test_fixtures": not fixture,
+        "jetpack_profile": profile["passed"] if profile else None,
+    }
+    return checks, profile
+
+
 def verify_gpu_payload(
     payload: dict, workload: str, observation: dict | None = None
 ) -> dict:
@@ -240,7 +379,12 @@ def verify_gpu_payload(
     memory = measurement.get("peak_memory_allocated_bytes")
     if isinstance(memory, bool) or not isinstance(memory, int) or memory <= 0:
         raise ValueError("GPU output lacks measured CUDA allocation")
-    for name in ("device_name", "torch_version", "cuda_version"):
+    for name in (
+        "device_name",
+        "torch_version",
+        "cuda_version",
+        "worker_python_version",
+    ):
         if (
             not isinstance(measurement.get(name), str)
             or not measurement[name].strip()
@@ -268,6 +412,13 @@ def verify_gpu_payload(
     if workload == "smolvla":
         if measurement.get("timing_scope") != "policy_predict_action_chunk_only":
             raise ValueError("SmolVLA timing scope does not identify policy inference")
+        if (
+            measurement.get("lerobot_version") != "0.4.4"
+            or measurement.get("transformers_version") != "4.57.1"
+            or not isinstance(measurement.get("torchvision_version"), str)
+            or not measurement["torchvision_version"].strip()
+        ):
+            raise ValueError("SmolVLA measurement has the wrong worker stack")
         if payload.get("schema") != "mars.vla.actions.v1" or observation is None:
             raise ValueError("missing SmolVLA action or observation payload")
         if payload.get("source_hashes", {}).get("observation") != digest_bytes(
@@ -379,7 +530,11 @@ async def run_vla_loop(
     workflow_timeout_seconds: float = 600.0,
     task_completion_timeout_seconds: float = 300.0,
     require_distinct_hosts: bool = False,
+    require_hardware: bool = False,
+    require_jetpack: str | None = None,
 ) -> dict:
+    required_jetpack = normalize_jetpack_profile(require_jetpack)
+    hardware_acceptance_required = require_hardware or required_jetpack is not None
     _positive_timeout(workflow_timeout_seconds, "workflow timeout")
     _positive_timeout(task_completion_timeout_seconds, "task completion timeout")
     if task_completion_timeout_seconds > workflow_timeout_seconds:
@@ -411,7 +566,13 @@ async def run_vla_loop(
         "physical_actuation": False,
         "control_success_tested": False,
         "gpu_tested": False,
+        "hardware_smoke_passed": False,
+        "hardware_acceptance_required": hardware_acceptance_required,
+        "required_jetpack": required_jetpack,
         "gpu_execution": None,
+        "execution_evidence_kind": "unverified",
+        "hardware_checks": {},
+        "hardware_gate_failures": [],
         "energy_j": None,
         "timeouts_seconds": {
             "workflow": workflow_timeout_seconds,
@@ -533,11 +694,23 @@ async def run_vla_loop(
                     f"{task_id} execution evidence does not match its planned executor"
                 )
         evidence["executions"] = list(records.values())
-        host_keys = {
-            (record["host"]["hostname"], record["host"]["architecture"])
-            for record in records.values()
-        }
-        evidence["executing_host_count"] = len(host_keys)
+        hosts = _execution_hosts(records)
+        evidence["hosts"] = hosts
+        machines = [host.get("machine_id_sha256") for host in hosts.values()]
+        if all(
+            isinstance(value, str) and _SHA256.fullmatch(value) is not None
+            for value in machines
+        ):
+            evidence["executing_host_count"] = len(set(machines))
+            evidence["host_count_basis"] = "machine_id_sha256"
+        else:
+            evidence["executing_host_count"] = len(
+                {
+                    (host.get("hostname"), host.get("architecture"))
+                    for host in hosts.values()
+                }
+            )
+            evidence["host_count_basis"] = "reported_hostname_architecture_only"
         evidence["executing_node_ids"] = sorted(
             {record["agent_id"] for record in records.values()}
         )
@@ -579,6 +752,48 @@ async def run_vla_loop(
             raise ValueError(
                 "run did not prove the required cross-node artifact transfers"
             )
+        fixture = _contains_test_fixture(
+            {
+                "artifacts": evidence["artifacts"],
+                "measurement": measurement,
+                "observation": observation,
+                "payload": payload,
+            }
+        )
+        hardware_checks, profile = _hardware_checks(
+            hosts,
+            measurement,
+            gpu_agent=gpu_agent,
+            io_agent=io_agent,
+            workload=workload,
+            fixture=fixture,
+            required_jetpack=required_jetpack,
+        )
+        evidence["hardware_checks"] = hardware_checks
+        if profile is not None:
+            evidence["jetpack_profile_evidence"] = profile
+        core_hardware_checks = {
+            "distinct_machine_ids",
+            "matching_runtime_source",
+            "matching_git_revision",
+            "gpu_on_robot_1",
+            "target_architectures",
+            "jetson_agx_orin",
+            "orin_compute_capability",
+            "cuda_preflight_verified",
+            "cuda_preflight_matches_execution",
+            "no_test_fixtures",
+        }
+        if workload == "smolvla":
+            core_hardware_checks.update(
+                {"smolvla_framework_versions", "smolvla_stack_preflight"}
+            )
+        required_checks = set(core_hardware_checks)
+        if required_jetpack:
+            required_checks.update({"jetpack_profile", "worker_python_for_jetpack"})
+        evidence["hardware_gate_failures"] = sorted(
+            name for name in required_checks if hardware_checks.get(name) is not True
+        )
         evidence["gpu_execution"] = {
             "task_id": gpu_task,
             "agent_id": gpu_agent,
@@ -591,15 +806,27 @@ async def run_vla_loop(
                 inference=payload.get("inference"),
             )
             evidence["observation_source"] = observation.get("provenance")
-        evidence["gpu_tested"] = True
-        evidence["scope"] = (
-            "cross_host_cuda_execution"
-            if len(host_keys) > 1
-            else "same_host_cuda_execution"
+        evidence["execution_evidence_kind"] = (
+            "test_fixture" if fixture else "trusted_agent_report"
         )
-        if require_distinct_hosts and len(host_keys) < 2:
+        evidence["gpu_tested"] = not fixture
+        evidence["hardware_smoke_passed"] = not evidence["hardware_gate_failures"]
+        if fixture:
+            evidence["scope"] = "test_fixture"
+        elif evidence["hardware_smoke_passed"]:
+            evidence["scope"] = "cross_host_cuda_execution"
+        elif evidence["executing_host_count"] > 1:
+            evidence["scope"] = "cross_host_cuda_execution_unaccepted"
+        else:
+            evidence["scope"] = "same_host_cuda_execution"
+        if require_distinct_hosts and not hardware_checks["distinct_machine_ids"]:
             raise ValueError(
-                "both Agents executed on the same reported host; physical two-host test not proven"
+                "distinct physical hosts were not proven by machine identity"
+            )
+        if hardware_acceptance_required and evidence["hardware_gate_failures"]:
+            raise ValueError(
+                "hardware acceptance failed: "
+                + ", ".join(evidence["hardware_gate_failures"])
             )
         evidence["status"] = "succeeded"
     except Exception as exc:
@@ -636,6 +863,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workflow-timeout", type=float, default=600.0)
     parser.add_argument("--task-completion-timeout", type=float, default=300.0)
     parser.add_argument("--require-distinct-hosts", action="store_true")
+    parser.add_argument(
+        "--require-hardware",
+        action="store_true",
+        help="fail unless the PC + AGX Orin hardware evidence gate passes",
+    )
+    parser.add_argument(
+        "--require-jetpack",
+        metavar="VERSION",
+        help="also require a supported JetPack/L4T profile (7.2 or 7.2.1)",
+    )
     return parser
 
 
@@ -657,6 +894,8 @@ def main() -> None:
                 workflow_timeout_seconds=args.workflow_timeout,
                 task_completion_timeout_seconds=args.task_completion_timeout,
                 require_distinct_hosts=args.require_distinct_hosts,
+                require_hardware=args.require_hardware,
+                require_jetpack=args.require_jetpack,
             )
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)

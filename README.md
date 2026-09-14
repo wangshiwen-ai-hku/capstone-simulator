@@ -40,6 +40,8 @@ The five-task DAG runs sensing and validation on Orin CPU, mapping and planning
 on PC CPU, and obstacle inflation on Orin CUDA. Planning consumes the transferred
 GPU mask; validation checks every cell against a CPU reference. Native CUDA
 builds with the installed Toolkit and needs no PyTorch or model download.
+NVIDIA has no JetPack 7.1.2 release; the strict runner identifies 7.2.1 from
+L4T `R39, REVISION: 2.1` rather than accepting a manually entered label.
 For real NVIDIA GPU execution, the [CUDA/SmolVLA runbook](docs/vla_hardware_validation.md)
 adds measured matrix operations and pretrained VLA action inference from recorded robot observations.
 
@@ -564,6 +566,8 @@ mars.engine -------> 同一制品路径上的兼容性封装
 五任务链包含 Orin CPU 传感与校验、PC CPU 建图与规划，以及 Orin CUDA 障碍物膨胀。
 规划消费跨机传回的 GPU 栅格，校验逐格对照 CPU 参考；使用现有 CUDA Toolkit 编译，
 无需先安装 PyTorch 或下载模型。
+NVIDIA 官方没有 JetPack 7.1.2；严格测试只在 L4T 输出为
+`R39, REVISION: 2.1` 时把系统认作 JetPack 7.2.1，不采信手工填写的版本名。
 真实 NVIDIA GPU 测试使用 [CUDA/SmolVLA 指南](docs/vla_hardware_validation_zh.md)，
 包括实测矩阵计算和以真实机器人记录观测为输入的预训练 VLA 动作推理。
 

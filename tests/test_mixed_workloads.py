@@ -186,6 +186,23 @@ def test_mixed_task_contracts_and_local_binary_requirement(tmp_path):
     assert orin.gpu_demands == {"hil_mixed_inflation": 1.0}
 
 
+def test_mixed_orin_preflight_does_not_require_vla_environment(tmp_path, monkeypatch):
+    binary = tmp_path / "fixture"
+    binary.write_text("not an actual CUDA binary")
+    orin = MixedExecutor("orin", cuda_binary=binary)
+
+    class SpawnReached(RuntimeError):
+        pass
+
+    async def spawn(*args, **kwargs):
+        assert kwargs["env"] is None
+        raise SpawnReached
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(SpawnReached):
+        asyncio.run(orin.probe_cuda())
+
+
 def test_native_gpu_admission_requires_executed_kernel_not_torch_metadata():
     gpu = {
         "available": True,

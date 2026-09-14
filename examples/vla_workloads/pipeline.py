@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import math
+import platform
 import re
 import struct
 import time
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .bundle import POLICY_ID, POLICY_REVISION, VLM_ID, VLM_REVISION
+from .versions import validate_vla_framework_versions
 
 PORT_TYPES = {
     "hil_vla_observe": {
@@ -238,7 +240,7 @@ def _torch_cuda(device_name: Any):
     return torch, device
 
 
-def probe_cuda(device: str = "cuda:0") -> dict:
+def probe_cuda(device: str = "cuda:0", *, require_vla_stack: bool = False) -> dict:
     """Execute and synchronize a CUDA operation before advertising GPU support."""
     torch, selected = _torch_cuda(device)
     value = torch.arange(16, dtype=torch.float32, device=selected)
@@ -246,17 +248,55 @@ def probe_cuda(device: str = "cuda:0") -> dict:
     torch.cuda.synchronize(selected)
     if result.device != selected or result.item() != 1240:
         raise WorkloadError("CUDA readiness computation failed")
-    return {
+    info = {
         "available": True,
+        "backend": "torch",
+        "kernel_execution_verified": True,
         "device": str(selected),
         "device_count": torch.cuda.device_count(),
         "device_name": torch.cuda.get_device_name(selected),
         "compute_capability": list(torch.cuda.get_device_capability(selected)),
         "torch_version": str(torch.__version__),
         "cuda_version": str(torch.version.cuda),
+        "worker_python_version": platform.python_version(),
         "probe_operation": "sum_of_squares_0_to_15",
         "probe_result": 1240,
     }
+    if require_vla_stack:
+        try:
+            import torchvision
+            from lerobot.policies.factory import make_pre_post_processors  # noqa: F401
+            from lerobot.policies.smolvla.modeling_smolvla import (  # noqa: F401
+                SmolVLAPolicy,
+            )
+        except (ImportError, OSError) as exc:
+            raise WorkloadError(
+                "the pinned TorchVision/LeRobot SmolVLA worker stack is unavailable"
+            ) from exc
+        if version("lerobot") != "0.4.4" or version("transformers") != "4.57.1":
+            raise WorkloadError(
+                "SmolVLA preflight requires LeRobot 0.4.4 and Transformers 4.57.1"
+            )
+        try:
+            validate_vla_framework_versions(
+                str(torch.__version__), str(torchvision.__version__)
+            )
+        except ValueError as exc:
+            raise WorkloadError(str(exc)) from exc
+        torchvision.ops.nms(
+            torch.tensor([[0.0, 0.0, 1.0, 1.0]], device=selected),
+            torch.tensor([1.0], device=selected),
+            0.5,
+        )
+        torch.cuda.synchronize(selected)
+        info.update(
+            vla_stack_verified=True,
+            torchvision_version=str(torchvision.__version__),
+            lerobot_version=version("lerobot"),
+            transformers_version=version("transformers"),
+            vla_probe_operation="torchvision_cuda_nms_and_smolvla_imports",
+        )
+    return info
 
 
 def _run_counts(options: Mapping) -> tuple[int, int]:
@@ -290,6 +330,7 @@ def _measure(torch, device, function, warmup: int, repeats: int):
         "compute_capability": list(torch.cuda.get_device_capability(device)),
         "torch_version": str(torch.__version__),
         "cuda_version": str(torch.version.cuda),
+        "worker_python_version": platform.python_version(),
         "cuda_event_ms": cuda_ms,
         "synchronized_wall_ms": wall_ms,
         "peak_memory_allocated_bytes": torch.cuda.max_memory_allocated(device),
@@ -305,7 +346,12 @@ def _measurement(payload: Any) -> dict:
     device = payload.get("device")
     if not isinstance(device, str) or not re.fullmatch(r"cuda:[0-9]+", device):
         raise WorkloadError("measurement must name a concrete CUDA device")
-    for name in ("device_name", "torch_version", "cuda_version"):
+    for name in (
+        "device_name",
+        "torch_version",
+        "cuda_version",
+        "worker_python_version",
+    ):
         if (
             not isinstance(payload.get(name), str)
             or not payload[name]
@@ -626,6 +672,9 @@ def _infer(observation: dict, seed: int, options: Mapping) -> dict:
         ),
         timing_scope="policy_predict_action_chunk_only",
         model_load_and_preprocess_seconds=load_seconds,
+        torchvision_version=version("torchvision"),
+        lerobot_version=version("lerobot"),
+        transformers_version=version("transformers"),
     )
     payload = {
         "schema": "mars.vla.actions.v1",
@@ -800,7 +849,15 @@ def execute(
             raise WorkloadError(f"{port} has an unsupported schema")
         canonical_json(inputs[port])
     if task_type == "probe":
-        output = {"gpu_info": probe_cuda(options.get("device", "cuda:0"))}
+        require_vla_stack = options.get("require_vla_stack", False)
+        if type(require_vla_stack) is not bool:
+            raise WorkloadError("require_vla_stack must be boolean")
+        output = {
+            "gpu_info": probe_cuda(
+                options.get("device", "cuda:0"),
+                require_vla_stack=require_vla_stack,
+            )
+        }
     elif task_type == "hil_vla_observe":
         output = _observe(options)
     elif task_type == "hil_vla_infer":
