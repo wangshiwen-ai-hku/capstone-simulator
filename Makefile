@@ -4,8 +4,8 @@ test:
 	python3 -m pytest -q
 
 lint:
-	python3 -m ruff check agent backend evals mars scripts tests
-	python3 -m compileall -q agent backend evals interfaces mars scripts tests
+	python3 -m ruff check agent backend evals examples mars scripts tests
+	python3 -m compileall -q agent backend evals examples interfaces mars scripts tests
 
 proto:
 	python3 -m grpc_tools.protoc -I . --python_out=. --grpc_python_out=. interfaces/proto/mars/v1/*.proto

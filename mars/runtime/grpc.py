@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+import math
 from uuid import uuid4
 
 import grpc
@@ -75,68 +76,90 @@ class GrpcRuntimeAdapter:
         endpoints: Mapping[str, str],
         *,
         timeout_seconds: float = 5.0,
+        completion_timeout_seconds: float = 120.0,
     ) -> None:
         if not endpoints:
             raise ValueError("at least one real agent endpoint is required")
+        if any(
+            not math.isfinite(value) or value <= 0
+            for value in (timeout_seconds, completion_timeout_seconds)
+        ):
+            raise ValueError("runtime timeouts must be finite and positive")
         self._endpoints = dict(endpoints)
         self._timeout_seconds = timeout_seconds
+        self._completion_timeout_seconds = completion_timeout_seconds
         self._channels: dict[str, grpc.aio.Channel] = {}
         self._stubs: dict[str, runtime_service_pb2_grpc.AgentRuntimeStub] = {}
         self._nodes: dict[str, NodeSpec] = {}
         self._stream_tasks: list[asyncio.Task[None]] = []
         self._pending: dict[str, asyncio.Future[AttemptCompletion]] = {}
         self._buffered: dict[str, AttemptCompletion] = {}
+        self._early_completions: dict[str, AttemptCompletion] = {}
+        self._commands: dict[str, DispatchCommand] = {}
+        self._dispatch_attempts: dict[str, str] = {}
+        self._accepted_dispatches: dict[str, str] = {}
+        self._dispatch_deadlines: dict[str, float] = {}
         self._attempt_agents: dict[str, str] = {}
+        self._seen_attempts: set[str] = set()
+        self._stream_errors: dict[str, RuntimeError] = {}
         self._completed_by_agent: dict[str, int] = {}
         self._failed_by_agent: dict[str, int] = {}
+        self._busy_time_by_agent: dict[str, float] = {}
         self._recorded_dispatches: set[str] = set()
         self._last_inventory: RuntimeInventory | None = None
         self._started = False
         self._has_dispatched = False
+        self._closing = False
 
     async def start(self, now_ms: float) -> RuntimeInventory:
         if self._started:
             return await self.inventory(now_ms)
         instance_id = uuid4().hex
-        for agent_id, endpoint in self._endpoints.items():
-            channel = grpc.aio.insecure_channel(endpoint)
-            stub = runtime_service_pb2_grpc.AgentRuntimeStub(channel)
-            response = await stub.RegisterAgent(
-                runtime_pb2.RegisterAgentRequest(
-                    schema_version="mars.runtime.v1",
-                    agent_id=agent_id,
-                    agent_instance_id=instance_id,
-                    capabilities=_capabilities_to_proto(self.capabilities),
-                    sent_at_ms=now_ms,
-                ),
-                timeout=self._timeout_seconds,
-            )
-            if not response.accepted:
-                await channel.close()
-                raise RuntimeError(
-                    f"agent {agent_id} rejected registration: "
-                    f"{response.error_code or response.error_message}"
+        try:
+            for agent_id, endpoint in self._endpoints.items():
+                channel = grpc.aio.insecure_channel(endpoint)
+                # Track the channel before registration so any failure closes it.
+                self._channels[agent_id] = channel
+                stub = runtime_service_pb2_grpc.AgentRuntimeStub(channel)
+                response = await stub.RegisterAgent(
+                    runtime_pb2.RegisterAgentRequest(
+                        schema_version="mars.runtime.v1",
+                        agent_id=agent_id,
+                        agent_instance_id=instance_id,
+                        capabilities=_capabilities_to_proto(self.capabilities),
+                        sent_at_ms=now_ms,
+                    ),
+                    timeout=self._timeout_seconds,
                 )
-            node = _node_from_proto(response.node)
-            if node.node_id != agent_id:
-                await channel.close()
-                raise RuntimeError(
-                    f"agent endpoint {agent_id} returned node {node.node_id}"
+                if not response.accepted:
+                    raise RuntimeError(
+                        f"agent {agent_id} rejected registration: "
+                        f"{response.error_code or response.error_message}"
+                    )
+                node = _node_from_proto(response.node)
+                if node.node_id != agent_id:
+                    raise RuntimeError(
+                        f"agent endpoint {agent_id} returned node {node.node_id}"
+                    )
+                self._stubs[agent_id] = stub
+                self._nodes[agent_id] = node
+                self._completed_by_agent[agent_id] = 0
+                self._failed_by_agent[agent_id] = 0
+                self._busy_time_by_agent[agent_id] = 0.0
+                self._stream_tasks.append(
+                    asyncio.create_task(self._listen(agent_id, stub))
                 )
-            self._channels[agent_id] = channel
-            self._stubs[agent_id] = stub
-            self._nodes[agent_id] = node
-            self._completed_by_agent[agent_id] = 0
-            self._failed_by_agent[agent_id] = 0
-            self._stream_tasks.append(
-                asyncio.create_task(self._listen(agent_id, stub))
-            )
-        self._started = True
-        return await self.inventory(now_ms)
+            self._started = True
+            return await self.inventory(now_ms)
+        except BaseException:
+            await self.close()
+            raise
 
     async def inventory(self, now_ms: float) -> RuntimeInventory:
         if not self._started:
             return await self.start(now_ms)
+        if self._stream_errors:
+            raise next(iter(self._stream_errors.values()))
         responses = await asyncio.gather(
             *(
                 stub.GetState(
@@ -152,7 +175,14 @@ class GrpcRuntimeAdapter:
                 raise RuntimeError(
                     f"agent {agent_id} state failed: {response.error_code}"
                 )
+            if (
+                response.heartbeat.agent_id != agent_id
+                or response.heartbeat.node_snapshot.node_id != agent_id
+            ):
+                raise RuntimeError(f"agent {agent_id} returned mismatched state")
             heartbeats.append(_heartbeat_from_proto(response.heartbeat))
+        if self._stream_errors:
+            raise next(iter(self._stream_errors.values()))
         inventory = RuntimeInventory(
             nodes=tuple(self._nodes.values()),
             heartbeats=tuple(heartbeats),
@@ -173,7 +203,7 @@ class GrpcRuntimeAdapter:
     async def dispatch(self, command: DispatchCommand) -> DispatchAck:
         agent_id = command.assignment.target_node_id
         stub = self._stubs.get(agent_id)
-        if stub is None:
+        if stub is None or self._closing:
             return DispatchAck(
                 dispatch_id="",
                 attempt_id=command.attempt_id,
@@ -182,13 +212,56 @@ class GrpcRuntimeAdapter:
                 accepted=False,
                 error_code="unknown_agent",
             )
-        response = await stub.DispatchTask(
-            _command_to_proto(command),
-            timeout=self._timeout_seconds,
-        )
+        if agent_id in self._stream_errors:
+            raise self._stream_errors[agent_id]
+        if command.attempt_id in self._seen_attempts:
+            return DispatchAck(
+                dispatch_id="",
+                attempt_id=command.attempt_id,
+                task_id=command.task.task_id,
+                agent_id=agent_id,
+                accepted=False,
+                error_code="duplicate_attempt",
+            )
+        self._seen_attempts.add(command.attempt_id)
+        self._commands[command.attempt_id] = command
+        # Track before the RPC: a fast completion can precede its acknowledgement,
+        # and a lost acknowledgement must still allow best-effort cancellation.
+        self._attempt_agents[command.attempt_id] = agent_id
+        deadline = asyncio.get_running_loop().time() + self._completion_timeout_seconds
+        try:
+            response = await stub.DispatchTask(
+                _command_to_proto(command),
+                timeout=self._timeout_seconds,
+            )
+        except BaseException:
+            self._commands.pop(command.attempt_id, None)
+            self._early_completions.pop(command.attempt_id, None)
+            raise
+        if (
+            response.attempt_id != command.attempt_id
+            or response.task_id != command.task.task_id
+            or response.agent_id != agent_id
+            or (response.accepted and not response.dispatch_id)
+        ):
+            raise RuntimeError(f"agent {agent_id} returned mismatched dispatch ack")
         if response.accepted:
-            self._attempt_agents[command.attempt_id] = agent_id
+            if (
+                response.dispatch_id in self._dispatch_attempts
+                or response.dispatch_id in self._recorded_dispatches
+            ):
+                raise RuntimeError("agent reused a dispatch id")
+            self._dispatch_attempts[response.dispatch_id] = command.attempt_id
+            self._accepted_dispatches[command.attempt_id] = response.dispatch_id
+            self._dispatch_deadlines[response.dispatch_id] = deadline
             self._has_dispatched = True
+            early = self._early_completions.pop(command.attempt_id, None)
+            if early is not None and early.dispatch_id == response.dispatch_id:
+                self._record_completion(early)
+        else:
+            self._commands.pop(command.attempt_id, None)
+            self._attempt_agents.pop(command.attempt_id, None)
+            self._early_completions.pop(command.attempt_id, None)
         return DispatchAck(
             dispatch_id=response.dispatch_id,
             attempt_id=response.attempt_id,
@@ -199,15 +272,50 @@ class GrpcRuntimeAdapter:
         )
 
     async def receive_completion(self, dispatch_id: str) -> AttemptCompletion:
-        buffered = self._buffered.pop(dispatch_id, None)
-        if buffered is not None:
-            return buffered
+        attempt_id = self._dispatch_attempts.get(dispatch_id)
+        if attempt_id is None:
+            raise ValueError(f"unknown or consumed dispatch: {dispatch_id}")
+        if dispatch_id in self._pending:
+            raise ValueError(f"completion already being received: {dispatch_id}")
+        command = self._commands[attempt_id]
+        agent_id = command.assignment.target_node_id
         future = asyncio.get_running_loop().create_future()
         self._pending[dispatch_id] = future
         try:
-            return await future
+            buffered = self._buffered.pop(dispatch_id, None)
+            if buffered is not None:
+                return buffered
+            if agent_id in self._stream_errors:
+                raise self._stream_errors[agent_id]
+            remaining = (
+                self._dispatch_deadlines[dispatch_id]
+                - asyncio.get_running_loop().time()
+            )
+            try:
+                return await asyncio.wait_for(future, max(0.0, remaining))
+            except asyncio.TimeoutError as exc:
+                # Before Python 3.11, asyncio.TimeoutError is distinct from
+                # built-in TimeoutError. Normalize the public adapter failure.
+                # A timeout is an unknown outcome, not a safe automatic retry.
+                # The coordinator aborts the run and releases other attempts.
+                try:
+                    await self.cancel(
+                        attempt_id,
+                        "completion_timeout",
+                        command.assignment.estimated_start_ms,
+                    )
+                except grpc.RpcError:
+                    pass
+                raise TimeoutError(
+                    f"completion timeout for {dispatch_id} on {agent_id}; "
+                    "execution outcome may be unknown"
+                ) from exc
         finally:
             self._pending.pop(dispatch_id, None)
+            self._dispatch_attempts.pop(dispatch_id, None)
+            self._accepted_dispatches.pop(attempt_id, None)
+            self._dispatch_deadlines.pop(dispatch_id, None)
+            self._commands.pop(attempt_id, None)
 
     async def cancel(
         self,
@@ -215,7 +323,7 @@ class GrpcRuntimeAdapter:
         reason: str,
         now_ms: float,
     ) -> bool:
-        agent_id = self._attempt_agents.pop(attempt_id, None)
+        agent_id = self._attempt_agents.get(attempt_id)
         if agent_id is None:
             return False
         response = await self._stubs[agent_id].CancelAttempt(
@@ -226,6 +334,8 @@ class GrpcRuntimeAdapter:
             ),
             timeout=self._timeout_seconds,
         )
+        if response.cancelled:
+            self._attempt_agents.pop(attempt_id, None)
         return response.cancelled
 
     async def describe(
@@ -261,7 +371,7 @@ class GrpcRuntimeAdapter:
                 "max_concurrency": node.max_concurrency,
                 "completed_attempts": self._completed_by_agent[node.node_id],
                 "failed_attempts": self._failed_by_agent[node.node_id],
-                "busy_time_ms": 0.0,
+                "busy_time_ms": self._busy_time_by_agent[node.node_id],
                 "utilization": inventory.snapshots[node.node_id].gpu_util,
                 "capabilities": list(node.capabilities),
                 "supported_models": list(node.supported_models),
@@ -274,48 +384,112 @@ class GrpcRuntimeAdapter:
             }
             for node in inventory.nodes
         )
-        if self._has_dispatched and not self._pending and not self._buffered:
+        if self._has_dispatched and not self._dispatch_attempts:
             await self.close()
         return descriptions
 
     async def close(self) -> None:
+        self._closing = True
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(RuntimeError("runtime closed before completion"))
+        await asyncio.gather(
+            *(
+                self.cancel(attempt_id, "runtime_closed", 0.0)
+                for attempt_id in tuple(self._attempt_agents)
+            ),
+            return_exceptions=True,
+        )
         for task in self._stream_tasks:
             task.cancel()
         if self._stream_tasks:
             await asyncio.gather(*self._stream_tasks, return_exceptions=True)
         self._stream_tasks.clear()
-        await asyncio.gather(
-            *(channel.close() for channel in self._channels.values())
-        )
+        await asyncio.gather(*(channel.close() for channel in self._channels.values()))
         self._channels.clear()
         self._stubs.clear()
+        self._commands.clear()
+        self._dispatch_attempts.clear()
+        self._accepted_dispatches.clear()
+        self._dispatch_deadlines.clear()
+        self._attempt_agents.clear()
+        self._early_completions.clear()
+        self._buffered.clear()
+        self._seen_attempts.clear()
+        self._stream_errors.clear()
+        self._recorded_dispatches.clear()
         self._started = False
+        self._has_dispatched = False
+        self._closing = False
 
     async def _listen(
         self,
         agent_id: str,
         stub: runtime_service_pb2_grpc.AgentRuntimeStub,
     ) -> None:
-        stream = stub.StreamCompletions(
-            runtime_service_pb2.CompletionSubscription(agent_id=agent_id)
-        )
-        async for message in stream:
-            completion = _completion_from_proto(message)
-            if completion.dispatch_id not in self._recorded_dispatches:
-                self._recorded_dispatches.add(completion.dispatch_id)
-                counter = (
-                    self._completed_by_agent
-                    if completion.ok
-                    else self._failed_by_agent
-                )
-                counter[agent_id] += 1
-            self._attempt_agents.pop(completion.attempt_id, None)
-            future = self._pending.get(completion.dispatch_id)
-            if future is not None:
-                if not future.done():
-                    future.set_result(completion)
-            else:
-                self._buffered[completion.dispatch_id] = completion
+        try:
+            stream = stub.StreamCompletions(
+                runtime_service_pb2.CompletionSubscription(agent_id=agent_id)
+            )
+            async for message in stream:
+                command = self._commands.get(message.attempt_id)
+                if command is None:
+                    # Agents may replay results from other runtime sessions.
+                    continue
+                if (
+                    message.agent_id != agent_id
+                    or command.assignment.target_node_id != agent_id
+                    or message.task_id != command.task.task_id
+                    or not message.dispatch_id
+                ):
+                    raise RuntimeError("completion does not match its command")
+                completion = _completion_from_proto(message)
+                dispatch_id = self._accepted_dispatches.get(message.attempt_id)
+                if dispatch_id is None:
+                    self._early_completions.setdefault(message.attempt_id, completion)
+                elif message.dispatch_id == dispatch_id:
+                    self._record_completion(completion)
+            if not self._closing:
+                raise RuntimeError("completion stream ended")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = RuntimeError(
+                f"agent {agent_id} completion stream failed: {exc}; "
+                "execution outcome may be unknown"
+            )
+            self._stream_errors[agent_id] = error
+            for dispatch_id, future in tuple(self._pending.items()):
+                attempt_id = self._dispatch_attempts.get(dispatch_id)
+                command = self._commands.get(attempt_id)
+                if (
+                    command is not None
+                    and command.assignment.target_node_id == agent_id
+                    and not future.done()
+                ):
+                    future.set_exception(error)
+
+    def _record_completion(self, completion: AttemptCompletion) -> None:
+        if completion.dispatch_id in self._recorded_dispatches:
+            return
+        if (
+            asyncio.get_running_loop().time()
+            > self._dispatch_deadlines[completion.dispatch_id]
+        ):
+            # The deadline applies to the dispatch, not to when a caller starts
+            # receiving. Never turn a late result into a successful validation.
+            return
+        self._recorded_dispatches.add(completion.dispatch_id)
+        counter = self._completed_by_agent if completion.ok else self._failed_by_agent
+        counter[completion.agent_id] += 1
+        self._busy_time_by_agent[completion.agent_id] += completion.compute_time_ms
+        self._attempt_agents.pop(completion.attempt_id, None)
+        future = self._pending.get(completion.dispatch_id)
+        if future is not None:
+            if not future.done():
+                future.set_result(completion)
+        else:
+            self._buffered[completion.dispatch_id] = completion
 
 
 def _capabilities_to_proto(
@@ -340,11 +514,11 @@ def _node_from_proto(value: topology_pb2.NodeSpec) -> NodeSpec:
         memory_gb=value.memory_capacity_gb,
         bandwidth_mbps=value.network_bandwidth_mbps,
         base_latency_ms=value.base_latency_ms,
-        architecture=value.architecture if value.HasField("architecture") else "generic",
+        architecture=value.architecture
+        if value.HasField("architecture")
+        else "generic",
         battery_capacity_wh=(
-            value.battery_capacity_wh
-            if value.HasField("battery_capacity_wh")
-            else None
+            value.battery_capacity_wh if value.HasField("battery_capacity_wh") else None
         ),
         safety_capable=(
             value.safety_capable if value.HasField("safety_capable") else True
@@ -423,12 +597,10 @@ def _command_to_proto(command: DispatchCommand) -> runtime_pb2.DispatchCommand:
             workflow_pb2.PlacementConstraints(
                 pinned_node_id=placement.pinned_node_id,
                 allowed_node_kinds=[
-                    _NODE_KIND_TO_PROTO[item]
-                    for item in placement.allowed_node_kinds
+                    _NODE_KIND_TO_PROTO[item] for item in placement.allowed_node_kinds
                 ],
                 preferred_node_kinds=[
-                    _NODE_KIND_TO_PROTO[item]
-                    for item in placement.preferred_node_kinds
+                    _NODE_KIND_TO_PROTO[item] for item in placement.preferred_node_kinds
                 ],
                 required_capabilities=placement.required_capabilities,
                 allow_source_node=placement.allow_source_node,
@@ -493,8 +665,7 @@ def _command_to_proto(command: DispatchCommand) -> runtime_pb2.DispatchCommand:
             for item in command.transfer_reservations
         ],
         input_artifact_bindings=[
-            _binding_to_proto(item)
-            for item in command.input_artifact_bindings
+            _binding_to_proto(item) for item in command.input_artifact_bindings
         ],
         random_seed=command.seed,
         inject_failure=command.inject_failure,
@@ -551,9 +722,7 @@ def _completion_from_proto(
                 uri=item.uri,
                 checksum=item.checksum,
                 producer_port=(
-                    item.producer_port
-                    if item.HasField("producer_port")
-                    else "result"
+                    item.producer_port if item.HasField("producer_port") else "result"
                 ),
                 message_type=item.message_type,
             )

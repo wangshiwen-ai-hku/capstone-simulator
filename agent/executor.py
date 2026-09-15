@@ -1,0 +1,294 @@
+"""Business invocation boundary; the scheduler never imports workload algorithms."""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+from time import perf_counter
+from typing import Protocol
+
+from .artifacts import MAX_ARTIFACT_BYTES, canonical_json
+
+
+def _vla_worker_environment(worker_python: str) -> dict[str, str]:
+    """Build an isolated Python identity while preserving device runtime settings."""
+
+    environment = os.environ.copy()
+    worker_bin = Path(worker_python).parent
+    former_environment_bins = {
+        str(Path(value).expanduser() / "bin")
+        for name in ("VIRTUAL_ENV", "CONDA_PREFIX")
+        if (value := environment.get(name))
+    }
+    path_entries = [
+        item
+        for item in environment.get("PATH", "").split(os.pathsep)
+        if item and item != str(worker_bin) and item not in former_environment_bins
+    ]
+    for name in (
+        "PYTHONHOME",
+        "VIRTUAL_ENV",
+        "CONDA_DEFAULT_ENV",
+        "CONDA_PREFIX",
+        "CONDA_PROMPT_MODIFIER",
+        "CONDA_PYTHON_EXE",
+        "CONDA_SHLVL",
+        "_CE_CONDA",
+        "_CE_M",
+    ):
+        environment.pop(name, None)
+    worker_prefix = worker_bin.parent
+    if (worker_prefix / "pyvenv.cfg").is_file():
+        environment["VIRTUAL_ENV"] = str(worker_prefix)
+    environment.update(
+        {
+            "PATH": os.pathsep.join([str(worker_bin), *path_entries]),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "HF_DATASETS_OFFLINE": "1",
+            "TOKENIZERS_PARALLELISM": "false",
+        }
+    )
+    return environment
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    outputs: dict[str, dict]
+    elapsed_ms: float
+
+
+class WorkloadExecutor(Protocol):
+    ports: dict[str, dict[str, dict[str, str]]]
+
+    async def execute(
+        self, task_type: str, inputs: dict, seed: int
+    ) -> ExecutionResult: ...
+
+
+class NavigationExecutor:
+    """Run a fixed, bundled worker in a killable subprocess, not the RPC loop.
+
+    There is no arbitrary module/shell/command selection in dispatch messages.
+    Each invocation has its own process, so cancellation kills actual work.
+    """
+
+    def __init__(self) -> None:
+        from examples.hardware_workloads import PORT_TYPES
+
+        self.ports = PORT_TYPES
+        self.worker_python = sys.executable
+        self.worker_module = "examples.hardware_workloads.worker"
+        self.options: dict = {}
+
+    async def execute(self, task_type: str, inputs: dict, seed: int) -> ExecutionResult:
+        if task_type not in self.ports:
+            raise ValueError(f"unsupported business task: {task_type}")
+        request = canonical_json(
+            {
+                "task_type": task_type,
+                "inputs": inputs,
+                "seed": seed,
+                **({"options": self.options} if self.options else {}),
+            }
+        )
+        if len(request) > 4 * MAX_ARTIFACT_BYTES:
+            raise ValueError("business inputs exceed the invocation limit")
+        started = perf_counter()
+        process = await asyncio.create_subprocess_exec(
+            self.worker_python,
+            "-m",
+            self.worker_module,
+            cwd=Path(__file__).resolve().parents[1],
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+            env=getattr(self, "worker_environment", None),
+        )
+        try:
+            stdout, stderr = await process.communicate(request)
+        except BaseException:
+            if process.returncode is None:
+                # A native CUDA helper can be a child of the Python worker.
+                # Stop the whole isolated group so cancellation stops its work.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            await process.wait()
+            raise
+        elapsed_ms = (perf_counter() - started) * 1000
+        if process.returncode:
+            # Leave room for the prefix inside the Agent's 2,000-character
+            # error limit, retaining the worker's final diagnostic line.
+            detail = stderr.decode("utf-8", errors="replace")[-1800:]
+            raise ValueError(f"business worker failed ({process.returncode}): {detail}")
+        if len(stdout) > 4 * MAX_ARTIFACT_BYTES:
+            raise ValueError("business outputs exceed the invocation limit")
+        outputs = json.loads(stdout)
+        expected = self.ports[task_type]["outputs"]
+        if not isinstance(outputs, dict) or set(outputs) != set(expected):
+            raise ValueError("business output ports do not match the contract")
+        if any(not isinstance(value, dict) for value in outputs.values()):
+            raise ValueError("business output payloads must be JSON objects")
+        # Reject NaN/Infinity from a malformed worker before producing artifacts.
+        canonical_json(outputs)
+        return ExecutionResult(outputs, elapsed_ms)
+
+
+class VlaExecutor(NavigationExecutor):
+    """Fixed VLA worker; its optional ML environment is separate from gRPC.
+
+    Paths and interpreter are selected by the local operator at Agent startup,
+    never by a remote dispatch. CPU input/validation roles need no ML packages.
+    """
+
+    def __init__(
+        self,
+        role: str,
+        *,
+        worker_python: str | None = None,
+        observation_file: str | Path | None = None,
+        model_dir: str | Path | None = None,
+        device: str = "cuda:0",
+        repeats: int = 3,
+    ) -> None:
+        from examples.vla_workloads import PORT_TYPES
+
+        if role not in {"io", "cuda"}:
+            raise ValueError("VLA executor role must be io or cuda")
+        if not 1 <= repeats <= 20:
+            raise ValueError("VLA repeats must be between 1 and 20")
+        tasks = (
+            {"hil_vla_observe", "hil_vla_validate", "hil_cuda_validate"}
+            if role == "io"
+            else {"hil_cuda_smoke"}
+            | ({"hil_vla_infer"} if model_dir is not None else set())
+        )
+        self.ports = {name: PORT_TYPES[name] for name in tasks}
+        self.gpu_demands = {name: 1.0 for name in tasks} if role == "cuda" else {}
+        # Keep a virtualenv's python symlink intact. Resolving it to the base
+        # interpreter silently discards that environment's ML dependencies.
+        selected_python = (
+            Path(worker_python).expanduser().absolute()
+            if worker_python
+            else Path(sys.executable)
+        )
+        if not selected_python.is_file() or not os.access(selected_python, os.X_OK):
+            raise ValueError(f"worker_python is not an executable file: {selected_python}")
+        self.worker_python = str(selected_python)
+        self.worker_module = "examples.vla_workloads.worker"
+        self.options = {"device": device, "repeats": repeats}
+        self.worker_environment = _vla_worker_environment(self.worker_python)
+        for key, value in (
+            ("observation_file", observation_file),
+            ("model_dir", model_dir),
+        ):
+            if value is not None:
+                path = Path(value).resolve()
+                if not path.exists():
+                    raise ValueError(f"{key} does not exist: {path}")
+                self.options[key] = str(path)
+
+    async def probe_cuda(self) -> dict:
+        """Check the exact worker interpreter/device before advertising CUDA."""
+        process = await asyncio.create_subprocess_exec(
+            self.worker_python,
+            "-m",
+            self.worker_module,
+            cwd=Path(__file__).resolve().parents[1],
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+            env=getattr(self, "worker_environment", None),
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(
+                    canonical_json(
+                        {
+                            "task_type": "probe",
+                            "inputs": {},
+                            "seed": 0,
+                            "options": {
+                                "device": self.options["device"],
+                                "require_vla_stack": "model_dir" in self.options,
+                                **(
+                                    {"cuda_binary": self.options["cuda_binary"]}
+                                    if "cuda_binary" in self.options
+                                    else {}
+                                ),
+                            },
+                        }
+                    )
+                ),
+                timeout=60,
+            )
+        except BaseException:
+            if process.returncode is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            await process.wait()
+            raise
+        if process.returncode:
+            raise ValueError(
+                "CUDA preflight failed: " + stderr.decode(errors="replace")[-1800:]
+            )
+        if len(stdout) > 65536:
+            raise ValueError("CUDA preflight returned oversized metadata")
+        info = json.loads(stdout)["gpu_info"]
+        if not isinstance(info, dict) or info.get("available") is not True:
+            raise ValueError("worker did not verify a CUDA device")
+        return info
+
+
+class MixedExecutor(VlaExecutor):
+    """PC mapping/planning and Orin CPU acquisition/validation + native CUDA."""
+
+    def __init__(
+        self,
+        role: str,
+        *,
+        cuda_binary: str | Path | None = None,
+        device: str = "cuda:0",
+        repeats: int = 3,
+    ) -> None:
+        from examples.mixed_workloads import GPU_TASK_TYPE, PORT_TYPES
+
+        if role not in {"pc", "orin"}:
+            raise ValueError("mixed executor role must be pc or orin")
+        if type(repeats) is not int or not 1 <= repeats <= 20:
+            raise ValueError("CUDA repeats must be between 1 and 20")
+        if (
+            not isinstance(device, str)
+            or not device.startswith("cuda:")
+            or not device[5:].isdigit()
+        ):
+            raise ValueError("mixed executor requires a CUDA device such as cuda:0")
+        pc_tasks = {"hil_mixed_mapping", "hil_mixed_planning"}
+        tasks = pc_tasks if role == "pc" else set(PORT_TYPES) - pc_tasks
+        self.ports = {name: PORT_TYPES[name] for name in tasks}
+        self.gpu_demands = {GPU_TASK_TYPE: 1.0} if role == "orin" else {}
+        self.worker_python = sys.executable
+        self.worker_module = "examples.mixed_workloads.worker"
+        self.options = {"device": device, "repeats": repeats}
+        if role == "orin":
+            if cuda_binary is None:
+                raise ValueError(
+                    "mixed-orin requires --cuda-binary; run scripts.build_cuda_smoke first"
+                )
+            binary = Path(cuda_binary).expanduser().resolve()
+            if not binary.is_file():
+                raise ValueError(f"CUDA binary does not exist: {binary}")
+            self.options["cuda_binary"] = str(binary)

@@ -23,12 +23,68 @@ jobs:
           cache-dependency-path: |
             backend/requirements.txt
             backend/requirements-dev.txt
+            agent/requirements-hardware.txt
       - run: sudo apt-get update
       - run: sudo apt-get install -y protobuf-compiler
       - run: python -m pip install -r backend/requirements-dev.txt
-      - run: python -m ruff check agent backend evals mars scripts tests
-      - run: python -m compileall -q agent backend evals interfaces mars scripts tests
+      - run: python -m ruff check agent backend evals examples mars scripts tests
+      - run: python -m compileall -q agent backend evals examples interfaces mars scripts tests
       - run: python -m pytest -q
+
+  hardware-arm64:
+    # Native ARM64 checks portable CPU execution, not Jetson sensors/CUDA.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: agent/requirements-hardware.txt
+      - run: python -m pip install -r agent/requirements-hardware.txt pytest==8.3.4
+      - run: >-
+          python -m pytest -q
+          tests/test_hardware_workloads.py
+          tests/test_hardware_agent.py
+          tests/test_hardware_loop.py
+          tests/test_gpu_agent.py
+          tests/test_vla_workloads.py
+          tests/test_vla_preparation.py
+          tests/test_vla_loop.py
+          tests/test_mixed_workloads.py
+          tests/test_mixed_smoke.py
+          tests/test_native_cuda_smoke.py
+
+  cuda-compile:
+    # Compile native ARM64 host code and Orin SM87 kernels using CUDA 13.2.1.
+    # This runner has no Jetson GPU: compilation is NOT hardware acceptance.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    container: nvidia/cuda:13.2.1-devel-ubuntu24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: apt-get update
+      - run: apt-get install -y python3
+      - run: python3 -m scripts.build_cuda_smoke --compile-only
+      - name: Confirm the native probe refuses a runner without CUDA device access
+        run: |
+          python3 - <<'PY'
+          from examples.mixed_workloads.native import NativeCudaError, probe_cuda
+          try:
+              probe_cuda('.mars-hil/bin/inflate_cuda')
+          except NativeCudaError as error:
+              if 'cudaGetDeviceCount' not in str(error):
+                  raise
+              print('Expected: native runtime probe rejected unavailable CUDA; no GPU pass claimed.')
+          else:
+              raise SystemExit('This CPU-only CI runner unexpectedly reported a CUDA device.')
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cuda-compile-arm64-sm87
+          include-hidden-files: true
+          path: .mars-hil/bin/
 
   frontend:
     runs-on: ubuntu-latest

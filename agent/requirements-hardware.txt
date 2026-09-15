@@ -1,0 +1,4 @@
+# Agent, CPU workload subprocess and host telemetry. No backend, CUDA or ML stack.
+grpcio>=1.83,<2
+protobuf>=7.35.1,<8
+psutil>=5.9,<8
