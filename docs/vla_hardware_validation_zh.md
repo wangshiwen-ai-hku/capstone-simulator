@@ -17,9 +17,9 @@ SmolVLA 测试的闭环是 **PC 读取观测 → MARS 调度 → Orin CUDA 推�
 | 终端 | 机器 | 工作 | Python 环境 |
 | --- | --- | --- | --- |
 | 准备终端 | Orin | 安装 GPU 依赖、下载模型、导出观测 | `.venv-vla` |
-| O1 | Orin | GPU 执行 Agent，接单后自动启动推理子进程 | Agent 用 `.venv`，子进程用 `.venv-vla` |
-| P1 | PC | 读取观测、验证返回结果 | `.venv` |
-| P2 | PC | MARS 调度器，发起一次测试并保存报告 | `.venv` |
+| O1 | Orin | GPU 执行 Agent，接单后自动启动推理子进程 | Agent 用 `.venv-hil`，子进程用 `.venv-vla` |
+| P1 | PC | 读取观测、验证返回结果 | `.venv-hil` |
+| P2 | PC | MARS 调度器，发起一次测试并保存报告 | `.venv-hil` |
 
 PC 不需要 NVIDIA GPU、PyTorch 或 LeRobot。运行测试时只需保持 O1、P1 两个 Agent，P2 每次运行结束就退出。
 
@@ -47,14 +47,14 @@ git rev-parse HEAD
 
 已有仓库时进入实际目录，更新到包含 GPU/VLA 改动的提交；保留已有修改。确认两台 `git rev-parse HEAD` 完全一致，并存在 `scripts/vla_loop.py`。
 
-两台分别建立轻量 Agent 环境；如果 CPU 测试已经建好 `.venv`，直接使用即可：
+两台分别建立轻量 Agent 环境；如果已按 CPU / 原生 CUDA 指南建好 `.venv-hil`，直接使用即可：
 
 ```bash
 cd "$HOME/mars-hardware"
-python3 -m venv .venv
-.venv/bin/python -m pip install -r agent/requirements-hardware.txt
-.venv/bin/python -m agent.main --help
-.venv/bin/python -m scripts.vla_loop --help
+python3 -m venv .venv-hil
+.venv-hil/bin/python -m pip install -r agent/requirements-hardware.txt
+.venv-hil/bin/python -m agent.main --help
+.venv-hil/bin/python -m scripts.vla_loop --help
 ```
 
 JetPack 7.2.1 的系统 Python 是 3.12；PC 也建议使用 3.12。Agent 与 VLA worker 仍须使用两个独立环境。
@@ -113,7 +113,7 @@ python3 -m venv .venv-vla
 
 **不要把 `agent/requirements-hardware.txt` 和 `agent/requirements-vla.txt` 安装到同一个环境。** MARS 当前使用 protobuf 7；LeRobot 0.4.4 的依赖树要求较旧 protobuf。O1 的 Agent 与 GPU worker 通过受限的本机标准输入输出通信，因此两个环境可以各自保持依赖。
 
-已有独立 CUDA 环境时，也必须使用它的 Python 执行同一条 `scripts.install_vla` 检查，并把 O1 的 `--worker-python` 指向该解释器。该环境可以使用 LeRobot 0.4.4 声明范围内的其他 Torch/TorchVision 版本，但报告必须保存实际版本，不能把它描述为上表的精确基线。不要在 Agent 的 `.venv` 中安装模型依赖。
+已有独立 CUDA 环境时，也必须使用它的 Python 执行同一条 `scripts.install_vla` 检查，并把 O1 的 `--worker-python` 指向该解释器。该环境可以使用 LeRobot 0.4.4 声明范围内的其他 Torch/TorchVision 版本，但报告必须保存实际版本，不能把它描述为上表的精确基线。不要在 Agent 的 `.venv-hil` 中安装模型依赖。
 
 ### 3.3 再次只读检查
 
@@ -173,7 +173,7 @@ scp YOUR_ORIN_USER@192.168.1.20:~/mars-hardware/.mars-vla/observation.json \
 
 ```bash
 cd "$HOME/mars-hardware"
-.venv/bin/python -m agent.main \
+.venv-hil/bin/python -m agent.main \
   --executor vla-cuda \
   --agent-id robot_1 \
   --kind robot \
@@ -197,7 +197,7 @@ cd "$HOME/mars-hardware"
 
 ```bash
 cd "$HOME/mars-hardware"
-.venv/bin/python -m agent.main \
+.venv-hil/bin/python -m agent.main \
   --executor vla-io \
   --agent-id edge_pc \
   --kind edge \
@@ -215,7 +215,7 @@ cd "$HOME/mars-hardware"
 
 ```bash
 cd "$HOME/mars-hardware"
-.venv/bin/python -m scripts.vla_loop \
+.venv-hil/bin/python -m scripts.vla_loop \
   --workload cuda \
   --agent robot_1=192.168.1.20:50051 \
   --agent edge_pc=127.0.0.1:50051 \
@@ -228,7 +228,7 @@ cd "$HOME/mars-hardware"
 Orin 实际执行完整 FP32 矩阵乘法，检查全部结果，再把结果样本传回 PC；PC 用独立公式验证样本。CUDA 通过后运行真实 VLA：
 
 ```bash
-.venv/bin/python -m scripts.vla_loop \
+.venv-hil/bin/python -m scripts.vla_loop \
   --workload smolvla \
   --agent robot_1=192.168.1.20:50051 \
   --agent edge_pc=127.0.0.1:50051 \
@@ -249,8 +249,8 @@ Orin 实际执行完整 FP32 矩阵乘法，检查全部结果，再把结果样
 ## 8. 如何判定成功
 
 ```bash
-.venv/bin/python -m json.tool .mars-vla/cuda-01.json
-.venv/bin/python -m json.tool .mars-vla/smolvla-01.json
+.venv-hil/bin/python -m json.tool .mars-vla/cuda-01.json
+.venv-hil/bin/python -m json.tool .mars-vla/smolvla-01.json
 ```
 
 不要只看“Agent 启动成功”或日志里出现 `cuda`。完整验收应同时满足：

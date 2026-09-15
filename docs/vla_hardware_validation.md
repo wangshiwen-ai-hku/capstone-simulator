@@ -24,7 +24,7 @@ Assume Linux on both hosts, checkout at `$HOME/mars-hardware`, PC `192.168.1.10`
 | P1 | PC | Observation and validation Agent |
 | P2 | PC | Coordinator and one-run report |
 
-The PC requires no GPU or ML libraries. Each host uses `.venv` for the lightweight MARS Agent. Orin additionally uses `.venv-vla` for CUDA/LeRobot. These must remain separate: MARS requires protobuf 7, while LeRobot's WandB dependency requires protobuf below 7.
+The PC requires no GPU or ML libraries. Each host uses `.venv-hil` for the lightweight MARS Agent. Orin additionally uses `.venv-vla` for CUDA/LeRobot. These must remain separate: MARS requires protobuf 7, while LeRobot's WandB dependency requires protobuf below 7.
 
 ## 2. Common Agent setup
 
@@ -36,13 +36,13 @@ git clone --branch codex/grpc-hardware-loop \
   "$HOME/mars-hardware"
 cd "$HOME/mars-hardware"
 git rev-parse HEAD
-python3 -m venv .venv
-.venv/bin/python -m pip install -r agent/requirements-hardware.txt
-.venv/bin/python -m agent.main --help
-.venv/bin/python -m scripts.vla_loop --help
+python3 -m venv .venv-hil
+.venv-hil/bin/python -m pip install -r agent/requirements-hardware.txt
+.venv-hil/bin/python -m agent.main --help
+.venv-hil/bin/python -m scripts.vla_loop --help
 ```
 
-An existing checkout must be updated to the GPU/VLA implementation, preserving local changes. Compare commit IDs on both hosts. Reuse the CPU workflow's `.venv` if already prepared. JetPack 7.2.1 supplies Python 3.12; Python 3.12 is also recommended on the PC. Keep the lightweight Agent and VLA worker in separate environments.
+An existing checkout must be updated to the GPU/VLA implementation, preserving local changes. Compare commit IDs on both hosts. Reuse the CPU/native-CUDA workflow's `.venv-hil` if already prepared. JetPack 7.2.1 supplies Python 3.12; Python 3.12 is also recommended on the PC. Keep the lightweight Agent and VLA worker in separate environments.
 
 ## 3. Verify the Orin platform and create the VLA environment
 
@@ -144,7 +144,7 @@ Stop any old navigation Agent using port `50051`, then run:
 
 ```bash
 cd "$HOME/mars-hardware"
-.venv/bin/python -m agent.main \
+.venv-hil/bin/python -m agent.main \
   --executor vla-cuda \
   --agent-id robot_1 \
   --kind robot \
@@ -164,7 +164,7 @@ For a CUDA-only check, omit `--model-dir` and skip asset preparation. That Agent
 
 ```bash
 cd "$HOME/mars-hardware"
-.venv/bin/python -m agent.main \
+.venv-hil/bin/python -m agent.main \
   --executor vla-io \
   --agent-id edge_pc \
   --kind edge \
@@ -182,7 +182,7 @@ First check real CUDA multiplication and its independently checked result:
 
 ```bash
 cd "$HOME/mars-hardware"
-.venv/bin/python -m scripts.vla_loop \
+.venv-hil/bin/python -m scripts.vla_loop \
   --workload cuda \
   --agent robot_1=192.168.1.20:50051 \
   --agent edge_pc=127.0.0.1:50051 \
@@ -195,7 +195,7 @@ cd "$HOME/mars-hardware"
 Then execute pretrained SmolVLA:
 
 ```bash
-.venv/bin/python -m scripts.vla_loop \
+.venv-hil/bin/python -m scripts.vla_loop \
   --workload smolvla \
   --agent robot_1=192.168.1.20:50051 \
   --agent edge_pc=127.0.0.1:50051 \
@@ -216,7 +216,7 @@ Use new output names for subsequent runs. Existing reports, including failed run
 ## 8. Acceptance evidence and interpretation
 
 ```bash
-.venv/bin/python -m json.tool .mars-vla/smolvla-01.json
+.venv-hil/bin/python -m json.tool .mars-vla/smolvla-01.json
 ```
 
 Confirm all of the following:
@@ -250,7 +250,7 @@ Confirm all of the following:
 
 CUDA-event timing measures the GPU stream. Synchronized wall timing measures the completed inference call. Model loading/preprocessing is recorded separately; neither measure is the entire network workflow duration. PyTorch allocator memory is not total Jetson system memory. Scheduling profiles are bootstrap estimates; reported CUDA timings and allocations come from execution. Energy and scheduling superiority are not established by this test.
 
-For failures, inspect O1 first. Common causes are a CPU-only Torch install, incompatible TorchVision, a worker path pointing at `.venv`, missing or corrupt model files, failed AV1 decoding during sample preparation, and a missing observation on the PC. `worker package lookup is not isolated` means `PYTHONHOME`, `PYTHONPATH`, or user site-packages can contaminate the installer; unset the overrides and rerun through `.venv-vla/bin/python`. `JetPack 7.1.2 is not an NVIDIA release` means the runner rejected that profile name; read `/etc/nv_tegra_release` and use `--require-jetpack 7.2.1` only when it says R39 revision 2.1. A `no_test_fixtures` failure means the result is developer test data rather than hardware evidence. A `cuda_preflight_matches_execution` failure means startup and task execution used different devices or software stacks. `worker_python_for_jetpack` or `smolvla_framework_versions` means the worker is not Python 3.12 or its Torch stack is outside the supported range. Correct the underlying environment before rerunning; do not remove verification to conceal it.
+For failures, inspect O1 first. Common causes are a CPU-only Torch install, incompatible TorchVision, a worker path pointing at `.venv-hil`, missing or corrupt model files, failed AV1 decoding during sample preparation, and a missing observation on the PC. `worker package lookup is not isolated` means `PYTHONHOME`, `PYTHONPATH`, or user site-packages can contaminate the installer; unset the overrides and rerun through `.venv-vla/bin/python`. `JetPack 7.1.2 is not an NVIDIA release` means the runner rejected that profile name; read `/etc/nv_tegra_release` and use `--require-jetpack 7.2.1` only when it says R39 revision 2.1. A `no_test_fixtures` failure means the result is developer test data rather than hardware evidence. A `cuda_preflight_matches_execution` failure means startup and task execution used different devices or software stacks. `worker_python_for_jetpack` or `smolvla_framework_versions` means the worker is not Python 3.12 or its Torch stack is outside the supported range. Correct the underlying environment before rerunning; do not remove verification to conceal it.
 
 `tegrastats` can provide an additional view of Orin load, but sampling can miss short tasks. Keep the task's CUDA measurements and result checks as the primary records.
 
